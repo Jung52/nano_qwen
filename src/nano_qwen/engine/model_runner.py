@@ -5,6 +5,7 @@ from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
 from nanovllm.config import Config
+from nanovllm.engine.decode_init import prepare_decode as prepare_decode_kernel
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
@@ -57,6 +58,7 @@ class ModelRunner:
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
+        self.allocate_decode_buffers()
         self.input_batch = InputBatch(config.max_num_seqs) if rank == 0 else None
         self._pending_logits = None
         self._pending_temperatures = None
@@ -154,6 +156,21 @@ class ModelRunner:
                 module.v_cache = self.kv_cache[1, layer_id]
                 layer_id += 1
 
+    def allocate_decode_buffers(self):
+        size = self.config.max_num_seqs
+        self.decode_cpu = {
+            "last_token_ids": torch.empty(size, dtype=torch.int64, device="cpu", pin_memory=True),
+            "seq_lens": torch.empty(size, dtype=torch.int32, device="cpu", pin_memory=True),
+            "last_block_ids": torch.empty(size, dtype=torch.int32, device="cpu", pin_memory=True),
+        }
+        self.decode_gpu = {name: torch.empty_like(tensor, device="cuda") for name, tensor in self.decode_cpu.items()}
+        self.decode_gpu.update({
+            "input_ids": torch.empty(size, dtype=torch.int64, device="cuda"),
+            "positions": torch.empty(size, dtype=torch.int64, device="cuda"),
+            "slot_mapping": torch.empty(size, dtype=torch.int32, device="cuda"),
+            "context_lens": torch.empty(size, dtype=torch.int32, device="cuda"),
+        })
+
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
@@ -204,19 +221,24 @@ class ModelRunner:
         return input_ids, positions
 
     def prepare_decode(self, seqs: list[Sequence]):
-        input_ids = []
-        positions = []
-        slot_mapping = []
-        context_lens = []
-        for seq in seqs:
-            input_ids.append(seq.last_token)
-            positions.append(len(seq) - 1)
-            context_lens.append(len(seq))
-            slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        bs = len(seqs)
+        cpu = self.decode_cpu
+        for i, seq in enumerate(seqs):
+            cpu["last_token_ids"][i] = seq.last_token
+            cpu["seq_lens"][i] = len(seq)
+            cpu["last_block_ids"][i] = seq.block_table[-1]
+        for name, tensor in cpu.items():
+            self.decode_gpu[name][:bs].copy_(tensor[:bs], non_blocking=True)
+        gpu = self.decode_gpu
+        prepare_decode_kernel(
+            gpu["last_token_ids"], gpu["seq_lens"], gpu["last_block_ids"],
+            gpu["input_ids"], gpu["positions"], gpu["context_lens"], gpu["slot_mapping"],
+            bs, self.block_size,
+        )
+        input_ids = gpu["input_ids"][:bs]
+        positions = gpu["positions"][:bs]
+        slot_mapping = gpu["slot_mapping"][:bs]
+        context_lens = gpu["context_lens"][:bs]
         block_tables = self.prepare_block_tables(seqs)
         set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
         return input_ids, positions
