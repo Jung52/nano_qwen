@@ -13,6 +13,33 @@ from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
 
 
+class AsyncOutput:
+    """Handle for an in-flight or recently completed sample.
+
+    ``get_output()`` blocks only until the runner's device-to-host copy
+    finishes. The engine may hold this handle across multiple ``step()``
+    calls to overlap D2H with the next forward.
+    """
+
+    def __init__(
+        self,
+        seqs: list[Sequence],
+        is_prefill: bool,
+        num_tokens: int,
+        token_ids_pin: torch.Tensor,
+        copy_event: torch.cuda.Event,
+    ) -> None:
+        self.seqs = seqs
+        self.is_prefill = is_prefill
+        self.num_tokens = num_tokens
+        self._token_ids_pin = token_ids_pin
+        self._copy_event = copy_event
+
+    def get_output(self) -> list[int]:
+        self._copy_event.synchronize()
+        return self._token_ids_pin[: self.num_tokens].tolist()
+
+
 class InputBatch:
     """Minimal persistent request-to-slot mapping for nano-vllm."""
 
@@ -28,6 +55,14 @@ class InputBatch:
                 self.seq_id_to_slot[seq.seq_id] = slot
             self.seqs[slot] = seq
         return [self.seqs[self.seq_id_to_slot[seq.seq_id]] for seq in seqs]
+
+    def remove_finished(self):
+        for seq_id in list(self.seq_id_to_slot):
+            slot = self.seq_id_to_slot[seq_id]
+            seq = self.seqs[slot]
+            if seq is not None and seq.is_finished:
+                self.seqs[slot] = None
+                del self.seq_id_to_slot[seq_id]
 
     def remove(self, seq_id: int):
         slot = self.seq_id_to_slot.pop(seq_id, None)
@@ -58,6 +93,13 @@ class ModelRunner:
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
+        self.output_copy_stream = torch.cuda.Stream()
+        self._output_pin_bufs = [
+            torch.empty(config.max_num_batched_tokens, dtype=torch.int64, pin_memory=True)
+            for _ in range(2)
+        ]
+        self._output_buf_idx = 0
+        self._forward_done = torch.cuda.Event()
         self.allocate_decode_buffers()
         self.input_batch = InputBatch(config.max_num_seqs) if rank == 0 else None
         self._pending_logits = None
@@ -133,7 +175,9 @@ class ModelRunner:
         for seq in seqs:
             seq.num_scheduled_tokens = seq_len
         self.execute_model(seqs, True)
-        self.sample_tokens()
+        async_output = self.sample_tokens()
+        if async_output is not None:
+            async_output.get_output()
         torch.cuda.empty_cache()
 
     def allocate_kv_cache(self):
@@ -273,25 +317,49 @@ class ModelRunner:
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def execute_model(self, seqs: list[Sequence], is_prefill: bool):
+        if getattr(self, '_forward_in_flight', False):
+            self._forward_done.synchronize()  #waiting for the previous forward to finish
+
         if self.input_batch is not None:
+            self.input_batch.remove_finished()
             seqs = self.input_batch.update(seqs)
         input_ids, positions, temperatures = self.prepare_inputs(seqs, is_prefill)
         self._pending_logits = self.run_model(input_ids, positions, is_prefill)
         self._pending_temperatures = temperatures
         self._pending_seqs = seqs
         self._pending_is_prefill = is_prefill
+        self._forward_done.record(torch.cuda.current_stream())
+        self._forward_in_flight = True
 
-    def sample_tokens(self) -> list[int] | None:
-        token_ids = self.sampler(self._pending_logits, self._pending_temperatures).tolist() if self.rank == 0 else None
-        if self.rank == 0:
-            for seq, token_id in zip(self._pending_seqs, token_ids):
-                if self._pending_is_prefill and seq.num_cached_tokens + seq.num_scheduled_tokens < seq.num_tokens:
-                    continue
-                if (not seq.ignore_eos and token_id == self.config.eos) or seq.num_completion_tokens + 1 == seq.max_tokens:
-                    self.input_batch.remove(seq.seq_id)
+    def sample_tokens(self) -> AsyncOutput | None:
+        if self.rank != 0:
+            self._pending_logits = self._pending_temperatures = self._pending_seqs = None
+            reset_context()
+            return None
+
+        token_ids = self.sampler(self._pending_logits, self._pending_temperatures)
+        num_tokens = token_ids.numel()
+        sample_done = torch.cuda.Event()
+        sample_done.record(torch.cuda.current_stream())
+
+        output_buf = self._output_pin_bufs[self._output_buf_idx]
+        self._output_buf_idx = (self._output_buf_idx + 1) % len(self._output_pin_bufs)
+
+        with torch.cuda.stream(self.output_copy_stream):
+            self.output_copy_stream.wait_event(sample_done)
+            output_buf[:num_tokens].copy_(token_ids, non_blocking=True)
+            copy_done = torch.cuda.Event()
+            copy_done.record(self.output_copy_stream)
+
+        seqs = self._pending_seqs
+        is_prefill = self._pending_is_prefill
         self._pending_logits = self._pending_temperatures = self._pending_seqs = None
         reset_context()
-        return token_ids
+        return AsyncOutput(seqs, is_prefill, num_tokens, output_buf, copy_done)
+
+    def remove_request(self, seq_id: int):
+        if self.input_batch is not None:
+            self.input_batch.remove(seq_id)
 
     @torch.inference_mode()
     def capture_cudagraph(self):
