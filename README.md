@@ -17,7 +17,7 @@ trying to keep the implementation small and easy to understand.
 - [x] Separate `prepare / execute / sample`
 - [x] Persistent InputBatch
 - [x] Async-first execution
-- [ ] GPU-native input preparation
+- [x] GPU-native decode input preparation
 - [ ] Async scheduling / CPU-GPU overlap
 
 ### 2. Qwen3.5
