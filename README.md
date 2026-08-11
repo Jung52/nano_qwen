@@ -16,7 +16,7 @@ trying to keep the implementation small and easy to understand.
 ### 1. ModelRunnerV2
 - [x] Separate `prepare / execute / sample`
 - [x] Persistent InputBatch
-- [ ] Async-first execution
+- [x] Async-first execution
 - [ ] GPU-native input preparation
 - [ ] Async scheduling / CPU-GPU overlap
 
