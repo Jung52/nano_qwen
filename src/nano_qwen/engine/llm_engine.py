@@ -49,7 +49,6 @@ class LLMEngine:
         )
         self.config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(self.config)
-        self._prev_async_output = None
         atexit.register(self.exit)
 
     def exit(self):
@@ -64,49 +63,38 @@ class LLMEngine:
             prompt = self.tokenizer.encode(prompt)
         self.scheduler.add(Sequence(prompt, sampling_params))
 
-    def step(self, final: bool = False):
-        if final:
-            seqs, is_prefill, num_tokens = [], False, 0
-            next_async_output = None
-        else:
-            seqs, is_prefill = self.scheduler.schedule()
-            num_tokens = (
-                sum(seq.num_scheduled_tokens for seq in seqs)
-                if is_prefill
-                else -len(seqs)
-            )
+    def step(self):
+        seqs, is_prefill = self.scheduler.schedule()
+        num_tokens = (
+            sum(seq.num_scheduled_tokens for seq in seqs)
+            if is_prefill
+            else -len(seqs)
+        )
 
-            if seqs:
-                if getattr(self.model_runner, '_forward_in_flight', False):
-                    self.model_runner._forward_done.synchronize()
-                self.model_runner.call("execute_model", seqs, is_prefill)
-                next_async_output = self.model_runner.call("sample_tokens")
-            else:
-                next_async_output = None
+        self.model_runner.call("execute_model", seqs, is_prefill)
+        async_output = self.model_runner.call("sample_tokens")
+        assert async_output is not None
+        token_ids = async_output.get_output()
 
-        prev_output = self._prev_async_output
-        if prev_output is not None:
-            token_ids = prev_output.get_output()
-            prev_seqs = prev_output.seqs
-            prev_is_prefill = prev_output.is_prefill
+        for seq, token_id in zip(seqs, token_ids):
+            if (
+                is_prefill
+                and seq.num_cached_tokens + seq.num_scheduled_tokens
+                < seq.num_tokens
+            ):
+                continue
+            if (
+                (not seq.ignore_eos and token_id == self.config.eos)
+                or seq.num_completion_tokens + 1 == seq.max_tokens
+            ):
+                self.model_runner.call("remove_request", seq.seq_id)
 
-            if token_ids is not None:
-                for seq, token_id in zip(prev_seqs, token_ids):
-                    if prev_is_prefill and seq.num_cached_tokens + seq.num_scheduled_tokens < seq.num_tokens:
-                        continue
-                    if (not seq.ignore_eos and token_id == self.config.eos) or seq.num_completion_tokens + 1 == seq.max_tokens:
-                        self.model_runner.call("remove_request", seq.seq_id)
-
-            self.scheduler.postprocess(prev_seqs, token_ids, prev_is_prefill)
-            outputs = [
-                (seq.seq_id, seq.completion_token_ids)
-                for seq in prev_seqs
-                if seq.is_finished
-            ]
-        else:
-            outputs = []
-
-        self._prev_async_output = next_async_output if not final else None
+        self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        outputs = [
+            (seq.seq_id, seq.completion_token_ids)
+            for seq in seqs
+            if seq.is_finished
+        ]
         return outputs, num_tokens
 
     def is_finished(self) -> bool:
@@ -150,11 +138,6 @@ class LLMEngine:
             for seq_id, token_ids in output:
                 outputs[seq_id] = token_ids
                 pbar.update(1)
-
-        output, _ = self.step(final=True)
-        for seq_id, token_ids in output:
-            outputs[seq_id] = token_ids
-            pbar.update(1)
 
         pbar.close()
 
