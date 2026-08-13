@@ -5,13 +5,14 @@ from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
 from nanovllm.config import Config
-from nanovllm.engine.async_output import AsyncModelOutput
-from nanovllm.engine.decode_init import prepare_decode as prepare_decode_kernel
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
+
+from .async_output import AsyncModelOutput
+from .decode_init import prepare_decode as prepare_decode_kernel
 
 
 class InputBatch:
@@ -41,12 +42,10 @@ class InputBatch:
         return [self.seq_id_to_slot[seq.seq_id] for seq in seqs]
 
     def remove_finished(self):
-        for seq_id in list(self.seq_id_to_slot):
-            slot = self.seq_id_to_slot[seq_id]
+        for seq_id, slot in list(self.seq_id_to_slot.items()):
             seq = self.seqs[slot]
             if seq is not None and seq.is_finished:
-                self.seqs[slot] = None
-                del self.seq_id_to_slot[seq_id]
+                self.remove(seq_id)
 
     def remove(self, seq_id: int):
         slot = self.seq_id_to_slot.pop(seq_id, None)
@@ -78,35 +77,35 @@ class ModelRunner:
         load_model(self.model, config.model)
         self.sampler = Sampler()
         self.output_copy_stream = torch.cuda.Stream()
-        # Double-buffered D2H: the handle from step N is consumed only after
-        # step N+1 has been launched, so the copy for N+1 must not overwrite
-        # the buffer still referenced by the previous handle.
         self._output_pin_bufs = [
-            torch.empty(config.max_num_seqs, dtype=torch.int64, pin_memory=True)
+            torch.empty(
+                config.max_num_seqs,
+                dtype=torch.int64,
+                device="cpu",
+                pin_memory=True,
+            )
+            for _ in range(2) # Double-buffered CPU output buffers for asynchronous D2H copy.
+        ]
+        self._output_events = [
+            torch.cuda.Event(blocking=True)
             for _ in range(2)
         ]
-        self._output_events = [torch.cuda.Event() for _ in range(2)]
         self._output_buf_idx = 0
-        # Plan A: sampled tokens stay resident on the GPU.  sample_tokens()
-        # scatters token_ids back into ``sampled_token_ids_gpu`` at the request
-        # slots, and the Triton decode preparation kernel reads input_ids from
-        # this buffer directly (no CPU round-trip through ``seq.last_token``).
         self.sampled_token_ids_gpu = torch.empty(
             config.max_num_seqs, dtype=torch.int64, device="cuda",
         )
         # MRV2-style idx_mapping: batch_idx -> persistent request slot.
         self.batch_slots_gpu = torch.empty(
-            config.max_num_seqs, dtype=torch.int32, device="cuda",
+            config.max_num_seqs, dtype=torch.int64, device="cuda",
         )
         self.allocate_decode_buffers()
-        self.input_batch = InputBatch(config.max_num_seqs) if rank == 0 else None
+        self.input_batch = InputBatch(config.max_num_seqs)
         self._pending_logits = None
         self._pending_temperatures = None
         self._pending_seqs = None
         self._pending_is_prefill = False
         self.warmup_model()
-        if self.input_batch is not None:
-            self.input_batch.clear()
+        self.input_batch.clear()
         self.allocate_kv_cache()
         if not self.enforce_eager:
             self.capture_cudagraph()
@@ -314,16 +313,26 @@ class ModelRunner:
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def execute_model(self, seqs: list[Sequence], is_prefill: bool):
-        if self.input_batch is not None:
-            self.input_batch.remove_finished()
-            seqs, new_entries = self.input_batch.update(seqs)
-            # Seed the persistent sampled-token slot for newly admitted
-            # requests (first decode input), one small H2D per new request.
+        self.input_batch.remove_finished()
+        seqs, new_entries = self.input_batch.update(seqs)
+        slots = self.input_batch.slots_for(seqs)
+
+        if self.rank == 0:
             for seq, slot in new_entries:
                 self.sampled_token_ids_gpu[slot] = seq.last_token
-            slots = self.input_batch.slots_for(seqs)
-            slots_t = torch.tensor(slots, dtype=torch.int32, pin_memory=True)
-            self.batch_slots_gpu[:len(seqs)].copy_(slots_t, non_blocking=True)
+        else:
+            # Non-zero TP ranks do not run the sampler, so refresh their
+            # per-request token slots from the synchronized Sequence state.
+            for seq, slot in zip(seqs, slots):
+                self.sampled_token_ids_gpu[slot] = seq.last_token
+
+        slots_t = torch.tensor(
+            slots,
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=True,
+        )
+        self.batch_slots_gpu[:len(seqs)].copy_(slots_t, non_blocking=True) #copy current batch slots to GPU for kernel access
 
         input_ids, positions, temperatures = self.prepare_inputs(seqs, is_prefill)
         self._pending_logits = self.run_model(input_ids, positions, is_prefill)
@@ -340,40 +349,38 @@ class ModelRunner:
             reset_context()
             return None
 
-        token_ids = self.sampler(self._pending_logits, self._pending_temperatures)
+        logits = self._pending_logits
         seqs = self._pending_seqs
         is_prefill = self._pending_is_prefill
         bs = len(seqs)
-        slots = self.batch_slots_gpu[:bs]
 
-        # Keep sampled tokens resident on the GPU: scatter them back into the
-        # persistent per-slot buffer so the next decode reads them directly.
+        # Prefill produces one logits row per scheduled token. Sampling only
+        # uses the final scheduled position of each request.
         if is_prefill:
-            # Prefill samples one token per scheduled position; keep the first
-            # one of each request (the token postprocess consumes).
-            offsets = [0]
+            last_indices = []
+            offset = 0
             for seq in seqs:
-                offsets.append(offsets[-1] + seq.num_scheduled_tokens)
-            first_tokens = token_ids[torch.tensor(offsets[:-1], dtype=torch.int64, device="cuda")]
-            self.sampled_token_ids_gpu.scatter_(0, slots, first_tokens)
-        else:
-            self.sampled_token_ids_gpu.scatter_(0, slots, token_ids)
+                offset += seq.num_scheduled_tokens
+                last_indices.append(offset - 1)
+            last_indices_gpu = torch.tensor(
+                last_indices,
+                dtype=torch.int64,
+                device=logits.device,
+            )
+            logits = logits.index_select(0, last_indices_gpu)
 
-        num_tokens = token_ids.numel()
-        sample_done = torch.cuda.Event()
-        sample_done.record(torch.cuda.current_stream())
+        token_ids = self.sampler(logits, self._pending_temperatures)
+        slots = self.batch_slots_gpu[:bs]
+        self.sampled_token_ids_gpu.scatter_(0, slots, token_ids)#同一组token写入gpu
 
-        # Double-buffered D2H: the handle from step N is consumed only after
-        # step N+1 has been launched, so the copy for N+1 must not overwrite
-        # the buffer still referenced by the previous handle.
         buf_idx = self._output_buf_idx
-        self._output_buf_idx ^= 1
-        output_buf = self._output_pin_bufs[buf_idx][:num_tokens]
+        self._output_buf_idx ^= 1 #ping-pong buffer index, switch between 0 and 1 for double buffering
+        output_buf = self._output_pin_bufs[buf_idx][:bs] 
         ready_event = self._output_events[buf_idx]
 
         self.output_copy_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(self.output_copy_stream):
-            output_buf.copy_(token_ids, non_blocking=True)
+            output_buf.copy_(token_ids, non_blocking=True) #同一组buffer写入cpu
             ready_event.record(self.output_copy_stream)
 
         self._pending_logits = None
@@ -381,11 +388,10 @@ class ModelRunner:
         self._pending_seqs = None
         self._pending_is_prefill = False
         reset_context()
-        return AsyncModelOutput(seqs, is_prefill, output_buf, ready_event)
+        return AsyncModelOutput(token_ids, output_buf, ready_event)
 
     def remove_request(self, seq_id: int):
-        if self.input_batch is not None:
-            self.input_batch.remove(seq_id)
+        self.input_batch.remove(seq_id)
 
     @torch.inference_mode()
     def capture_cudagraph(self):
