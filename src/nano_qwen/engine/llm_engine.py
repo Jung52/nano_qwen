@@ -1,4 +1,5 @@
 import atexit
+from collections import deque
 from dataclasses import fields
 from time import perf_counter
 
@@ -53,6 +54,10 @@ class LLMEngine:
         )
         self.config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(self.config)
+        # MRV2 async batch queue: up to max_concurrent_batches batches in
+        # flight, CPU runs ahead of GPU by N-1 steps (core.py:622-736).
+        self.max_concurrent_batches = 2
+        self.batch_queue: deque[tuple[list[Sequence], bool, int, object]] = deque()
         atexit.register(self.exit)
 
     def exit(self):
@@ -68,17 +73,32 @@ class LLMEngine:
         self.scheduler.add(Sequence(prompt, sampling_params))
 
     def step(self):
-        """Run one complete schedule, execute, sample and postprocess step."""
-        seqs, is_prefill = self.scheduler.schedule()
-        num_tokens = (
-            sum(seq.num_scheduled_tokens for seq in seqs)
-            if is_prefill
-            else -len(seqs)
-        )
+        """MRV2 async scheduling step with batch queue (core.py:622-736).
 
-        self.model_runner.call("execute_model", seqs, is_prefill)
-        async_output = self.model_runner.call("sample_tokens")
-        assert async_output is not None
+        Phase 1 (dispatch): while the queue has room, schedule a batch and
+        enqueue execute_model + sample_tokens back-to-back (both non-blocking).
+        Phase 2 (consume): pop the oldest batch and block only on its D2H
+        event, then postprocess. Zombie seqs are handled by Scheduler.in_flight.
+        """
+        # Phase 1: fill the queue (never blocks).
+        while len(self.batch_queue) < self.max_concurrent_batches:
+            seqs, is_prefill = self.scheduler.schedule()
+            if not seqs:
+                break
+            num_tokens = (
+                sum(seq.num_scheduled_tokens for seq in seqs)
+                if is_prefill
+                else -len(seqs)
+            )
+            self.model_runner.call("execute_model", seqs, is_prefill)
+            async_output = self.model_runner.call("sample_tokens")
+            assert async_output is not None
+            self.batch_queue.append((seqs, is_prefill, num_tokens, async_output))
+
+        # Phase 2: consume the oldest batch.
+        if not self.batch_queue:
+            return [], 0
+        seqs, is_prefill, num_tokens, async_output = self.batch_queue.popleft()
         token_ids = async_output.get_output()
 
         for seq, token_id in zip(seqs, token_ids):
@@ -103,7 +123,7 @@ class LLMEngine:
         return outputs, num_tokens
 
     def is_finished(self) -> bool:
-        return self.scheduler.is_finished()
+        return self.scheduler.is_finished() and not self.batch_queue
 
     def generate(
         self,

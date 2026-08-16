@@ -1,4 +1,6 @@
 import pickle
+from contextlib import contextmanager
+
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -91,6 +93,10 @@ class ModelRunner:
             for _ in range(2)
         ]
         self._output_buf_idx = 0
+        # MRV2-style input-prep protection: the prior step's async H2D
+        # transfers must be consumed before this step reuses the same
+        # CPU/GPU staging buffers. Mirrors vLLM's synchronize_input_prep.
+        self.prepare_inputs_event = torch.cuda.Event(blocking=True)
         self.sampled_token_ids_gpu = torch.empty(
             config.max_num_seqs, dtype=torch.int64, device="cuda",
         )
@@ -100,10 +106,10 @@ class ModelRunner:
         )
         self.allocate_decode_buffers()
         self.input_batch = InputBatch(config.max_num_seqs)
-        self._pending_logits = None
-        self._pending_temperatures = None
-        self._pending_seqs = None
-        self._pending_is_prefill = False
+        # Single pending sampling state: one batch is dispatched per step
+        # (depth-1 async), so a single slot holds the logits/temps/seqs the
+        # immediately-following sample_tokens call will consume.
+        self._pending: tuple | None = None
         self.warmup_model()
         self.input_batch.clear()
         self.allocate_kv_cache()
@@ -211,6 +217,22 @@ class ModelRunner:
             "context_lens": torch.empty(size, dtype=torch.int32, device="cuda"),
         })
 
+    @contextmanager
+    def synchronize_input_prep(self):
+        """Ensure the prior step's async H2D transfers have been consumed
+        before this step reuses the same staging buffers (MRV2
+        synchronize_input_prep, gpu_model_runner.py:3942-3956).
+
+        Safe under the current synchronous step loop (get_output() already
+        forces D2H completion), but required once prep starts overlapping
+        with a prior forward.
+        """
+        self.prepare_inputs_event.synchronize()
+        try:
+            yield
+        finally:
+            self.prepare_inputs_event.record()
+
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
@@ -289,8 +311,9 @@ class ModelRunner:
         return temperatures
 
     def prepare_inputs(self, seqs: list[Sequence], is_prefill: bool):
-        input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
-        temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+        with self.synchronize_input_prep():
+            input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
+            temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         return input_ids, positions, temperatures
 
     @torch.inference_mode()
@@ -312,7 +335,13 @@ class ModelRunner:
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
-    def execute_model(self, seqs: list[Sequence], is_prefill: bool):
+    def execute_model(self, seqs: list[Sequence], is_prefill: bool) -> None:
+        """MRV2 step ③: prepare inputs, enqueue the forward, return None.
+
+        Only the kernels are queued onto the compute stream; the engine does
+        not wait for them. Sampling is a separate call (sample_tokens), which
+        reads the pending logits and performs the async D2H copy.
+        """
         self.input_batch.remove_finished()
         seqs, new_entries = self.input_batch.update(seqs)
         slots = self.input_batch.slots_for(seqs)
@@ -335,23 +364,23 @@ class ModelRunner:
         self.batch_slots_gpu[:len(seqs)].copy_(slots_t, non_blocking=True) #copy current batch slots to GPU for kernel access
 
         input_ids, positions, temperatures = self.prepare_inputs(seqs, is_prefill)
-        self._pending_logits = self.run_model(input_ids, positions, is_prefill)
-        self._pending_temperatures = temperatures
-        self._pending_seqs = seqs
-        self._pending_is_prefill = is_prefill
+        logits = self.run_model(input_ids, positions, is_prefill)
+        # Depth-1 async: store the sampling state for the immediately-
+        # following sample_tokens() call. batch_slots_gpu is safe to reuse
+        # here because no second batch can be dispatched before sampling.
+        self._pending = (logits, temperatures, seqs, is_prefill)
+        return None
 
     def sample_tokens(self) -> AsyncModelOutput | None:
         if self.rank != 0:
-            self._pending_logits = None
-            self._pending_temperatures = None
-            self._pending_seqs = None
-            self._pending_is_prefill = False
+            # Non-zero TP ranks do not run the sampler: drop the pending
+            # batch's state so rank 0 stays authoritative.
+            self._pending = None
             reset_context()
             return None
 
-        logits = self._pending_logits
-        seqs = self._pending_seqs
-        is_prefill = self._pending_is_prefill
+        logits, temperatures, seqs, is_prefill = self._pending
+        self._pending = None
         bs = len(seqs)
 
         # Prefill produces one logits row per scheduled token. Sampling only
@@ -369,7 +398,7 @@ class ModelRunner:
             )
             logits = logits.index_select(0, last_indices_gpu)
 
-        token_ids = self.sampler(logits, self._pending_temperatures)
+        token_ids = self.sampler(logits, temperatures)
         slots = self.batch_slots_gpu[:bs]
         self.sampled_token_ids_gpu.scatter_(0, slots, token_ids)#同一组token写入gpu
 
@@ -383,10 +412,6 @@ class ModelRunner:
             output_buf.copy_(token_ids, non_blocking=True) #同一组buffer写入cpu
             ready_event.record(self.output_copy_stream)
 
-        self._pending_logits = None
-        self._pending_temperatures = None
-        self._pending_seqs = None
-        self._pending_is_prefill = False
         reset_context()
         return AsyncModelOutput(token_ids, output_buf, ready_event)
 
