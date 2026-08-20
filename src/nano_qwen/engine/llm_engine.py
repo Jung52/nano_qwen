@@ -7,12 +7,12 @@ import torch.multiprocessing as mp
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
-from nanovllm.config import Config
+from nano_qwen.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.sampling_params import SamplingParams
 
 from .model_runner import ModelRunner
-from .scheduler import Scheduler
+from ..scheduler import Scheduler
 
 
 class LLMEngine:
