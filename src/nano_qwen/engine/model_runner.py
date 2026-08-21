@@ -7,11 +7,11 @@ from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
 from nano_qwen.config import Config
-from nanovllm.engine.sequence import Sequence
-from nanovllm.models.qwen3 import Qwen3ForCausalLM
-from nanovllm.layers.sampler import Sampler
-from nanovllm.utils.context import set_context, get_context, reset_context
-from nanovllm.utils.loader import load_model
+from nano_qwen.engine.sequence import Sequence
+from nano_qwen.models.qwen3_5 import Qwen3_5ForCausalLM
+from nano_qwen.layers.sampler import Sampler
+from nano_qwen.utils.context import set_context, get_context, reset_context
+from nano_qwen.utils.loader import load_model
 
 from .async_output import AsyncModelOutput
 from .decode_init import prepare_decode as prepare_decode_kernel
@@ -75,7 +75,7 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.dtype)
         torch.set_default_device("cuda")
-        self.model = Qwen3ForCausalLM(hf_config)
+        self.model = Qwen3_5ForCausalLM(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
         self.output_copy_stream = torch.cuda.Stream()
@@ -120,11 +120,11 @@ class ModelRunner:
 
         if self.world_size > 1:
             if rank == 0:
-                self.shm = SharedMemory(name="nanovllm", create=True, size=2**20)
+                self.shm = SharedMemory(name="nano_qwen", create=True, size=2**20)
                 dist.barrier()
             else:
                 dist.barrier()
-                self.shm = SharedMemory(name="nanovllm")
+                self.shm = SharedMemory(name="nano_qwen")
                 self.loop()
 
     def exit(self):

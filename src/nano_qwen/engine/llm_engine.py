@@ -8,8 +8,8 @@ from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
 from nano_qwen.config import Config
-from nanovllm.engine.sequence import Sequence
-from nanovllm.sampling_params import SamplingParams
+from nano_qwen.engine.sequence import Sequence
+from nano_qwen.sampling_params import SamplingParams
 
 from .model_runner import ModelRunner
 from ..scheduler import Scheduler

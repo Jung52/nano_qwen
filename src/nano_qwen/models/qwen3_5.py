@@ -121,6 +121,7 @@ class Qwen3_5Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         q_gate = self.q_proj(hidden_states)
+        #把1维拼接拆成[token数，头数，2x头维度]，在使用dim=-1拆成query和gate两个部分
         q_gate = q_gate.view(-1, self.num_heads, 2 * self.head_dim)
         query, gate = q_gate.chunk(2, dim=-1)
 
