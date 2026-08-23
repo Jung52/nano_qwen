@@ -8,8 +8,9 @@ from multiprocessing.shared_memory import SharedMemory
 
 from nano_qwen.config import Config
 from nano_qwen.engine.sequence import Sequence
-from nano_qwen.models.qwen3_5 import Qwen3_5ForCausalLM
+from nano_qwen.layers.gated_delta_net import GatedDeltaNet
 from nano_qwen.layers.sampler import Sampler
+from nano_qwen.models.qwen3_5 import Qwen3_5ForCausalLM
 from nano_qwen.utils.context import set_context, get_context, reset_context
 from nano_qwen.utils.loader import load_model
 
@@ -77,6 +78,11 @@ class ModelRunner:
         torch.set_default_device("cuda")
         self.model = Qwen3_5ForCausalLM(hf_config)
         load_model(self.model, config.model)
+        self.gdn_layers = [
+            module
+            for module in self.model.modules()
+            if isinstance(module, GatedDeltaNet)
+        ]
         self.sampler = Sampler()
         self.output_copy_stream = torch.cuda.Stream()
         self._output_pin_bufs = [
@@ -110,6 +116,7 @@ class ModelRunner:
         # (depth-1 async), so a single slot holds the logits/temps/seqs the
         # immediately-following sample_tokens call will consume.
         self._pending: tuple | None = None
+        self.allocate_gdn_state_pool()
         self.warmup_model()
         self.input_batch.clear()
         self.allocate_kv_cache()
@@ -203,6 +210,11 @@ class ModelRunner:
                 module.v_cache = self.kv_cache[1, layer_id]
                 layer_id += 1
 
+    def allocate_gdn_state_pool(self):
+        num_slots = self.config.max_num_seqs
+        for layer in self.gdn_layers:
+            layer.allocate_state_pool(num_slots)
+
     def allocate_decode_buffers(self):
         size = self.config.max_num_seqs
         self.decode_cpu = {
@@ -279,7 +291,17 @@ class ModelRunner:
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables)
+        state_indices = self.batch_slots_gpu[:len(seqs)]
+        set_context(
+            True,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            slot_mapping=slot_mapping,
+            block_tables=block_tables,
+            state_indices=state_indices,
+        )
         return input_ids, positions
 
     def prepare_decode(self, seqs: list[Sequence]):
@@ -302,7 +324,14 @@ class ModelRunner:
         slot_mapping = gpu["slot_mapping"][:bs]
         context_lens = gpu["context_lens"][:bs]
         block_tables = self.prepare_block_tables(seqs)
-        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+        state_indices = self.batch_slots_gpu[:bs]
+        set_context(
+            False,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            block_tables=block_tables,
+            state_indices=state_indices,
+        )
         return input_ids, positions
 
     def prepare_sample(self, seqs: list[Sequence]):
@@ -336,7 +365,7 @@ class ModelRunner:
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def execute_model(self, seqs: list[Sequence], is_prefill: bool) -> None:
-        """MRV2 step ③: prepare inputs, enqueue the forward, return None.
+        """MRV2 step: prepare inputs, enqueue the forward, return None.
 
         Only the kernels are queued onto the compute stream; the engine does
         not wait for them. Sampling is a separate call (sample_tokens), which
@@ -362,6 +391,15 @@ class ModelRunner:
             pin_memory=True,
         )
         self.batch_slots_gpu[:len(seqs)].copy_(slots_t, non_blocking=True) #copy current batch slots to GPU for kernel access
+
+        if new_entries and self.gdn_layers:
+            new_slots = torch.tensor(
+                [slot for _, slot in new_entries],
+                dtype=torch.int64,
+                device=self.batch_slots_gpu.device,
+            )
+            for layer in self.gdn_layers:
+                layer.reset_state(new_slots)
 
         input_ids, positions, temperatures = self.prepare_inputs(seqs, is_prefill)
         logits = self.run_model(input_ids, positions, is_prefill)
@@ -400,7 +438,7 @@ class ModelRunner:
 
         token_ids = self.sampler(logits, temperatures)
         slots = self.batch_slots_gpu[:bs]
-        self.sampled_token_ids_gpu.scatter_(0, slots, token_ids)#同一组token写入gpu
+        self.sampled_token_ids_gpu.scatter_(0, slots, token_ids)
 
         buf_idx = self._output_buf_idx
         self._output_buf_idx ^= 1 #ping-pong buffer index, switch between 0 and 1 for double buffering
@@ -409,7 +447,7 @@ class ModelRunner:
 
         self.output_copy_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(self.output_copy_stream):
-            output_buf.copy_(token_ids, non_blocking=True) #同一组buffer写入cpu
+            output_buf.copy_(token_ids, non_blocking=True) 
             ready_event.record(self.output_copy_stream)
 
         reset_context()

@@ -1,6 +1,6 @@
 """Gated DeltaNet linear attention layer for Qwen3.5 (text-only).
 
-Kernels follow SGLang's GDN design — no pure-torch fallback:
+Kernels follow SGLang's GDN design no pure-torch fallback:
     * prefill (extend): SGLang's self-written Triton chunk kernel, ported to
       ``nano_qwen.layers.fla`` from ``sglang.kernels.ops.attention.fla``
       (itself a flash-linear-attention adaptation): chunk-local cumsum +
@@ -13,7 +13,7 @@ Kernels follow SGLang's GDN design — no pure-torch fallback:
 
 Requires CUDA; q/k/v must be bf16/fp16.
 
-State layout: V-major / K-last ``[N, HV, V, K]`` — the SGLang and FlashInfer
+State layout: V-major / K-last ``[N, HV, V, K]``  the SGLang and FlashInfer
 convention (K-last).
 
 Layer forward math:
@@ -24,9 +24,9 @@ Layer forward math:
     y      = RMSNormGated(y, z)
     out    = out_proj(y)
 
-State (conv_states / recurrent_states) is allocated by the ModelRunner
-as a [max_slots, ...] pool; each sequence reads/writes its own slot via
-context.state_indices.
+State (conv_states / recurrent_states) is allocated by GatedDeltaNet under
+the ModelRunner-managed request lifecycle. Each sequence reads/writes its own
+persistent slot via context.state_indices.
 """
 
 import torch
@@ -164,6 +164,60 @@ class GatedDeltaNet(nn.Module):
         # State pools, allocated by ModelRunner after init.
         self.conv_states: torch.Tensor = torch.tensor([])
         self.recurrent_states: torch.Tensor = torch.tensor([])
+
+    def allocate_state_pool(self, num_slots: int):
+        """Allocate this layer's persistent runtime state on its CUDA device."""
+        device = self.in_proj_qkv.weight.device
+        if device.type != "cuda":
+            raise RuntimeError("GatedDeltaNet state pool must be allocated on CUDA")
+
+        # The convolution cache stores raw qkv projection values, so it uses
+        # the projection/compute dtype. FlashInfer's pretranspose decode uses
+        # its bf16-state backend for Qwen3.5's K=V=128 layout; other supported
+        # layouts fall back to the legacy fp32-state path.
+        conv_dtype = self.in_proj_qkv.weight.dtype
+        recurrent_dtype = (
+            torch.bfloat16
+            if self.head_k_dim == 128 and self.head_v_dim == 128
+            else torch.float32
+        )
+        self.conv_states = torch.zeros(
+            num_slots,
+            self.conv_dim,
+            self.conv_kernel_size - 1,
+            dtype=conv_dtype,
+            device=device,
+        )
+        self.recurrent_states = torch.zeros(
+            num_slots,
+            self.num_v_heads,
+            self.head_v_dim,
+            self.head_k_dim,
+            dtype=recurrent_dtype,
+            device=device,
+        )
+
+    def reset_state(self, slots: int | list[int] | tuple[int, ...] | torch.Tensor):
+        """Clear one or more persistent request slots entirely on the GPU."""
+        if self.conv_states.numel() == 0 or self.recurrent_states.numel() == 0:
+            raise RuntimeError("GatedDeltaNet state pool has not been allocated")
+
+        if isinstance(slots, torch.Tensor):
+            slot_indices = slots.to(
+                device=self.conv_states.device,
+                dtype=torch.int64,
+            )
+        else:
+            slot_indices = torch.as_tensor(
+                slots,
+                device=self.conv_states.device,
+                dtype=torch.int64,
+            )
+        slot_indices = slot_indices.reshape(-1)
+        if slot_indices.numel() == 0:
+            return
+        self.conv_states.index_fill_(0, slot_indices, 0)
+        self.recurrent_states.index_fill_(0, slot_indices, 0)
 
     def _read_state(self, idx: torch.Tensor):
         return self.conv_states[idx], self.recurrent_states[idx]
