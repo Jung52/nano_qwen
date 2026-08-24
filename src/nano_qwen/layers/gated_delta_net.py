@@ -49,6 +49,7 @@ def chunk_gated_delta_rule(
     g: torch.Tensor,
     beta: torch.Tensor,
     initial_state: torch.Tensor | None = None,
+    initial_state_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Chunked delta rule prefill via the SGLang Triton chunk kernel.
 
@@ -56,7 +57,8 @@ def chunk_gated_delta_rule(
         query/key/value: (B, S, H, Dk / Dv) bf16/fp16, head-last.
         g: (B, S, H) per-step log decay (fp32 preferred; cast internally)
         beta: (B, S, H) write gate
-        initial_state: (B, H, V, K) K-last, or None
+        initial_state: (N, H, V, K) K-last state pool
+        initial_state_indices: (B,) request slots into the state pool
     Returns:
         out: (B, S, H, Dv), final_state: (B, H, V, K) K-last
     """
@@ -70,7 +72,7 @@ def chunk_gated_delta_rule(
         g=g.to(torch.float32),
         beta=beta.to(torch.float32),
         initial_state=initial_state,
-        initial_state_indices=None,
+        initial_state_indices=initial_state_indices,
         cu_seqlens=None,
         use_qk_l2norm_in_kernel=True,
     )
@@ -254,8 +256,20 @@ class GatedDeltaNet(nn.Module):
             query = query.repeat_interleave(self.gqa_ratio, dim=2)
             key = key.repeat_interleave(self.gqa_ratio, dim=2)
 
+        ctx = get_context()
+        if ctx.state_indices is None or self.recurrent_states.numel() == 0:
+            raise RuntimeError(
+                "GDN prefill requires the allocated recurrent state pool "
+                "and Context.state_indices"
+            )
         out, final_state = chunk_gated_delta_rule(
-            query, key, value, g, beta, initial_state=None
+            query,
+            key,
+            value,
+            g,
+            beta,
+            initial_state=self.recurrent_states,
+            initial_state_indices=ctx.state_indices,
         )
         out = out.reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
@@ -267,7 +281,6 @@ class GatedDeltaNet(nn.Module):
         # matching the decode path's kernel-1 left-context width.
         raw_qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)  # (B, C, S)
         new_conv = raw_qkv[:, :, -(self.conv_kernel_size - 1):].clone()  # (B, C, k-1)
-        ctx = get_context()
         if ctx.state_indices is not None and self.conv_states.numel() > 0:
             for j, idx in enumerate(ctx.state_indices):
                 self._write_state(idx, new_conv[j], final_state[j])

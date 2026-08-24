@@ -54,7 +54,10 @@ def l2norm_fwd(
     x: torch.Tensor, eps: float = 1e-6, output_dtype: Optional[torch.dtype] = None
 ):
     x_shape_og = x.shape
-    x = x.view(-1, x.shape[-1])
+    # q/k may come from a head-last view or chunk operation and therefore be
+    # non-contiguous; reshape preserves the logical layout while materializing
+    # a contiguous 2D input when required by the Triton pointer kernel.
+    x = x.reshape(-1, x.shape[-1])
     if output_dtype is None:
         y = torch.empty_like(x)
     else:

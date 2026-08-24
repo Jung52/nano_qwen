@@ -333,6 +333,12 @@ def chunk_gated_delta_rule_fwd_h(
     H = u.shape[-2]
     BT = CHUNK_SIZE
 
+    if initial_state is None or initial_state_indices is None:
+        raise ValueError(
+            "chunk_gated_delta_rule_fwd_h requires an initial state pool "
+            "and state indices"
+        )
+
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, CHUNK_SIZE)
     # N: the actual number of sequences in the batch with either equal or variable lengths
