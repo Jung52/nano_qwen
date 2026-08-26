@@ -307,10 +307,11 @@ class Qwen3_5Model(nn.Module):
         if self.has_linear_attention and context.is_prefill:
             if context.cu_seqlens_q is None:
                 raise RuntimeError("GDN prefill requires cu_seqlens_q")
-            # One small synchronization per model forward, not once per GDN
-            # layer. The next optimization is a packed varlen GDN entry point.
-            cu_seqlens = context.cu_seqlens_q.tolist()
-            prefill_slices = list(zip(cu_seqlens[:-1], cu_seqlens[1:]))
+            prefill_slices = context.prefill_slices
+            if prefill_slices is None:
+                raise RuntimeError(
+                    "GDN prefill requires Python-side prefill_slices"
+                )
 
         for layer in self.layers:
             hidden_states, residual = layer(

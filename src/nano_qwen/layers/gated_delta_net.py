@@ -222,11 +222,18 @@ class GatedDeltaNet(nn.Module):
         self.recurrent_states.index_fill_(0, slot_indices, 0)
 
     def _read_state(self, idx: torch.Tensor):
-        return self.conv_states[idx], self.recurrent_states[idx]
+        # index_select/index_copy are graph-capturable; advanced indexing can
+        # require a host-side scalar conversion during CUDA Graph capture.
+        idx = idx.reshape(-1)
+        return (
+            self.conv_states.index_select(0, idx).squeeze(0),
+            self.recurrent_states.index_select(0, idx).squeeze(0),
+        )
 
     def _write_state(self, idx: torch.Tensor, conv_state, rec_state):
-        self.conv_states[idx] = conv_state
-        self.recurrent_states[idx] = rec_state
+        idx = idx.reshape(-1)
+        self.conv_states.index_copy_(0, idx, conv_state.unsqueeze(0))
+        self.recurrent_states.index_copy_(0, idx, rec_state.unsqueeze(0))
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         context = get_context()
@@ -280,7 +287,19 @@ class GatedDeltaNet(nn.Module):
         # conv_state = last kernel-1 raw qkv values (pre-conv1d, pre-silu),
         # matching the decode path's kernel-1 left-context width.
         raw_qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)  # (B, C, S)
-        new_conv = raw_qkv[:, :, -(self.conv_kernel_size - 1):].clone()  # (B, C, k-1)
+        state_width = self.conv_kernel_size - 1
+        if raw_qkv.size(-1) < state_width:
+            padding = torch.zeros(
+                raw_qkv.size(0),
+                raw_qkv.size(1),
+                state_width - raw_qkv.size(-1),
+                dtype=raw_qkv.dtype,
+                device=raw_qkv.device,
+            )
+            new_conv = torch.cat((padding, raw_qkv), dim=-1)
+        else:
+            new_conv = raw_qkv[:, :, -state_width:]
+        new_conv = new_conv.clone()  # (B, C, k-1)
         if ctx.state_indices is not None and self.conv_states.numel() > 0:
             for j, idx in enumerate(ctx.state_indices):
                 self._write_state(idx, new_conv[j], final_state[j])

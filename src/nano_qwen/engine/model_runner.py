@@ -98,6 +98,12 @@ class ModelRunner:
             torch.cuda.Event(blocking=True)
             for _ in range(2)
         ]
+        # Benchmark can disable the copy stream to provide a synchronous D2H
+        # baseline. Keep async output as the production default.
+        self.async_output = True
+        # The server benchmark can isolate prefill CUDA Graph overhead while
+        # keeping decode graphs enabled. Production defaults to prefill graphs.
+        self.use_prefill_cudagraph = True
         self._output_buf_idx = 0
         # MRV2-style input-prep protection: the prior step's async H2D
         # transfers must be consumed before this step reuses the same
@@ -284,8 +290,11 @@ class ModelRunner:
                 else:
                     slot_end = seq.block_table[i] * self.block_size + end - i * self.block_size
                 slot_mapping.extend(range(slot_start, slot_end))
-        if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
-            block_tables = self.prepare_block_tables(seqs)
+        if cu_seqlens_k[-1] > cu_seqlens_q[-1]:
+            raise RuntimeError(
+                "prefix-cache prefill is not supported by this runner"
+            )
+        prefill_slices = list(zip(cu_seqlens_q[:-1], cu_seqlens_q[1:]))
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -301,6 +310,7 @@ class ModelRunner:
             slot_mapping=slot_mapping,
             block_tables=block_tables,
             state_indices=state_indices,
+            prefill_slices=prefill_slices,
         )
         return input_ids, positions
 
@@ -347,22 +357,97 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
-        if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
+        # Model warmup runs before graph buffers are allocated. Keep that
+        # bootstrap pass eager; graph replay starts after capture_cudagraph().
+        if self.enforce_eager or not hasattr(self, "graphs") or input_ids.size(0) > 512:
             return self.model.compute_logits(self.model(input_ids, positions))
-        else:
-            bs = input_ids.size(0)
-            context = get_context()
-            graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
-            graph_vars = self.graph_vars
-            graph_vars["input_ids"][:bs] = input_ids
-            graph_vars["positions"][:bs] = positions
-            graph_vars["slot_mapping"].fill_(-1)
-            graph_vars["slot_mapping"][:bs] = context.slot_mapping
-            graph_vars["context_lens"].zero_()
-            graph_vars["context_lens"][:bs] = context.context_lens
-            graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
-            graph.replay()
-            return self.model.compute_logits(graph_vars["outputs"][:bs])
+        if is_prefill and self.use_prefill_cudagraph:
+            return self.run_prefill_piecewise(input_ids, positions)
+
+        if is_prefill:
+            return self.model.compute_logits(self.model(input_ids, positions))
+
+        bs = input_ids.size(0)
+        context = get_context()
+        # The current graph set uses exact batch sizes (1, 2, 4, ...). Do not
+        # run a larger graph with an uninitialized padding row: GDN mutates
+        # recurrent state, so a fake row could corrupt a real request slot.
+        if bs not in self.graphs:
+            return self.model.compute_logits(self.model(input_ids, positions))
+        graph = self.graphs[bs]
+        graph_vars = self.graph_vars
+        graph_vars["input_ids"][:bs] = input_ids
+        graph_vars["positions"][:bs] = positions
+        graph_vars["slot_mapping"].fill_(-1)
+        graph_vars["slot_mapping"][:bs] = context.slot_mapping
+        graph_vars["context_lens"].zero_()
+        graph_vars["context_lens"][:bs] = context.context_lens
+        graph_vars["block_tables"].fill_(-1)
+        graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+        graph_vars["state_indices"].zero_()
+        graph_vars["state_indices"][:bs] = context.state_indices
+        graph.replay()
+        return self.model.compute_logits(graph_vars["outputs"][:bs])
+
+    @torch.inference_mode()
+    def run_prefill_piecewise(self, input_ids: torch.Tensor, positions: torch.Tensor):
+        """Run decoder layers through per-layer (piecewise) CUDA Graphs.
+
+        Embedding and the final norm stay eager. Each decoder layer has a
+        graph entry keyed by the packed prefill layout, matching the
+        ``uniform=False`` piecewise mode used by vLLM. This keeps dynamic
+        Python scheduling outside the graph while replaying the stable layer
+        kernels with fixed device addresses.
+        """
+        context = get_context()
+        if context.block_tables is not None:
+            raise RuntimeError(
+                "prefix-cache prefill is not supported by the CUDA Graph path"
+            )
+        if context.prefill_slices is None:
+            raise RuntimeError("prefill graph requires Context.prefill_slices")
+
+        key = tuple(context.prefill_slices)
+        entries = self.prefill_piecewise_graphs.get(key)
+        if entries is None:
+            entries = self.capture_prefill_piecewise(input_ids, positions, context)
+            self.prefill_piecewise_graphs[key] = entries
+
+        hidden = self.model.model.embed_tokens(input_ids)
+        residual = None
+        for layer_idx, entry in enumerate(entries):
+            vars = entry["vars"]
+            if entry.pop("first_use", False):
+                # capture_prefill_piecewise already ran this piece with the
+                # real input and state; re-playing here would apply GDN state
+                # updates twice on the first request of a new layout.
+                hidden = entry["outputs"]["hidden"]
+                residual = entry["outputs"]["residual"]
+                continue
+            vars["hidden_in"].copy_(hidden)
+            if residual is not None:
+                vars["residual_in"].copy_(residual)
+            vars["positions"].copy_(positions)
+            vars["cu_seqlens_q"].copy_(context.cu_seqlens_q)
+            vars["cu_seqlens_k"].copy_(context.cu_seqlens_k)
+            vars["slot_mapping"].copy_(context.slot_mapping)
+            vars["state_indices"].copy_(context.state_indices)
+            set_context(
+                True,
+                cu_seqlens_q=vars["cu_seqlens_q"],
+                cu_seqlens_k=vars["cu_seqlens_k"],
+                max_seqlen_q=context.max_seqlen_q,
+                max_seqlen_k=context.max_seqlen_k,
+                slot_mapping=vars["slot_mapping"],
+                state_indices=vars["state_indices"],
+                prefill_slices=context.prefill_slices,
+            )
+            entry["graph"].replay()
+            hidden = entry["outputs"]["hidden"]
+            residual = entry["outputs"]["residual"]
+
+        hidden, _ = self.model.model.norm(hidden, residual)
+        return self.model.compute_logits(hidden)
 
     def execute_model(self, seqs: list[Sequence], is_prefill: bool) -> None:
         """MRV2 step: prepare inputs, enqueue the forward, return None.
@@ -445,10 +530,15 @@ class ModelRunner:
         output_buf = self._output_pin_bufs[buf_idx][:bs] 
         ready_event = self._output_events[buf_idx]
 
-        self.output_copy_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(self.output_copy_stream):
-            output_buf.copy_(token_ids, non_blocking=True) 
-            ready_event.record(self.output_copy_stream)
+        if self.async_output:
+            self.output_copy_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self.output_copy_stream):
+                output_buf.copy_(token_ids, non_blocking=True)
+                ready_event.record(self.output_copy_stream)
+        else:
+            # Blocking D2H baseline: return only after the CPU buffer is ready.
+            output_buf.copy_(token_ids, non_blocking=False)
+            ready_event.record(torch.cuda.current_stream())
 
         reset_context()
         return AsyncModelOutput(token_ids, output_buf, ready_event)
@@ -467,6 +557,7 @@ class ModelRunner:
         slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
+        state_indices = torch.zeros(max_bs, dtype=torch.int64)
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
         self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
         self.graphs = {}
@@ -474,7 +565,13 @@ class ModelRunner:
 
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
-            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
+            set_context(
+                False,
+                slot_mapping=slot_mapping[:bs],
+                context_lens=context_lens[:bs],
+                block_tables=block_tables[:bs],
+                state_indices=state_indices[:bs],
+            )
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
             with torch.cuda.graph(graph, self.graph_pool):
                 outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
@@ -490,5 +587,98 @@ class ModelRunner:
             slot_mapping=slot_mapping,
             context_lens=context_lens,
             block_tables=block_tables,
+            state_indices=state_indices,
             outputs=outputs,
         )
+        # Piecewise prefill graphs are created lazily by packed layout. The
+        # decode graphs above remain full graphs for exact batch sizes.
+        self.prefill_piecewise_graphs = {}
+
+    @torch.inference_mode()
+    def capture_prefill_piecewise(self, input_ids, positions, context):
+        """Capture one CUDA Graph piece per decoder layer for a layout."""
+        if context.block_tables is not None:
+            raise RuntimeError(
+                "prefix-cache prefill is not supported by the CUDA Graph path"
+            )
+        if context.prefill_slices is None:
+            raise RuntimeError("prefill graph requires prefill_slices")
+
+        hidden = self.model.model.embed_tokens(input_ids)
+        residual = None
+        entries = []
+        for layer_idx, layer in enumerate(self.model.model.layers):
+            vars = {
+                "hidden_in": torch.empty_like(hidden),
+                "residual_in": torch.empty_like(hidden),
+                "positions": torch.empty_like(positions),
+                "cu_seqlens_q": torch.empty_like(context.cu_seqlens_q),
+                "cu_seqlens_k": torch.empty_like(context.cu_seqlens_k),
+                "slot_mapping": torch.empty_like(context.slot_mapping),
+                "state_indices": torch.empty_like(context.state_indices),
+            }
+            vars["hidden_in"].copy_(hidden)
+            if residual is not None:
+                vars["residual_in"].copy_(residual)
+            vars["positions"].copy_(positions)
+            vars["cu_seqlens_q"].copy_(context.cu_seqlens_q)
+            vars["cu_seqlens_k"].copy_(context.cu_seqlens_k)
+            vars["slot_mapping"].copy_(context.slot_mapping)
+            vars["state_indices"].copy_(context.state_indices)
+            set_context(
+                True,
+                cu_seqlens_q=vars["cu_seqlens_q"],
+                cu_seqlens_k=vars["cu_seqlens_k"],
+                max_seqlen_q=context.max_seqlen_q,
+                max_seqlen_k=context.max_seqlen_k,
+                slot_mapping=vars["slot_mapping"],
+                state_indices=vars["state_indices"],
+                prefill_slices=context.prefill_slices,
+            )
+            state_snapshots = [
+                (gdn.conv_states.clone(), gdn.recurrent_states.clone())
+                for gdn in self.gdn_layers
+            ]
+            for _ in range(2):
+                if residual is None:
+                    warm_hidden, warm_residual = layer(
+                        vars["positions"], vars["hidden_in"], None,
+                        context.prefill_slices,
+                    )
+                else:
+                    warm_hidden, warm_residual = layer(
+                        vars["positions"], vars["hidden_in"],
+                        vars["residual_in"], context.prefill_slices,
+                    )
+            torch.cuda.synchronize()
+            for gdn, (conv_state, recurrent_state) in zip(
+                self.gdn_layers, state_snapshots
+            ):
+                gdn.conv_states.copy_(conv_state)
+                gdn.recurrent_states.copy_(recurrent_state)
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, self.graph_pool):
+                if residual is None:
+                    outputs = layer(
+                        vars["positions"], vars["hidden_in"], None,
+                        context.prefill_slices,
+                    )
+                else:
+                    outputs = layer(
+                        vars["positions"], vars["hidden_in"],
+                        vars["residual_in"], context.prefill_slices,
+                    )
+            torch.cuda.synchronize()
+            entries.append({
+                "graph": graph,
+                "vars": vars,
+                "first_use": True,
+                "outputs": {
+                    "hidden": outputs[0],
+                    "residual": outputs[1],
+                },
+            })
+            hidden, residual = outputs
+        reset_context()
+        return entries
