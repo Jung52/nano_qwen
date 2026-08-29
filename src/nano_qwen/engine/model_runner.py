@@ -205,16 +205,40 @@ class ModelRunner:
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
+
+        # Only full_attention layers hold K/V cache; GDN layers keep their own
+        # conv/recurrent state pools instead. Count cache-bearing modules from
+        # the model structure (robust to both ``layer_types`` and the
+        # ``full_attention_interval`` fallback, and to Dense checkpoints where
+        # every layer is attention).
+        num_attn_layers = sum(
+            1 for module in self.model.modules()
+            if hasattr(module, "k_cache") and hasattr(module, "v_cache")
+        )
+        assert num_attn_layers > 0, "no attention layers found; cannot size KV cache"
+        block_bytes = (
+            2 * num_attn_layers
+            * self.block_size
+            * num_kv_heads
+            * head_dim
+            * hf_config.dtype.itemsize
+        )
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
         assert config.num_kvcache_blocks > 0
-        self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
+        self.kv_cache = torch.empty(
+            2, num_attn_layers, config.num_kvcache_blocks,
+            self.block_size, num_kv_heads, head_dim,
+        )
         layer_id = 0
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
                 module.k_cache = self.kv_cache[0, layer_id]
                 module.v_cache = self.kv_cache[1, layer_id]
                 layer_id += 1
+        assert layer_id == num_attn_layers, (
+            f"attention layer drift: assigned {layer_id} caches but sized "
+            f"for {num_attn_layers}"
+        )
 
     def allocate_gdn_state_pool(self):
         num_slots = self.config.max_num_seqs

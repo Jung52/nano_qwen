@@ -226,14 +226,20 @@ class GatedDeltaNet(nn.Module):
         # require a host-side scalar conversion during CUDA Graph capture.
         idx = idx.reshape(-1)
         return (
-            self.conv_states.index_select(0, idx).squeeze(0),
-            self.recurrent_states.index_select(0, idx).squeeze(0),
+            self.conv_states.index_select(0, idx),       # (B, C, k-1)
+            self.recurrent_states.index_select(0, idx),  # (B, H, V, K)
         )
 
     def _write_state(self, idx: torch.Tensor, conv_state, rec_state):
         idx = idx.reshape(-1)
-        self.conv_states.index_copy_(0, idx, conv_state.unsqueeze(0))
-        self.recurrent_states.index_copy_(0, idx, rec_state.unsqueeze(0))
+        # prefill writes one request at a time (2D/3D), batched decode writes
+        # many rows at once (3D/4D) — promote single rows to a batch dim.
+        if conv_state.dim() == 2:
+            conv_state = conv_state.unsqueeze(0)
+        if rec_state.dim() == 3:
+            rec_state = rec_state.unsqueeze(0)
+        self.conv_states.index_copy_(0, idx, conv_state)
+        self.recurrent_states.index_copy_(0, idx, rec_state)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         context = get_context()
@@ -306,32 +312,37 @@ class GatedDeltaNet(nn.Module):
         return self.out_proj(out)
 
     def _forward_decode(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # Single seq decode: batch B = 1 (engine runs one seq per slot).
-        idx = get_context().state_indices[0]
-        conv_state, rec_state = self._read_state(idx)  # (C,k-1), (Hv,V,K)
-        conv_state = conv_state.unsqueeze(0)  # (1, C, k-1)
-        rec_state = rec_state.unsqueeze(0)  # (1, Hv, V, K)
+        # Batched decode: all B sequences in ONE kernel launch per layer. Each
+        # row reads and writes its own persistent pool slot via
+        # context.state_indices (index_select/index_copy are graph-capturable).
+        B = hidden_states.shape[0]
+        idx = get_context().state_indices
+        if idx is None or idx.numel() == 0:
+            raise RuntimeError(
+                "GDN decode requires Context.state_indices; "
+                "ModelRunner must pass persistent request slots"
+            )
+        conv_state, rec_state = self._read_state(idx)  # (B,C,k-1), (B,Hv,V,K)
 
-        qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)  # (1, C, 1)
+        qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)  # (B, C, 1)
         # causal conv with cached left-context (kernel-1 values)
-        x = torch.cat([conv_state, qkv], dim=-1)  # (1, C, kernel)
+        x = torch.cat([conv_state, qkv], dim=-1)  # (B, C, kernel)
         out = F.silu(
             F.conv1d(x, self.conv1d.weight, padding=0, groups=self.conv_dim)
         )
         out = out[:, :, -1:]  # last position
-        new_conv_state = x[:, :, -(self.conv_kernel_size - 1):].clone()  # (1, C, k-1)
-        self._write_state(idx, new_conv_state.squeeze(0), rec_state.squeeze(0))
+        new_conv_state = x[:, :, -(self.conv_kernel_size - 1):].clone()  # (B, C, k-1)
 
-        out = out.transpose(1, 2)  # (1, 1, C)
+        out = out.transpose(1, 2)  # (B, 1, C)
         query, key, value = torch.split(
             out, [self.key_dim, self.key_dim, self.value_dim], dim=-1,
         )
-        query = query.reshape(1, 1, -1, self.head_k_dim)  # (B, S, Hk, Dk)
-        key = key.reshape(1, 1, -1, self.head_k_dim)
-        value = value.reshape(1, 1, -1, self.head_v_dim)
+        query = query.reshape(B, 1, -1, self.head_k_dim)  # (B, S, Hk, Dk)
+        key = key.reshape(B, 1, -1, self.head_k_dim)
+        value = value.reshape(B, 1, -1, self.head_v_dim)
 
-        z = self.in_proj_z(hidden_states).reshape(1, 1, -1, self.head_v_dim)
-        b = self.in_proj_b(hidden_states)  # (1, 1, Hv)
+        z = self.in_proj_z(hidden_states).reshape(B, 1, -1, self.head_v_dim)
+        b = self.in_proj_b(hidden_states)  # (B, 1, Hv)
         a = self.in_proj_a(hidden_states)
         if self.gqa_ratio > 1:
             query = query.repeat_interleave(self.gqa_ratio, dim=2)
@@ -340,12 +351,12 @@ class GatedDeltaNet(nn.Module):
         out, new_rec = decode_gated_delta_rule(
             query, key, value, a, b, self.A_log, self.dt_bias, rec_state,
         )
-        self._write_state(idx, new_conv_state.squeeze(0), new_rec.squeeze(0))
+        self._write_state(idx, new_conv_state, new_rec)
 
         # Per-head gated norm, then merge heads -> value_dim (matches official:
         # core_attn_out.reshape(-1, head_v_dim) -> norm -> reshape(batch, seq, -1))
-        out = out.reshape(-1, self.head_v_dim)  # (Hv, Dv)
-        z = z.reshape(-1, self.head_v_dim)  # (Hv, Dv)
+        out = out.reshape(-1, self.head_v_dim)  # (B*Hv, Dv)
+        z = z.reshape(-1, self.head_v_dim)  # (B*Hv, Dv)
         out = self.norm(out, z)
-        out = out.reshape(1, 1, -1)  # (B, S, value_dim)
+        out = out.reshape(B, 1, -1)  # (B, S, value_dim)
         return self.out_proj(out)

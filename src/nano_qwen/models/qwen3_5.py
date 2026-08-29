@@ -204,18 +204,18 @@ class Qwen3_5DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         """Adapt the runner's packed 2D tensors to GDN's [B, S, H] API.
 
-        GDN state is per request, so requests are kept separate. This is a
-        correctness-first bridge until the layer consumes packed varlen input
-        and ``state_indices`` directly in one kernel launch.
+        Prefill keeps requests separate (the chunk prefill kernel is
+        per-request today); decode is fully batched: one GDN call for all
+        rows, with ``state_indices`` routing each row to its persistent slot.
         """
         context = get_context()
         state_indices = context.state_indices
-        outputs: list[torch.Tensor] = []
 
-        try:
-            if context.is_prefill:
-                if prefill_slices is None:
-                    raise RuntimeError("prefill_slices are required for GDN prefill")
+        if context.is_prefill:
+            if prefill_slices is None:
+                raise RuntimeError("prefill_slices are required for GDN prefill")
+            outputs: list[torch.Tensor] = []
+            try:
                 for batch_idx, (start, end) in enumerate(prefill_slices):
                     context.state_indices = (
                         None
@@ -226,24 +226,18 @@ class Qwen3_5DecoderLayer(nn.Module):
                         hidden_states[start:end].unsqueeze(0)
                     )
                     outputs.append(output.squeeze(0))
-            else:
-                if state_indices is None:
-                    raise RuntimeError(
-                        "GDN decode requires Context.state_indices; "
-                        "ModelRunner must pass persistent request slots"
-                    )
-                for batch_idx in range(hidden_states.shape[0]):
-                    context.state_indices = state_indices[
-                        batch_idx:batch_idx + 1
-                    ]
-                    output = self.linear_attn(
-                        hidden_states[batch_idx:batch_idx + 1].unsqueeze(1)
-                    )
-                    outputs.append(output.squeeze(1))
-        finally:
-            context.state_indices = state_indices
+            finally:
+                context.state_indices = state_indices
+            return torch.cat(outputs, dim=0)
 
-        return torch.cat(outputs, dim=0)
+        if state_indices is None:
+            raise RuntimeError(
+                "GDN decode requires Context.state_indices; "
+                "ModelRunner must pass persistent request slots"
+            )
+        # Batched GDN decode: all rows in one layer call; each sequence's
+        # conv/recurrent state is read/written through its own pool slot.
+        return self.linear_attn(hidden_states.unsqueeze(1)).squeeze(1)
 
     def forward(
         self,
