@@ -52,7 +52,7 @@ HEAD_DIM = 128     # linear_key_head_dim == linear_value_head_dim
 GQA_RATIO = 2      # H_V // H_QK, applied via repeat_interleave in production
 
 DTYPE = torch.bfloat16
-DEFAULT_SEQ_LENS = [512, 2048, 4096, 8192]
+DEFAULT_SEQ_LENS = [1024, 2048, 4096, 8192]
 WARMUP = 20
 REPEAT = 100
 
@@ -134,9 +134,10 @@ def make_inputs(
 
     g = -(0.1 + 0.9 * torch.rand(1, seq_len, H_V, dtype=torch.float32, device=device))
     beta = torch.rand(1, seq_len, H_V, dtype=torch.float32, device=device)
-    initial_state = torch.zeros(
-        1, H_V, HEAD_DIM, HEAD_DIM, dtype=state_dtype, device=device
-    )
+    # Nonzero on purpose: a zero state would hide gather/scatter bugs.
+    initial_state = torch.randn(
+        1, H_V, HEAD_DIM, HEAD_DIM, device=device
+    ).to(state_dtype)
     state_indices = torch.tensor([0], dtype=torch.int64, device=device)
     scale = HEAD_DIM ** -0.5
     return {
@@ -160,6 +161,9 @@ def make_inputs(
 # ---------------------------------------------------------------------------
 
 def run_baseline(inputs: dict, norm_in_kernel: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    # The chunk kernel writes the TRUE final state into the state pool
+    # in-place (INPLACE_UPDATE epilogue); ``h`` only holds per-chunk states
+    # BEFORE each chunk, so h[:, -1] is NOT the final state.
     state = inputs["initial_state"].clone()
     o, _, h = baseline_chunk(
         q=inputs["q"],
@@ -173,7 +177,7 @@ def run_baseline(inputs: dict, norm_in_kernel: bool) -> tuple[torch.Tensor, torc
         cu_seqlens=None,
         use_qk_l2norm_in_kernel=norm_in_kernel,
     )
-    return o, h[:, -1].contiguous()
+    return o, state.contiguous()
 
 
 def _flashqla_params():
@@ -212,6 +216,10 @@ def run_flashqla(inputs: dict, norm_in_kernel: bool) -> tuple[torch.Tensor, torc
         kwargs["use_qk_l2norm_in_kernel"] = norm_in_kernel
     if "output_final_state" in params:
         kwargs["output_final_state"] = True
+    if "state_v_first" in params:
+        # FlashQLA's default state layout is K-first [N, HV, K, V]; pass
+        # state_v_first=True so in/out states follow our K-last [V, K].
+        kwargs["state_v_first"] = True
 
     res = flash_qla.chunk_gated_delta_rule(**kwargs)
 
@@ -346,7 +354,7 @@ def main() -> None:
                 print("FlashQLA: UNSUPPORTED/FAILED — first real execution raised:")
                 traceback.print_exc()
         else:
-            print("FlashQLA: UNSUPPORTED/FAILED (skipped)")
+            print("FlashQLA: verified on seq #1 (skipped re-check)")
 
         baseline_ms = benchmark(
             lambda: run_baseline(inputs, norm_in_kernel)

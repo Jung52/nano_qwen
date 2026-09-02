@@ -1,17 +1,24 @@
 """Gated DeltaNet linear attention layer for Qwen3.5 (text-only).
 
 Kernels follow SGLang's GDN design no pure-torch fallback:
-    * prefill (extend): SGLang's self-written Triton chunk kernel, ported to
-      ``nano_qwen.layers.fla`` from ``sglang.kernels.ops.attention.fla``
-      (itself a flash-linear-attention adaptation): chunk-local cumsum +
-      fused intra-chunk (kkt + solve_tril + recompute) + cross-chunk state
-      recurrence + output.  q/k are L2-normalized and scaled in-kernel.
+    * prefill (extend): FlashQLA ``flash_qla.chunk_gated_delta_rule``
+      (TileLang/Triton chunked scan).  FlashQLA has no state-pool indexing,
+      so the layer gathers per-slot initial states before the call and
+      writes the returned final state back afterwards (both via
+      index_select/index_copy_, which are CUDA-Graph-capturable).
+      ``state_v_first=True`` selects our K-last [V, K] state layout.
+      ``auto_cp`` / ``enable_fwd_cp_cache`` are single-GPU-irrelevant and
+      disabled.  The SGLang-derived FLA chunk kernel below
+      (``chunk_gated_delta_rule``) is kept as a reference implementation
+      for tests/benchmarks.
     * decode: FlashInfer ``gated_delta_rule_decode_pretranspose``
       (``flashinfer.gdn_decode``), which computes the sigmoid gating
       (g = -exp(A_log) * softplus(a + dt_bias), beta = sigmoid(b)) inside
       the kernel from the raw ``a`` / ``b`` projections.
 
-Requires CUDA; q/k/v must be bf16/fp16.
+Requires CUDA; q/k/v must be bf16/fp16.  The first FlashQLA call JIT-compiles
+TileLang kernels (host-side, seconds); the ModelRunner's eager warmup runs
+before CUDA Graph capture, so compilation never happens inside a capture.
 
 State layout: V-major / K-last ``[N, HV, V, K]``  the SGLang and FlashInfer
 convention (K-last).
@@ -50,7 +57,9 @@ def chunk_gated_delta_rule(
     beta: torch.Tensor,
     initial_state: torch.Tensor | None = None,
     initial_state_indices: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Chunked delta rule prefill via the SGLang Triton chunk kernel.
 
     Args:
@@ -59,13 +68,24 @@ def chunk_gated_delta_rule(
         beta: (B, S, H) write gate
         initial_state: (N, H, V, K) K-last state pool
         initial_state_indices: (B,) request slots into the state pool
+        cu_seqlens: (B + 1,) packed sequence boundaries for variable lengths
     Returns:
-        out: (B, S, H, Dv), final_state: (B, H, V, K) K-last
+        out: (B, S, H, Dv).  The final recurrent state is written in-place
+        into ``initial_state`` by the kernel (INPLACE_UPDATE epilogue); the
+        kernel's per-chunk ``h`` tensor only holds states *entering* each
+        chunk, so it must not be used as the final state.
     """
     from nano_qwen.layers.fla.chunk import chunk_gated_delta_rule as fla_chunk
 
     assert query.dtype != torch.float32, "Triton chunk kernel requires bf16/fp16 q/k/v"
-    o, _, h = fla_chunk(
+    # The FLA kernels hard-code contiguous strides (e.g. stride_v = H*V); a
+    # strided view (e.g. v split from the packed conv output) would be read
+    # at wrong addresses. Materialize contiguous copies — q/k usually already
+    # are (GQA repeat_interleave), v is the one that needs the copy.
+    query = query.contiguous()
+    key = key.contiguous()
+    value = value.contiguous()
+    o, _, _ = fla_chunk(
         q=query,
         k=key,
         v=value,
@@ -73,11 +93,11 @@ def chunk_gated_delta_rule(
         beta=beta.to(torch.float32),
         initial_state=initial_state,
         initial_state_indices=initial_state_indices,
-        cu_seqlens=None,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         use_qk_l2norm_in_kernel=True,
     )
-    # h: (B, NT, H, V, K) per-chunk states; last chunk is the final state.
-    return o, h[:, -1].contiguous()
+    return o
 
 
 def decode_gated_delta_rule(
@@ -249,19 +269,53 @@ class GatedDeltaNet(nn.Module):
             return self._forward_decode(hidden_states)
 
     def _forward_prefill(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        B, S, _ = hidden_states.shape
-        qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)  # (B, C, S)
-        qkv = F.silu(self.conv1d(qkv)[:, :, :S])  # causal conv, drop right pad
-        qkv = qkv.transpose(1, 2)  # (B, S, C)
-        query, key, value = torch.split(
-            qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1,
-        )
-        query = query.reshape(B, S, -1, self.head_k_dim)  # (B, S, Hk, Dk)
-        key = key.reshape(B, S, -1, self.head_k_dim)
-        value = value.reshape(B, S, -1, self.head_v_dim)
+        context = get_context()
+        if context.prefill_slices is None or context.cu_seqlens_q is None:
+            raise RuntimeError(
+                "GDN prefill requires packed slices and cu_seqlens"
+            )
+        if hidden_states.dim() != 3 or hidden_states.shape[0] != 1:
+            raise ValueError(
+                "GDN prefill expects packed hidden states shaped "
+                "[1, total_tokens, hidden_size]"
+            )
 
-        z = self.in_proj_z(hidden_states).reshape(B, S, -1, self.head_v_dim)
-        b = self.in_proj_b(hidden_states)  # (B, S, Hv)
+        _, total_tokens, _ = hidden_states.shape
+        raw_qkv_packed = self.in_proj_qkv(hidden_states)
+        raw_qkv = raw_qkv_packed.transpose(1, 2)  # (1, C, total_tokens)
+
+        # Depthwise causal convolution has no cu_seqlens argument. Run it on
+        # a padded batch so each request starts with an independent zero
+        # history, then pack only the valid token ranges for the chunk scan.
+        lengths = [end - start for start, end in context.prefill_slices]
+        max_len = max(lengths, default=0)
+        padded_qkv = raw_qkv.new_zeros(
+            len(lengths), self.conv_dim, max_len,
+        )
+        for batch_idx, (start, end) in enumerate(context.prefill_slices):
+            padded_qkv[batch_idx, :, : end - start] = raw_qkv[0, :, start:end]
+        padded_conv = F.silu(
+            self.conv1d(padded_qkv)[:, :, :max_len]
+        )
+        qkv = torch.cat(
+            [
+                padded_conv[batch_idx, :, :length].transpose(0, 1)
+                for batch_idx, length in enumerate(lengths)
+            ],
+            dim=0,
+        ).unsqueeze(0)  # (1, total_tokens, C)
+
+        query = qkv[..., : self.key_dim].reshape(1, total_tokens, -1, self.head_k_dim)
+        key = qkv[..., self.key_dim:self.key_dim * 2].reshape(
+            1, total_tokens, -1, self.head_k_dim
+        )
+        value = qkv[..., self.key_dim * 2:].reshape(
+            1, total_tokens, -1, self.head_v_dim
+        )
+        z = self.in_proj_z(hidden_states).reshape(
+            1, total_tokens, -1, self.head_v_dim
+        )
+        b = self.in_proj_b(hidden_states)  # (1, total_tokens, Hv)
         a = self.in_proj_a(hidden_states)
         beta = torch.sigmoid(b)
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias.float())
@@ -275,7 +329,7 @@ class GatedDeltaNet(nn.Module):
                 "GDN prefill requires the allocated recurrent state pool "
                 "and Context.state_indices"
             )
-        out, final_state = chunk_gated_delta_rule(
+        out = chunk_gated_delta_rule(
             query,
             key,
             value,
@@ -283,32 +337,34 @@ class GatedDeltaNet(nn.Module):
             beta,
             initial_state=self.recurrent_states,
             initial_state_indices=ctx.state_indices,
+            cu_seqlens=ctx.cu_seqlens_q,
+            chunk_indices=ctx.prefill_chunk_indices,
         )
         out = out.reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
         out = self.norm(out, z)
-        out = out.reshape(B, S, -1)
+        out = out.reshape(1, total_tokens, -1)
 
-        # Persist conv/recurrent state for the following decode steps.
-        # conv_state = last kernel-1 raw qkv values (pre-conv1d, pre-silu),
-        # matching the decode path's kernel-1 left-context width.
-        raw_qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)  # (B, C, S)
+        # Persist conv state for the following decode steps: the last
+        # kernel-1 raw qkv values (pre-conv1d, pre-silu), matching the decode
+        # path's kernel-1 left-context width.  The recurrent final state was
+        # already written into the pool in-place by the chunk kernel's
+        # INPLACE_UPDATE epilogue — do NOT write h[:, -1] back (it is the
+        # state entering the last chunk, not the final state).
         state_width = self.conv_kernel_size - 1
-        if raw_qkv.size(-1) < state_width:
-            padding = torch.zeros(
-                raw_qkv.size(0),
-                raw_qkv.size(1),
-                state_width - raw_qkv.size(-1),
-                dtype=raw_qkv.dtype,
-                device=raw_qkv.device,
-            )
-            new_conv = torch.cat((padding, raw_qkv), dim=-1)
-        else:
-            new_conv = raw_qkv[:, :, -state_width:]
-        new_conv = new_conv.clone()  # (B, C, k-1)
-        if ctx.state_indices is not None and self.conv_states.numel() > 0:
-            for j, idx in enumerate(ctx.state_indices):
-                self._write_state(idx, new_conv[j], final_state[j])
+        conv_states = []
+        for start, end in context.prefill_slices:
+            sequence_qkv = raw_qkv[0, :, start:end]
+            if sequence_qkv.size(-1) < state_width:
+                padding = raw_qkv.new_zeros(
+                    self.conv_dim, state_width - sequence_qkv.size(-1)
+                )
+                sequence_qkv = torch.cat((padding, sequence_qkv), dim=-1)
+            else:
+                sequence_qkv = sequence_qkv[:, -state_width:]
+            conv_states.append(sequence_qkv)
+        new_conv = torch.stack(conv_states, dim=0).clone()
+        self.conv_states.index_copy_(0, ctx.state_indices, new_conv)
         return self.out_proj(out)
 
     def _forward_decode(self, hidden_states: torch.Tensor) -> torch.Tensor:

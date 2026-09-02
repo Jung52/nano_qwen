@@ -31,9 +31,17 @@ from nano_qwen.sampling_params import SamplingParams
 DEFAULT_MODEL = os.environ.get("NANO_QWEN_MODEL", "/mnt/d/nano-vllm/Qwen3.5-0.8B")
 
 
-def make_prompts(num_seqs: int, repeat: int) -> list[str]:
+def make_prompts(
+    num_seqs: int,
+    repeat: int,
+    vary_lengths: bool = False,
+) -> list[str]:
     base = "请分析人工智能的发展、应用和未来挑战。"
-    return [base * repeat + f"问题编号{i}。" for i in range(num_seqs)]
+    return [
+        base * (repeat + (i % 3) if vary_lengths else repeat)
+        + f"问题编号{i}。"
+        for i in range(num_seqs)
+    ]
 
 
 def timed_generate(engine, prompts, params, phase_totals):
@@ -42,7 +50,7 @@ def timed_generate(engine, prompts, params, phase_totals):
     outputs = engine.generate(prompts, params, use_tqdm=False)
     torch.cuda.synchronize()
     elapsed = time.perf_counter() - start
-    return elapsed, sum(len(item["token_ids"]) for item in outputs)
+    return elapsed, outputs
 
 
 def install_phase_trace(engine):
@@ -77,19 +85,35 @@ def run_mode(args, mode, prompts, params):
     )
     try:
         engine.model_runner.use_prefill_cudagraph = mode == "all_graph"
+        runner = engine.model_runner
         totals, counts = install_phase_trace(engine)
+        torch.manual_seed(args.seed)
 
         # Cold run includes the first piecewise prefill capture when enabled.
-        cold_time, cold_tokens = timed_generate(engine, prompts, params, totals)
+        cold_time, cold_outputs = timed_generate(engine, prompts, params, totals)
+        cold_tokens = sum(len(item["token_ids"]) for item in cold_outputs)
 
         totals.clear()
         counts.clear()
         steady_times = []
         steady_tokens = []
-        for _ in range(args.repeats):
-            elapsed, tokens = timed_generate(engine, prompts, params, totals)
+        steady_outputs = []
+        for repeat_idx in range(args.repeats):
+            run_prompts = prompts
+            if args.vary_prompt_lengths and len(prompts) > 1:
+                shift = (repeat_idx + 1) % len(prompts)
+                run_prompts = prompts[shift:] + prompts[:shift]
+            elapsed, outputs = timed_generate(
+                engine,
+                run_prompts,
+                params,
+                totals,
+            )
             steady_times.append(elapsed)
-            steady_tokens.append(tokens)
+            steady_outputs.append(outputs)
+            steady_tokens.append(
+                sum(len(item["token_ids"]) for item in outputs)
+            )
 
         steady_median = statistics.median(steady_times)
         phase_time = dict(totals)
@@ -107,6 +131,8 @@ def run_mode(args, mode, prompts, params):
             f"prefill_calls={phase_counts.get('prefill', 0)} "
             f"decode_calls={phase_counts.get('decode', 0)}"
         )
+        graph_buckets = sorted(runner.prefill_piecewise_graphs)
+        print(f"prefill_graph_buckets mode={mode} buckets={graph_buckets}")
         return {
             "mode": mode,
             "cold": cold_time,
@@ -118,6 +144,14 @@ def run_mode(args, mode, prompts, params):
             "decode_s": phase_time.get("decode", 0.0),
             "prefill_calls": phase_counts.get("prefill", 0),
             "decode_calls": phase_counts.get("decode", 0),
+            "prefill_graph_buckets": graph_buckets,
+            "cold_output_ids": [
+                item["token_ids"] for item in cold_outputs
+            ],
+            "steady_output_ids": [
+                [item["token_ids"] for item in outputs]
+                for outputs in steady_outputs
+            ],
         }
     finally:
         engine.exit()
@@ -135,6 +169,12 @@ def main() -> None:
     parser.add_argument("--prompt-repeat", type=int, default=16)
     parser.add_argument("--max-tokens", type=int, default=8)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--vary-prompt-lengths",
+        action="store_true",
+        help="Use different prompt lengths to exercise cu_seqlens ragged batching.",
+    )
     parser.add_argument(
         "--mode",
         choices=("all_graph", "decode_only"),
@@ -147,12 +187,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    prompts = make_prompts(args.num_seqs, args.prompt_repeat)
+    prompts = make_prompts(
+        args.num_seqs,
+        args.prompt_repeat,
+        args.vary_prompt_lengths,
+    )
     params = SamplingParams(temperature=0.7, max_tokens=args.max_tokens, ignore_eos=True)
     print(
         f"requests={args.num_seqs} max_num_seqs={args.max_num_seqs} "
         f"prompt_repeat={args.prompt_repeat} max_tokens={args.max_tokens} "
-        f"repeats={args.repeats}"
+        f"repeats={args.repeats} vary_prompt_lengths={args.vary_prompt_lengths}"
     )
 
     if args.mode is not None:
@@ -174,8 +218,11 @@ def main() -> None:
         "--prompt-repeat", str(args.prompt_repeat),
         "--max-tokens", str(args.max_tokens),
         "--repeats", str(args.repeats),
+        "--seed", str(args.seed),
         "--json-output",
     ]
+    if args.vary_prompt_lengths:
+        passthrough.append("--vary-prompt-lengths")
     for mode in ("all_graph", "decode_only"):
         command = [
             sys.executable,
@@ -214,7 +261,11 @@ def main() -> None:
     steady_speedup = decode_only["steady"] / all_graph["steady"]
     cold_speedup = decode_only["cold"] / all_graph["cold"]
     prefill_speedup = decode_only["prefill_s"] / all_graph["prefill_s"]
-    decode_ratio = decode_only["decode_s"] / all_graph["decode_s"]
+    decode_ratio = (
+        decode_only["decode_s"] / all_graph["decode_s"]
+        if all_graph["decode_s"] > 0
+        else float("nan")
+    )
     print(
         f"steady_speedup_prefill_graph={steady_speedup:.3f} "
         f"({(steady_speedup - 1) * 100:.1f}%)"
@@ -228,6 +279,16 @@ def main() -> None:
         f"({(prefill_speedup - 1) * 100:.1f}%) "
         f"decode_phase_ratio={decode_ratio:.3f}"
     )
+    output_match = (
+        all_graph["cold_output_ids"] == decode_only["cold_output_ids"]
+        and all_graph["steady_output_ids"]
+        == decode_only["steady_output_ids"]
+    )
+    print(f"output_token_match={output_match}")
+    if not output_match:
+        raise AssertionError(
+            "prefill CUDA Graph and decode-only modes produced different tokens"
+        )
 
 
 if __name__ == "__main__":

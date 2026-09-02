@@ -214,21 +214,14 @@ class Qwen3_5DecoderLayer(nn.Module):
         if context.is_prefill:
             if prefill_slices is None:
                 raise RuntimeError("prefill_slices are required for GDN prefill")
-            outputs: list[torch.Tensor] = []
-            try:
-                for batch_idx, (start, end) in enumerate(prefill_slices):
-                    context.state_indices = (
-                        None
-                        if state_indices is None
-                        else state_indices[batch_idx:batch_idx + 1]
-                    )
-                    output = self.linear_attn(
-                        hidden_states[start:end].unsqueeze(0)
-                    )
-                    outputs.append(output.squeeze(0))
-            finally:
-                context.state_indices = state_indices
-            return torch.cat(outputs, dim=0)
+            if state_indices is None:
+                raise RuntimeError(
+                    "GDN prefill requires Context.state_indices"
+                )
+            # One GDN call handles all packed requests. cu_seqlens carries the
+            # variable-length boundaries and state_indices routes each request
+            # to its persistent recurrent/conv state slot.
+            return self.linear_attn(hidden_states.unsqueeze(0)).squeeze(0)
 
         if state_indices is None:
             raise RuntimeError(
@@ -246,6 +239,20 @@ class Qwen3_5DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         prefill_slices: list[tuple[int, int]] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_states, residual = self.forward_input(hidden_states, residual)
+        hidden_states = self.forward_attention(
+            positions,
+            hidden_states,
+            prefill_slices,
+        )
+        return self.forward_output(hidden_states, residual)
+
+    def forward_input(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Static segment before the variable-length attention operator."""
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -254,15 +261,28 @@ class Qwen3_5DecoderLayer(nn.Module):
                 hidden_states,
                 residual,
             )
+        return hidden_states, residual
 
+    def forward_attention(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        prefill_slices: list[tuple[int, int]] | None = None,
+    ) -> torch.Tensor:
+        """Dynamic GDN or full-attention segment kept outside prefill graphs."""
         if self.block_type == "linear_attention":
-            hidden_states = self._run_linear_attention(
+            return self._run_linear_attention(
                 hidden_states,
                 prefill_slices,
             )
-        else:
-            hidden_states = self.self_attn(positions, hidden_states)
+        return self.self_attn(positions, hidden_states)
 
+    def forward_output(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Static segment after attention, suitable for token-size buckets."""
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states,
             residual,

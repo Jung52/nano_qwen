@@ -319,6 +319,12 @@ class ModelRunner:
                 "prefix-cache prefill is not supported by this runner"
             )
         prefill_slices = list(zip(cu_seqlens_q[:-1], cu_seqlens_q[1:]))
+        prefill_chunk_indices = []
+        for batch_idx, (start, end) in enumerate(prefill_slices):
+            prefill_chunk_indices.extend(
+                (batch_idx, chunk_idx)
+                for chunk_idx in range((end - start + 63) // 64)
+            )
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -335,6 +341,11 @@ class ModelRunner:
             block_tables=block_tables,
             state_indices=state_indices,
             prefill_slices=prefill_slices,
+            prefill_chunk_indices=torch.tensor(
+                prefill_chunk_indices,
+                dtype=torch.int32,
+                device=input_ids.device,
+            ),
         )
         return input_ids, positions
 
@@ -415,13 +426,13 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_prefill_piecewise(self, input_ids: torch.Tensor, positions: torch.Tensor):
-        """Run decoder layers through per-layer (piecewise) CUDA Graphs.
+        """Run prefill with vLLM-style token-bucketed graph segments.
 
-        Embedding and the final norm stay eager. Each decoder layer has a
-        graph entry keyed by the packed prefill layout, matching the
-        ``uniform=False`` piecewise mode used by vLLM. This keeps dynamic
-        Python scheduling outside the graph while replaying the stable layer
-        kernels with fixed device addresses.
+        Token-wise dense work before and after attention is captured with a
+        fixed padded token count. Variable-length GDN/full-attention remains
+        eager and consumes the real packed rows and metadata. Consequently,
+        different request layouts with the same padded total-token count can
+        share these graphs without capturing a dynamic kernel launch grid.
         """
         context = get_context()
         if context.block_tables is not None:
@@ -431,46 +442,57 @@ class ModelRunner:
         if context.prefill_slices is None:
             raise RuntimeError("prefill graph requires Context.prefill_slices")
 
-        key = tuple(context.prefill_slices)
-        entries = self.prefill_piecewise_graphs.get(key)
-        if entries is None:
-            entries = self.capture_prefill_piecewise(input_ids, positions, context)
-            self.prefill_piecewise_graphs[key] = entries
+        num_tokens = input_ids.size(0)
+        graph_size = next(
+            (size for size in self.prefill_graph_sizes if size >= num_tokens),
+            None,
+        )
+        if graph_size is None:
+            return self.model.compute_logits(self.model(input_ids, positions))
 
+        entries = self.prefill_piecewise_graphs.setdefault(graph_size, {})
         hidden = self.model.model.embed_tokens(input_ids)
         residual = None
-        for layer_idx, entry in enumerate(entries):
-            vars = entry["vars"]
-            if entry.pop("first_use", False):
-                # capture_prefill_piecewise already ran this piece with the
-                # real input and state; re-playing here would apply GDN state
-                # updates twice on the first request of a new layout.
-                hidden = entry["outputs"]["hidden"]
-                residual = entry["outputs"]["residual"]
-                continue
-            vars["hidden_in"].copy_(hidden)
-            if residual is not None:
-                vars["residual_in"].copy_(residual)
-            vars["positions"].copy_(positions)
-            vars["cu_seqlens_q"].copy_(context.cu_seqlens_q)
-            vars["cu_seqlens_k"].copy_(context.cu_seqlens_k)
-            vars["slot_mapping"].copy_(context.slot_mapping)
-            vars["state_indices"].copy_(context.state_indices)
-            set_context(
-                True,
-                cu_seqlens_q=vars["cu_seqlens_q"],
-                cu_seqlens_k=vars["cu_seqlens_k"],
-                max_seqlen_q=context.max_seqlen_q,
-                max_seqlen_k=context.max_seqlen_k,
-                slot_mapping=vars["slot_mapping"],
-                state_indices=vars["state_indices"],
-                prefill_slices=context.prefill_slices,
-            )
-            entry["graph"].replay()
-            hidden = entry["outputs"]["hidden"]
-            residual = entry["outputs"]["residual"]
+        for layer_idx, layer in enumerate(self.model.model.layers):
+            entry = entries.get(layer_idx)
+            if entry is None:
+                entry = self.capture_prefill_layer_segments(
+                    layer,
+                    graph_size,
+                    has_residual=residual is not None,
+                )
+                entries[layer_idx] = entry
 
-        hidden, _ = self.model.model.norm(hidden, residual)
+            pre = entry["pre"]
+            pre["hidden_in"].zero_()
+            pre["hidden_in"][:num_tokens].copy_(hidden[:num_tokens])
+            if residual is not None:
+                pre["residual_in"].zero_()
+                pre["residual_in"][:num_tokens].copy_(residual[:num_tokens])
+            pre["graph"].replay()
+            attention_input = pre["hidden_out"][:num_tokens]
+            layer_residual = pre["residual_out"]
+
+            # This is the graph break: only real packed tokens enter the
+            # variable-length operator, with the current request boundaries.
+            attention_output = layer.forward_attention(
+                positions,
+                attention_input,
+                context.prefill_slices,
+            )
+
+            post = entry["post"]
+            post["hidden_in"].zero_()
+            post["hidden_in"][:num_tokens].copy_(attention_output)
+            post["residual_in"].copy_(layer_residual)
+            post["graph"].replay()
+            hidden = post["hidden_out"]
+            residual = post["residual_out"]
+
+        hidden, _ = self.model.model.norm(
+            hidden[:num_tokens],
+            residual[:num_tokens],
+        )
         return self.model.compute_logits(hidden)
 
     def execute_model(self, seqs: list[Sequence], is_prefill: bool) -> None:
@@ -614,95 +636,71 @@ class ModelRunner:
             state_indices=state_indices,
             outputs=outputs,
         )
-        # Piecewise prefill graphs are created lazily by packed layout. The
-        # decode graphs above remain full graphs for exact batch sizes.
+        max_prefill_tokens = min(config.max_num_batched_tokens, 512)
+        self.prefill_graph_sizes = [
+            size
+            for size in ([1, 2, 4, 8] + list(range(16, max_prefill_tokens + 1, 16)))
+            if size <= max_prefill_tokens
+        ]
+        if (
+            max_prefill_tokens > 0
+            and max_prefill_tokens not in self.prefill_graph_sizes
+        ):
+            self.prefill_graph_sizes.append(max_prefill_tokens)
+        # Piecewise prefill graphs are captured lazily by padded total-token
+        # count. Decode graphs above remain full graphs by exact batch size.
         self.prefill_piecewise_graphs = {}
 
     @torch.inference_mode()
-    def capture_prefill_piecewise(self, input_ids, positions, context):
-        """Capture one CUDA Graph piece per decoder layer for a layout."""
-        if context.block_tables is not None:
-            raise RuntimeError(
-                "prefix-cache prefill is not supported by the CUDA Graph path"
-            )
-        if context.prefill_slices is None:
-            raise RuntimeError("prefill graph requires prefill_slices")
+    def capture_prefill_layer_segments(
+        self,
+        layer,
+        graph_size: int,
+        has_residual: bool,
+    ):
+        """Capture the two static pieces around one dynamic attention op."""
+        hidden_size = self.config.hf_config.hidden_size
+        model_weight = self.model.model.embed_tokens.weight
+        pre_hidden = torch.zeros(
+            graph_size,
+            hidden_size,
+            dtype=model_weight.dtype,
+            device=model_weight.device,
+        )
+        pre_residual = (
+            torch.zeros_like(pre_hidden) if has_residual else None
+        )
+        for _ in range(2):
+            pre_outputs = layer.forward_input(pre_hidden, pre_residual)
+        torch.cuda.synchronize()
+        pre_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(pre_graph, self.graph_pool):
+            pre_outputs = layer.forward_input(pre_hidden, pre_residual)
+        torch.cuda.synchronize()
 
-        hidden = self.model.model.embed_tokens(input_ids)
-        residual = None
-        entries = []
-        for layer_idx, layer in enumerate(self.model.model.layers):
-            vars = {
-                "hidden_in": torch.empty_like(hidden),
-                "residual_in": torch.empty_like(hidden),
-                "positions": torch.empty_like(positions),
-                "cu_seqlens_q": torch.empty_like(context.cu_seqlens_q),
-                "cu_seqlens_k": torch.empty_like(context.cu_seqlens_k),
-                "slot_mapping": torch.empty_like(context.slot_mapping),
-                "state_indices": torch.empty_like(context.state_indices),
-            }
-            vars["hidden_in"].copy_(hidden)
-            if residual is not None:
-                vars["residual_in"].copy_(residual)
-            vars["positions"].copy_(positions)
-            vars["cu_seqlens_q"].copy_(context.cu_seqlens_q)
-            vars["cu_seqlens_k"].copy_(context.cu_seqlens_k)
-            vars["slot_mapping"].copy_(context.slot_mapping)
-            vars["state_indices"].copy_(context.state_indices)
-            set_context(
-                True,
-                cu_seqlens_q=vars["cu_seqlens_q"],
-                cu_seqlens_k=vars["cu_seqlens_k"],
-                max_seqlen_q=context.max_seqlen_q,
-                max_seqlen_k=context.max_seqlen_k,
-                slot_mapping=vars["slot_mapping"],
-                state_indices=vars["state_indices"],
-                prefill_slices=context.prefill_slices,
-            )
-            state_snapshots = [
-                (gdn.conv_states.clone(), gdn.recurrent_states.clone())
-                for gdn in self.gdn_layers
-            ]
-            for _ in range(2):
-                if residual is None:
-                    warm_hidden, warm_residual = layer(
-                        vars["positions"], vars["hidden_in"], None,
-                        context.prefill_slices,
-                    )
-                else:
-                    warm_hidden, warm_residual = layer(
-                        vars["positions"], vars["hidden_in"],
-                        vars["residual_in"], context.prefill_slices,
-                    )
-            torch.cuda.synchronize()
-            for gdn, (conv_state, recurrent_state) in zip(
-                self.gdn_layers, state_snapshots
-            ):
-                gdn.conv_states.copy_(conv_state)
-                gdn.recurrent_states.copy_(recurrent_state)
-            torch.cuda.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, self.graph_pool):
-                if residual is None:
-                    outputs = layer(
-                        vars["positions"], vars["hidden_in"], None,
-                        context.prefill_slices,
-                    )
-                else:
-                    outputs = layer(
-                        vars["positions"], vars["hidden_in"],
-                        vars["residual_in"], context.prefill_slices,
-                    )
-            torch.cuda.synchronize()
-            entries.append({
-                "graph": graph,
-                "vars": vars,
-                "first_use": True,
-                "outputs": {
-                    "hidden": outputs[0],
-                    "residual": outputs[1],
-                },
-            })
-            hidden, residual = outputs
-        reset_context()
-        return entries
+        post_hidden = torch.zeros_like(pre_hidden)
+        post_residual = torch.zeros_like(pre_hidden)
+        for _ in range(2):
+            post_outputs = layer.forward_output(post_hidden, post_residual)
+        torch.cuda.synchronize()
+        post_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(post_graph, self.graph_pool):
+            post_outputs = layer.forward_output(post_hidden, post_residual)
+        torch.cuda.synchronize()
+
+        return {
+            "pre": {
+                "graph": pre_graph,
+                "hidden_in": pre_hidden,
+                "residual_in": pre_residual,
+                "hidden_out": pre_outputs[0],
+                "residual_out": pre_outputs[1],
+            },
+            "post": {
+                "graph": post_graph,
+                "hidden_in": post_hidden,
+                "residual_in": post_residual,
+                "hidden_out": post_outputs[0],
+                "residual_out": post_outputs[1],
+            },
+        }
