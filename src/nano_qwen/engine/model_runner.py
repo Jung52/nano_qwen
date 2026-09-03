@@ -1,4 +1,5 @@
 import pickle
+import socket
 from contextlib import contextmanager
 
 import torch
@@ -13,9 +14,16 @@ from nano_qwen.layers.sampler import Sampler
 from nano_qwen.models.qwen3_5 import Qwen3_5ForCausalLM
 from nano_qwen.utils.context import set_context, get_context, reset_context
 from nano_qwen.utils.loader import load_model
+from nano_qwen.utils.trace import trace_event
 
 from .async_output import AsyncModelOutput
 from .decode_init import prepare_decode as prepare_decode_kernel
+
+
+def find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 class InputBatch:
@@ -62,7 +70,13 @@ class InputBatch:
 
 class ModelRunner:
 
-    def __init__(self, config: Config, rank: int, event: Event | list[Event]):
+    def __init__(
+        self,
+        config: Config,
+        rank: int,
+        event: Event | list[Event],
+        port: int | None = None,
+    ):
         self.config = config
         hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
@@ -71,7 +85,16 @@ class ModelRunner:
         self.rank = rank
         self.event = event
 
-        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+        # Rendezvous on an ephemeral port: a fixed port lingers in TIME_WAIT
+        # after exit and makes a rerun within ~60s fail with EADDRINUSE.
+        if port is None:
+            port = find_free_port()
+        dist.init_process_group(
+            "nccl",
+            f"tcp://127.0.0.1:{port}",
+            world_size=self.world_size,
+            rank=rank,
+        )
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.dtype)
@@ -532,8 +555,16 @@ class ModelRunner:
             for layer in self.gdn_layers:
                 layer.reset_state(new_slots)
 
-        input_ids, positions, temperatures = self.prepare_inputs(seqs, is_prefill)
-        logits = self.run_model(input_ids, positions, is_prefill)
+        with trace_event(
+            "prepare_inputs", "runner",
+            args={"prefill": is_prefill, "bs": len(seqs)},
+        ):
+            input_ids, positions, temperatures = self.prepare_inputs(seqs, is_prefill)
+        with trace_event(
+            "run_model", "runner",
+            args={"prefill": is_prefill, "tokens": input_ids.size(0)},
+        ):
+            logits = self.run_model(input_ids, positions, is_prefill)
         # Depth-1 async: store the sampling state for the immediately-
         # following sample_tokens() call. batch_slots_gpu is safe to reuse
         # here because no second batch can be dispatched before sampling.
@@ -567,7 +598,8 @@ class ModelRunner:
             )
             logits = logits.index_select(0, last_indices_gpu)
 
-        token_ids = self.sampler(logits, temperatures)
+        with trace_event("sampler", "runner", args={"prefill": is_prefill, "bs": bs}):
+            token_ids = self.sampler(logits, temperatures)
         slots = self.batch_slots_gpu[:bs]
         self.sampled_token_ids_gpu.scatter_(0, slots, token_ids)
 
@@ -579,11 +611,15 @@ class ModelRunner:
         if self.async_output:
             self.output_copy_stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(self.output_copy_stream):
-                output_buf.copy_(token_ids, non_blocking=True)
+                # Non-blocking enqueue; the real copy latency surfaces as
+                # d2h_wait on the consuming step.
+                with trace_event("d2h_copy", "runner", args={"bs": bs}):
+                    output_buf.copy_(token_ids, non_blocking=True)
                 ready_event.record(self.output_copy_stream)
         else:
             # Blocking D2H baseline: return only after the CPU buffer is ready.
-            output_buf.copy_(token_ids, non_blocking=False)
+            with trace_event("d2h_copy_sync", "runner", args={"bs": bs}):
+                output_buf.copy_(token_ids, non_blocking=False)
             ready_event.record(torch.cuda.current_stream())
 
         reset_context()

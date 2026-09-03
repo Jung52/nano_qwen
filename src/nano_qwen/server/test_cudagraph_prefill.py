@@ -81,7 +81,7 @@ def run_mode(args, mode, prompts, params):
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
-        gpu_memory_utilization=0.50,
+        gpu_memory_utilization=0.90,
     )
     try:
         engine.model_runner.use_prefill_cudagraph = mode == "all_graph"

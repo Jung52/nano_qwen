@@ -10,8 +10,9 @@ from transformers import AutoTokenizer
 from nano_qwen.config import Config
 from nano_qwen.engine.sequence import Sequence
 from nano_qwen.sampling_params import SamplingParams
+from nano_qwen.utils.trace import trace_event
 
-from .model_runner import ModelRunner
+from .model_runner import ModelRunner, find_free_port
 from ..scheduler import Scheduler
 
 
@@ -38,17 +39,21 @@ class LLMEngine:
         self.ps = []
         self.events = []
         ctx = mp.get_context("spawn")
+        # Pick the NCCL rendezvous port once so every rank joins the same
+        # store; an ephemeral port avoids EADDRINUSE from the previous run's
+        # socket lingering in TIME_WAIT.
+        dist_port = find_free_port()
         for rank in range(1, self.config.tensor_parallel_size):
             event = ctx.Event()
             process = ctx.Process(
                 target=ModelRunner,
-                args=(self.config, rank, event),
+                args=(self.config, rank, event, dist_port),
             )
             process.start()
             self.ps.append(process)
             self.events.append(event)
 
-        self.model_runner = ModelRunner(self.config, 0, self.events)
+        self.model_runner = ModelRunner(self.config, 0, self.events, dist_port)
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.model,
             use_fast=True,
@@ -88,7 +93,8 @@ class LLMEngine:
         """
         # Phase 1: fill the queue (never blocks).
         while len(self.batch_queue) < self.max_concurrent_batches:
-            seqs, is_prefill = self.scheduler.schedule()
+            with trace_event("schedule", "engine"):
+                seqs, is_prefill = self.scheduler.schedule()
             if not seqs:
                 break
             num_tokens = (
@@ -96,8 +102,13 @@ class LLMEngine:
                 if is_prefill
                 else -len(seqs)
             )
-            self.model_runner.call("execute_model", seqs, is_prefill)
-            async_output = self.model_runner.call("sample_tokens")
+            with trace_event(
+                "execute_model", "engine",
+                args={"prefill": is_prefill, "bs": len(seqs)},
+            ):
+                self.model_runner.call("execute_model", seqs, is_prefill)
+            with trace_event("sample_tokens", "engine"):
+                async_output = self.model_runner.call("sample_tokens")
             assert async_output is not None
             self.batch_queue.append((seqs, is_prefill, num_tokens, async_output))
 
@@ -105,7 +116,11 @@ class LLMEngine:
         if not self.batch_queue:
             return [], 0
         seqs, is_prefill, num_tokens, async_output = self.batch_queue.popleft()
-        token_ids = async_output.get_output()
+        with trace_event(
+            "d2h_wait", "engine",
+            args={"prefill": is_prefill, "bs": len(seqs)},
+        ):
+            token_ids = async_output.get_output()
 
         for seq, token_id in zip(seqs, token_ids):
             if (
