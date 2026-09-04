@@ -1,8 +1,10 @@
 import atexit
+import gc
 from collections import deque
 from dataclasses import fields
 from time import perf_counter
 
+import torch
 import torch.multiprocessing as mp
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
@@ -64,18 +66,46 @@ class LLMEngine:
         # flight, CPU runs ahead of GPU by N-1 steps (core.py:622-736).
         self.max_concurrent_batches = 2
         self.batch_queue: deque[tuple[list[Sequence], bool, int, object]] = deque()
-        atexit.register(self.exit)
+        # Keep the exact callback so manual exit can unregister it. Leaving a
+        # bound method in atexit keeps the whole engine alive until interpreter
+        # shutdown, including CUDA graph/model references.
+        self._atexit_callback = self.exit
+        atexit.register(self._atexit_callback)
 
     def exit(self):
         if self._exited:
             return
         self._exited = True
-        if not hasattr(self, "model_runner"):
-            return
-        self.model_runner.call("exit")
-        del self.model_runner
-        for process in self.ps:
+        callback = getattr(self, "_atexit_callback", None)
+        if callback is not None:
+            atexit.unregister(callback)
+            self._atexit_callback = None
+
+        runner = getattr(self, "model_runner", None)
+        if runner is not None:
+            try:
+                runner.call("exit")
+            finally:
+                self.model_runner = None
+        for process in getattr(self, "ps", []):
             process.join()
+
+        # AsyncModelOutput retains both device and pinned host tensors until
+        # consumed. Drop all engine-owned queues/references before collecting.
+        self.batch_queue.clear()
+        self.ps.clear()
+        self.events.clear()
+        scheduler = getattr(self, "scheduler", None)
+        if scheduler is not None:
+            scheduler.waiting.clear()
+            scheduler.running.clear()
+            scheduler.in_flight.clear()
+            self.scheduler = None
+        self.tokenizer = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
 
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams,
     ) -> None:

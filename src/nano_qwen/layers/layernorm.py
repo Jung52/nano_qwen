@@ -13,7 +13,7 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(hidden_size))
 
-    @torch.compile
+    @torch.compile(dynamic=True)
     def rms_forward(
         self,
         x: torch.Tensor,
@@ -25,7 +25,7 @@ class RMSNorm(nn.Module):
         x = x.to(orig_dtype).mul_(self.weight)
         return x
 
-    @torch.compile
+    @torch.compile(dynamic=True)
     def add_rms_forward(
         self,
         x: torch.Tensor,
@@ -78,7 +78,7 @@ class GemmaRMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.zeros(hidden_size))
 
-    @torch.compile
+    @torch.compile(dynamic=True)
     def rms_forward(
         self,
         x: torch.Tensor,
@@ -90,7 +90,7 @@ class GemmaRMSNorm(nn.Module):
         x = x.to(orig_dtype) * (1.0 + self.weight)
         return x
 
-    @torch.compile
+    @torch.compile(dynamic=True)
     def add_rms_forward(
         self,
         x: torch.Tensor,

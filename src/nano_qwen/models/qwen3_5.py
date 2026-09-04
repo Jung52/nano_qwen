@@ -132,8 +132,12 @@ class Qwen3_5Attention(nn.Module):
             -1, self.num_kv_heads, self.head_dim
         )
 
-        query = self.q_norm(query)
-        key = self.k_norm(key)
+        # Keep the compiled RMSNorm entry point rank-stable across prefill
+        # and decode. The attention projections are 3-D, while the decoder
+        # residual path is 2-D; flatten only this per-head norm and restore
+        # the head dimension for RoPE/attention.
+        query = self.q_norm(query.reshape(-1, self.head_dim)).reshape_as(query)
+        key = self.k_norm(key.reshape(-1, self.head_dim)).reshape_as(key)
         query, key = self.rotary_emb(positions, query, key)
 
         attn_output = self.attn(query, key, value)

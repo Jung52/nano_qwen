@@ -77,6 +77,7 @@ class ModelRunner:
         event: Event | list[Event],
         port: int | None = None,
     ):
+        self._closed = False
         self.config = config
         hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
@@ -164,15 +165,41 @@ class ModelRunner:
                 self.loop()
 
     def exit(self):
+        if self._closed:
+            return
+        self._closed = True
         if self.world_size > 1:
             self.shm.close()
             dist.barrier()
             if self.rank == 0:
                 self.shm.unlink()
-        if not self.enforce_eager:
-            del self.graphs, self.graph_pool
         torch.cuda.synchronize()
-        dist.destroy_process_group()
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+        # CUDA Graphs retain captured allocations through their Python
+        # containers. Clear every runner-owned GPU reference, including the
+        # lazily-created piecewise graphs, before the engine is discarded.
+        self._pending = None
+        for name in ("prefill_piecewise_graphs", "graph_vars", "graphs"):
+            value = getattr(self, name, None)
+            if value is not None:
+                value.clear()
+        for name in ("gdn_layers", "decode_gpu", "decode_cpu",
+                     "_output_pin_bufs", "_output_events"):
+            value = getattr(self, name, None)
+            if value is not None:
+                value.clear()
+        if hasattr(self, "input_batch"):
+            self.input_batch.clear()
+        self.model = None
+        self.kv_cache = None
+        self.graph_pool = None
+        self.sampled_token_ids_gpu = None
+        self.batch_slots_gpu = None
+        self.prepare_inputs_event = None
+        self.output_copy_stream = None
+        torch.cuda.empty_cache()
 
     def loop(self):
         while True:

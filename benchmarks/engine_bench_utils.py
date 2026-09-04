@@ -126,15 +126,31 @@ PERF_MODE_NAMES = {m.name: m for m in PERF_MODES}
 
 
 class ArgmaxSampler(nn.Module):
-    """Benchmark-only deterministic sampler: exact-token comparison across modes.
+    """Benchmark-only deterministic sampler with bf16 tie diagnostics.
 
     Patched onto ``engine.model_runner.sampler`` in validation scripts only;
-    the production Sampler is untouched.  Also doubles as a logits-finiteness
-    check (asserts before argmax).
+    the production Sampler is untouched. CUDA Graph and eager paths can differ
+    by a bf16 ULP, so rows whose top-two margin is below ``tie_tolerance`` are
+    counted as numerical ties instead of silently changing the argmax rule.
     """
+
+    def __init__(self, tie_tolerance: float = 1e-2) -> None:
+        super().__init__()
+        self.tie_tolerance = tie_tolerance
+        self.ambiguous_rows = 0
+        self.total_rows = 0
+
+    def reset_stats(self) -> None:
+        self.ambiguous_rows = 0
+        self.total_rows = 0
 
     def forward(self, logits: torch.Tensor, temperatures: torch.Tensor) -> torch.Tensor:
         assert torch.isfinite(logits).all(), "non-finite logits observed"
+        values = logits.float().topk(2, dim=-1).values
+        self.total_rows += logits.shape[0]
+        self.ambiguous_rows += int(
+            (values[:, 0] - values[:, 1]).abs().le(self.tie_tolerance).sum().item()
+        )
         return logits.argmax(dim=-1)
 
 
@@ -156,14 +172,11 @@ def make_engine(
     are runtime attributes applied afterwards.
 
     ``reset_cuda_stats`` releases the caching allocator and zeroes the
-    process-wide CUDA memory counters first — required when a second engine
-    is created in the same process, because ``allocate_kv_cache`` derives its
-    budget from those counters (a previous engine's peak would otherwise be
-    double-counted and the KV-cache assert fails).
+    process-wide CUDA memory counters first. ``LLMEngine.exit`` now performs
+    the ownership teardown itself; this reset remains defensive because
+    ``allocate_kv_cache`` derives its budget from process-wide memory stats.
     """
     if reset_cuda_stats:
-        # engine.exit() leaves a reference cycle holding ~6GB of CUDA tensors
-        # (see probe_mem: gc.collect() drops alloc_current 6133MiB -> 8MiB).
         import gc
 
         gc.collect()

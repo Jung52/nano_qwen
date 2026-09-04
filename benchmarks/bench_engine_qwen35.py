@@ -71,9 +71,9 @@ def measure(
     """Run `build` warmup times then `rounds` times; returns (wall, result, seqs).
 
     ``build(round_idx)`` receives the round index — builders must vary their
-    prompt tokens per round, because the engine's block manager hashes filled
-    blocks (prefix cache); re-submitting an identical prompt hits the cache
-    and prepare_prefill raises ``prefix-cache prefill is not supported``.
+    prompt tokens per round so each round exercises fresh KV/state allocation.
+    Prefix-cache reuse is disabled by default because the GDN recurrent state
+    is not part of the block-cache payload.
     """
     for r in range(warmup):
         seqs = build(r)
