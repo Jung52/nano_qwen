@@ -661,13 +661,14 @@ class ModelRunner:
         hf_config = config.hf_config
         max_bs = min(self.config.max_num_seqs, 512)
         max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
-        input_ids = torch.zeros(max_bs, dtype=torch.int64)
-        positions = torch.zeros(max_bs, dtype=torch.int64)
-        slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
-        context_lens = torch.zeros(max_bs, dtype=torch.int32)
-        block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
-        state_indices = torch.zeros(max_bs, dtype=torch.int64)
-        outputs = torch.zeros(max_bs, hf_config.hidden_size)
+        device = torch.cuda.current_device()
+        input_ids = torch.zeros(max_bs, dtype=torch.int64, device=device)
+        positions = torch.zeros(max_bs, dtype=torch.int64, device=device)
+        slot_mapping = torch.zeros(max_bs, dtype=torch.int32, device=device)
+        context_lens = torch.zeros(max_bs, dtype=torch.int32, device=device)
+        block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32, device=device)
+        state_indices = torch.zeros(max_bs, dtype=torch.int64, device=device)
+        outputs = torch.zeros(max_bs, hf_config.hidden_size, device=device)
         self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
         self.graphs = {}
         self.graph_pool = None
@@ -681,7 +682,16 @@ class ModelRunner:
                 block_tables=block_tables[:bs],
                 state_indices=state_indices[:bs],
             )
-            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
+            # Warm up on a side stream (per the CUDA Graph recipe) so that
+            # torch.compile finishes tracing/compilation before capture;
+            # Dynamo tracing during capture would issue a host->device
+            # scalar copy, which is illegal while a stream is capturing.
+            warmup_stream = torch.cuda.Stream()
+            warmup_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(warmup_stream):
+                for _ in range(3):
+                    outputs[:bs] = self.model(input_ids[:bs], positions[:bs])
+            torch.cuda.current_stream().wait_stream(warmup_stream)
             with torch.cuda.graph(graph, self.graph_pool):
                 outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
             if self.graph_pool is None:
