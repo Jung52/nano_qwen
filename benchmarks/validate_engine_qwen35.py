@@ -57,6 +57,194 @@ except ImportError:  # pragma: no cover
 # Case implementations
 # ---------------------------------------------------------------------------
 
+def _state_fingerprint_diff(
+    baseline: dict[str, Any] | None,
+    candidate: dict[str, Any] | None,
+    *,
+    atol: float = 5e-4,
+    rtol: float = 5e-3,
+) -> dict[str, Any]:
+    """Compare compact per-layer GDN state summaries at one token."""
+    if not baseline or not candidate:
+        return {"available": False}
+    lhs = {item["layer_idx"]: item for item in baseline.get("gdn_state", [])}
+    rhs = {item["layer_idx"]: item for item in candidate.get("gdn_state", [])}
+    common = sorted(lhs.keys() & rhs.keys())
+    first_bad_layer = None
+    largest: dict[str, Any] = {
+        "abs_delta": 0.0,
+        "layer_idx": None,
+        "state": None,
+        "metric": None,
+    }
+    for layer_idx in common:
+        layer_bad = False
+        for state_name in ("conv", "recurrent"):
+            for metric in ("mean", "abs_mean", "rms", "max_abs"):
+                a = float(lhs[layer_idx][state_name][metric])
+                b = float(rhs[layer_idx][state_name][metric])
+                delta = abs(a - b)
+                if delta > largest["abs_delta"]:
+                    largest = {
+                        "abs_delta": delta,
+                        "layer_idx": layer_idx,
+                        "state": state_name,
+                        "metric": metric,
+                        "baseline": a,
+                        "candidate": b,
+                    }
+                layer_bad |= delta > atol + rtol * max(abs(a), abs(b))
+        if layer_bad and first_bad_layer is None:
+            first_bad_layer = layer_idx
+    return {
+        "available": bool(common),
+        "compared_layers": len(common),
+        "first_layer_outside_tolerance": first_bad_layer,
+        "largest_metric_delta": largest,
+        "atol": atol,
+        "rtol": rtol,
+    }
+
+
+def _competing_tokens_are_tied(
+    baseline: dict[str, Any] | None,
+    candidate: dict[str, Any] | None,
+    baseline_token: Any,
+    candidate_token: Any,
+) -> bool:
+    """Accept a winner flip explainable by bounded bf16 perturbations."""
+    if (
+        not baseline
+        or not candidate
+        or not isinstance(baseline_token, int)
+        or not isinstance(candidate_token, int)
+        or baseline_token == candidate_token
+    ):
+        return False
+    rows = []
+    competing_tokens = {baseline_token, candidate_token}
+    for diagnostic in (baseline, candidate):
+        tokens = diagnostic.get("top_tokens", [])
+        values = diagnostic.get("top_logits", [])
+        if len(tokens) < 2 or len(values) < 2:
+            return False
+        if set(tokens[:2]) != competing_tokens:
+            return False
+        value_by_token = dict(zip(tokens[:2], values[:2]))
+        gap = abs(
+            float(value_by_token[baseline_token])
+            - float(value_by_token[candidate_token])
+        )
+        tolerance = float(diagnostic.get("effective_tolerance", 0.0))
+        rows.append((value_by_token, gap, tolerance))
+
+    # Original rule: both rows are independently near-ties.
+    if all(gap <= tolerance for _, gap, tolerance in rows):
+        return True
+
+    # A tied pair can separate by two ULPs when the two logits each move by
+    # one ULP in opposite directions. Compare each competing token across
+    # runs instead of rejecting solely on the final within-row margin.
+    baseline_values, _, baseline_tolerance = rows[0]
+    candidate_values, _, candidate_tolerance = rows[1]
+    cross_run_tolerance = max(baseline_tolerance, candidate_tolerance)
+    return all(
+        abs(
+            float(baseline_values[token])
+            - float(candidate_values[token])
+        ) <= cross_run_tolerance
+        for token in competing_tokens
+    )
+
+
+def _first_signature_mismatch(
+    baseline: Any,
+    candidate: Any,
+    path: tuple[int, ...] = (),
+) -> dict[str, Any] | None:
+    if isinstance(baseline, list) and isinstance(candidate, list):
+        for index, (lhs, rhs) in enumerate(zip(baseline, candidate)):
+            mismatch = _first_signature_mismatch(lhs, rhs, path + (index,))
+            if mismatch is not None:
+                return mismatch
+        if len(baseline) != len(candidate):
+            index = min(len(baseline), len(candidate))
+            return {
+                "path": list(path + (index,)),
+                "baseline_token": baseline[index] if index < len(baseline) else None,
+                "candidate_token": candidate[index] if index < len(candidate) else None,
+                "length_mismatch": [len(baseline), len(candidate)],
+            }
+        return None
+    if baseline != candidate:
+        return {
+            "path": list(path),
+            "baseline_token": baseline,
+            "candidate_token": candidate,
+        }
+    return None
+
+
+def _nested_item(value: Any, path: list[int]) -> Any:
+    try:
+        for index in path:
+            value = value[index]
+        return value
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _logits_summary(diagnostic: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not diagnostic:
+        return None
+    return {
+        key: diagnostic.get(key)
+        for key in (
+            "top_tokens",
+            "top_logits",
+            "margin",
+            "effective_tolerance",
+            "near_tie",
+            "logits_dtype",
+        )
+    }
+
+
+def _signature_comparison(
+    baseline_case: dict[str, Any],
+    candidate_case: dict[str, Any],
+) -> dict[str, Any]:
+    mismatch = _first_signature_mismatch(
+        baseline_case.get("signature"),
+        candidate_case.get("signature"),
+    )
+    if mismatch is None:
+        return {"matches_baseline": True, "numeric_tie": False}
+
+    path = mismatch["path"]
+    baseline_diag = _nested_item(
+        baseline_case.get("signature_diagnostics"), path,
+    )
+    candidate_diag = _nested_item(
+        candidate_case.get("signature_diagnostics"), path,
+    )
+    mismatch["baseline_logits"] = _logits_summary(baseline_diag)
+    mismatch["candidate_logits"] = _logits_summary(candidate_diag)
+    mismatch["gdn_state_diff"] = _state_fingerprint_diff(
+        baseline_diag, candidate_diag,
+    )
+    return {
+        "matches_baseline": False,
+        "numeric_tie": _competing_tokens_are_tied(
+            baseline_diag,
+            candidate_diag,
+            mismatch.get("baseline_token"),
+            mismatch.get("candidate_token"),
+        ),
+        "first_mismatch": mismatch,
+    }
+
+
 def case_w1_single_request(engine) -> dict[str, Any]:
     """12 prompt lengths around the GDN CHUNK_SIZE=64 boundary, 1 request each."""
     vocab = engine.config.hf_config.vocab_size
@@ -256,37 +444,150 @@ def case_w6_batched_decode(engine) -> dict[str, Any]:
     """Batch sizes 1/2/3/4/5/8 (graph hits 1/2/4/8, eager fallback 3/5)."""
     vocab = engine.config.hf_config.vocab_size
     prompts = [make_random_prompt(128, seed=i, vocab_size=vocab) for i in range(8)]
+    sampler = engine.model_runner.sampler
+    diagnostics_available = all(
+        hasattr(sampler, name)
+        for name in ("enable_diagnostics", "disable_diagnostics", "get_diagnostic")
+    )
+    if diagnostics_available:
+        sampler.enable_diagnostics(capture_state=True)
 
-    solo: list[list[int]] = []
-    for p in prompts:
-        seq = Sequence(p, make_params(16))
-        engine.scheduler.add(seq)
-        run_until_idle(engine, [seq])
-        solo.append(seq.completion_token_ids)
+    try:
+        solo: list[list[int]] = []
+        for i, prompt in enumerate(prompts):
+            seq = Sequence(prompt, make_params(16))
+            seq._diagnostic_key = f"w6.solo.{i}"
+            engine.scheduler.add(seq)
+            run_until_idle(engine, [seq])
+            solo.append(seq.completion_token_ids)
 
-    per_bs: dict[int, list[list[int]]] = {}
-    for bs in (1, 2, 3, 4, 5, 8):
-        seqs = [Sequence(prompts[i], make_params(16)) for i in range(bs)]
-        for s in seqs:
-            engine.scheduler.add(s)
-        run_until_idle(engine, seqs)
-        per_bs[bs] = [s.completion_token_ids for s in seqs]
+        per_bs: dict[int, list[list[int]]] = {}
+        for bs in (1, 2, 3, 4, 5, 8):
+            seqs = [Sequence(prompts[i], make_params(16)) for i in range(bs)]
+            for i, seq in enumerate(seqs):
+                seq._diagnostic_key = f"w6.bs{bs}.{i}"
+                engine.scheduler.add(seq)
+            run_until_idle(engine, seqs)
+            per_bs[bs] = [seq.completion_token_ids for seq in seqs]
 
-    mismatches = []
-    for bs in (1, 2, 3, 4, 5, 8):
-        for i in range(bs):
-            b, s = per_bs[bs][i], solo[i]
-            if b != s:
-                pos = next((j for j, (x, y) in enumerate(zip(b, s)) if x != y), min(len(b), len(s)))
-                mismatches.append(f"bs{bs}.seq{i}@pos{pos}: solo={s[pos:pos + 4]} batched={b[pos:pos + 4]}")
-    ok = not mismatches
-    detail = "" if ok else "mismatches: " + "; ".join(mismatches[:8])
-    return {
-        "pass": ok,
-        "detail": detail,
-        "signature": solo,
-        "per_bs": {str(k): v for k, v in per_bs.items()},
-    }
+        mismatches: list[dict[str, Any]] = []
+        for bs in (1, 2, 3, 4, 5, 8):
+            for request_index in range(bs):
+                mismatch = _first_signature_mismatch(
+                    solo[request_index], per_bs[bs][request_index],
+                )
+                if mismatch is None:
+                    continue
+
+                position = mismatch["path"][0]
+                solo_diag = (
+                    sampler.get_diagnostic(
+                        f"w6.solo.{request_index}", position,
+                    )
+                    if diagnostics_available else None
+                )
+                batched_diag = (
+                    sampler.get_diagnostic(
+                        f"w6.bs{bs}.{request_index}", position,
+                    )
+                    if diagnostics_available else None
+                )
+                previous_position = position - 1 if position > 0 else None
+                previous_solo_diag = (
+                    sampler.get_diagnostic(
+                        f"w6.solo.{request_index}", previous_position,
+                    )
+                    if diagnostics_available and previous_position is not None
+                    else None
+                )
+                previous_batched_diag = (
+                    sampler.get_diagnostic(
+                        f"w6.bs{bs}.{request_index}", previous_position,
+                    )
+                    if diagnostics_available and previous_position is not None
+                    else None
+                )
+
+                mismatch.update({
+                    "batch_size": bs,
+                    "request_index": request_index,
+                    "position": position,
+                    "solo_logits": _logits_summary(solo_diag),
+                    "batched_logits": _logits_summary(batched_diag),
+                    "numeric_tie": _competing_tokens_are_tied(
+                        solo_diag,
+                        batched_diag,
+                        mismatch.get("baseline_token"),
+                        mismatch.get("candidate_token"),
+                    ),
+                    "gdn_state_diff": _state_fingerprint_diff(
+                        solo_diag, batched_diag,
+                    ),
+                    "previous_position": previous_position,
+                    "previous_solo_logits": _logits_summary(previous_solo_diag),
+                    "previous_batched_logits": _logits_summary(
+                        previous_batched_diag,
+                    ),
+                    "previous_gdn_state_diff": _state_fingerprint_diff(
+                        previous_solo_diag, previous_batched_diag,
+                    ),
+                })
+                mismatches.append(mismatch)
+
+        signature_diagnostics = [
+            [
+                sampler.get_diagnostic(f"w6.solo.{request_index}", position)
+                if diagnostics_available else None
+                for position in range(len(tokens))
+            ]
+            for request_index, tokens in enumerate(solo)
+        ]
+        exact_pass = not mismatches
+        all_numeric_ties = bool(mismatches) and all(
+            mismatch["numeric_tie"] for mismatch in mismatches
+        )
+        first_mismatch = mismatches[0] if mismatches else None
+        first_non_numeric_mismatch = next(
+            (
+                mismatch for mismatch in mismatches
+                if not mismatch["numeric_tie"]
+            ),
+            None,
+        )
+        if first_mismatch is None:
+            detail = ""
+        else:
+            detail = (
+                f"first mismatch: bs{first_mismatch['batch_size']}."
+                f"seq{first_mismatch['request_index']}@pos"
+                f"{first_mismatch['position']}; "
+                f"numeric_tie={first_mismatch['numeric_tie']}"
+            )
+            if first_non_numeric_mismatch is not None:
+                detail += (
+                    "; first non-numeric mismatch: "
+                    f"bs{first_non_numeric_mismatch['batch_size']}."
+                    f"seq{first_non_numeric_mismatch['request_index']}@pos"
+                    f"{first_non_numeric_mismatch['position']}"
+                )
+        return {
+            "pass": exact_pass,
+            "accepted": exact_pass or all_numeric_ties,
+            "detail": detail,
+            "signature": solo,
+            "signature_diagnostics": signature_diagnostics,
+            "per_bs": {str(k): v for k, v in per_bs.items()},
+            "first_mismatch": first_mismatch,
+            "first_non_numeric_mismatch": first_non_numeric_mismatch,
+            "mismatches": mismatches,
+            "mismatch_count": len(mismatches),
+            "numeric_tie_count": sum(
+                int(mismatch["numeric_tie"]) for mismatch in mismatches
+            ),
+        }
+    finally:
+        if diagnostics_available:
+            sampler.disable_diagnostics()
 
 
 def case_w7_depth2_queue(engine) -> dict[str, Any]:
@@ -519,7 +820,12 @@ def run_child(args) -> None:
                 out["argmax_rows"] = sampler.total_rows
                 out["description"] = desc
                 results["compare_cases"][case_id] = out
-                print(f"[{mode.name}]   -> {'PASS' if out['pass'] else 'FAIL'} ({out['detail'][:120]})", flush=True)
+                status = (
+                    "PASS" if out["pass"]
+                    else "NUMERIC_TIE" if out.get("accepted")
+                    else "FAIL"
+                )
+                print(f"[{mode.name}]   -> {status} ({out['detail'][:120]})", flush=True)
             except Exception:
                 results["compare_cases"][case_id] = {
                     "pass": False,
@@ -559,6 +865,14 @@ def run_child(args) -> None:
 
 def run_parent(args) -> None:
     mode_names = ["BASELINE", "A", "B", "C"]
+    selected_compare = [
+        case_id for case_id, _, _ in COMPARE_CASES
+        if not args.cases or any(case_id.startswith(c) for c in args.cases)
+    ]
+    selected_local = [
+        case_id for case_id, _, _ in LOCAL_CASES
+        if not args.cases or any(case_id.startswith(c) for c in args.cases)
+    ]
     per_mode: dict[str, dict[str, Any]] = {}
     base = args.json_out or None
     for name in mode_names:
@@ -574,93 +888,266 @@ def run_parent(args) -> None:
             "--gpu-memory-utilization", str(args.gpu_memory_utilization),
         ]
         if args.cases:
-            cmd += ["--cases", args.cases]
+            cmd += ["--cases", ",".join(sorted(args.cases))]
         print(f"=== spawning mode {name}: {' '.join(cmd)}")
         completed = subprocess.run(cmd, text=True)
         if completed.returncode != 0:
             print(f"!!! mode {name} subprocess failed (rc={completed.returncode})")
             per_mode[name] = {"child_rc": completed.returncode}
             continue
-        with open(out_path, encoding="utf-8") as f:
-            per_mode[name] = json.load(f)
+        try:
+            with open(out_path, encoding="utf-8") as f:
+                per_mode[name] = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"!!! mode {name} output unreadable: {exc}")
+            per_mode[name] = {"child_error": str(exc)}
 
     baseline = per_mode.get("BASELINE", {})
     compare = baseline.get("compare_cases", {})
+    children: dict[str, dict[str, Any]] = {}
+    for name in mode_names:
+        child = per_mode.get(name, {})
+        expected = selected_compare + (selected_local if name == "BASELINE" else [])
+        present = set(child.get("compare_cases", {})) | set(child.get("local_cases", {}))
+        missing = [case_id for case_id in expected if case_id not in present]
+        child_error = child.get("child_error", "")
+        returncode = child.get("child_rc", 0)
+        children[name] = {
+            "completed": returncode == 0 and not child_error and not missing,
+            "returncode": returncode,
+            "error": child_error,
+            "missing_cases": missing,
+        }
 
     print("\n" + "=" * 100)
     print("ENGINE CORRECTNESS MATRIX (signature equality vs BASELINE)")
     print("=" * 100)
-    header = f"{'case':<26}" + "".join(f"{m:>10}" for m in mode_names)
+    header = f"{'case':<26}" + "".join(f"{m:>14}" for m in mode_names)
     print(header)
-    print("-" * 66)
-    all_pass = True
-    for case_id in compare:
+    print("-" * 82)
+    matrix: dict[str, dict[str, Any]] = {}
+    for case_id in selected_compare:
         row = [f"{case_id:<26}"]
-        bcase = compare[case_id]
-        row.append(f"{'PASS' if bcase.get('pass') else 'FAIL':>10}")
+        bcase = compare.get(case_id)
+        matrix[case_id] = {
+            "BASELINE": _baseline_status(per_mode, case_id),
+        }
+        row.append(f"{matrix[case_id]['BASELINE']['status']:>14}")
         for m in ("A", "B", "C"):
-            c = per_mode.get(m, {}).get("compare_cases", {}).get(case_id)
-            if c is None:
-                status = "N/A"
-            elif c.get("error"):
-                status = "ERROR"
-            elif not c.get("pass"):
-                status = "FAIL"
-            else:
-                same = c.get("signature") == bcase.get("signature")
-                ambiguous = bool(
-                    bcase.get("ambiguous_argmax_rows", 0)
-                    or c.get("ambiguous_argmax_rows", 0)
-                )
-                status = "PASS" if same else ("NUMERIC_TIE" if ambiguous else "MISMATCH")
-            row.append(f"{status:>10}")
-            if status not in ("PASS", "N/A", "NUMERIC_TIE"):
-                all_pass = False
+            matrix[case_id][m] = _match_status(
+                per_mode, m, case_id, bcase,
+            )
+            row.append(f"{matrix[case_id][m]['status']:>14}")
         print("".join(row))
-        if bcase.get("detail"):
+        if bcase and bcase.get("detail"):
             print(f"  {'':26}baseline detail: {bcase['detail'][:200]}")
+        for mode_name, result in matrix[case_id].items():
+            mismatch = result.get("first_mismatch")
+            if mismatch:
+                print(
+                    f"  {'':26}{mode_name} first mismatch: "
+                    f"{json.dumps(mismatch, ensure_ascii=False)[:500]}"
+                )
 
     print("\nLOCAL CASES (BASELINE child)")
-    for case_id, c in baseline.get("local_cases", {}).items():
-        status = "PASS" if c.get("pass") else "FAIL"
-        if case_id == "known_limit_chunked_prefill":
-            status = "KNOWN_LIMITATION" if c.get("pass") else "UNEXPECTED"
-        print(f"  {case_id:<30} {status:<20} {c.get('detail', '')[:160]}")
-        if case_id == "known_limit_chunked_prefill" and not c.get("pass"):
-            all_pass = False
+    local_case_status: dict[str, dict[str, Any]] = {}
+    local_cases = baseline.get("local_cases", {})
+    for case_id in selected_local:
+        case = local_cases.get(case_id)
+        if case is None:
+            result = {"status": "MISSING", "pass": False, "accepted": False}
+            detail = "child result missing"
+        elif case.get("error"):
+            result = {
+                "status": "ERROR",
+                "pass": False,
+                "accepted": False,
+                "error": case["error"],
+            }
+            detail = case.get("detail", "")
+        else:
+            exact_pass = bool(case.get("pass"))
+            if case_id == "known_limit_chunked_prefill":
+                status = "KNOWN_LIMITATION" if exact_pass else "UNEXPECTED"
+            else:
+                status = "PASS" if exact_pass else "FAIL"
+            result = {
+                "status": status,
+                "pass": exact_pass,
+                "accepted": exact_pass,
+            }
+            detail = case.get("detail", "")
+        local_case_status[case_id] = result
+        print(f"  {case_id:<30} {result['status']:<20} {detail[:160]}")
+
+    all_cells = [
+        result
+        for case_results in matrix.values()
+        for result in case_results.values()
+    ] + list(local_case_status.values())
+    overall_pass = (
+        bool(selected_compare or selected_local)
+        and all(child["completed"] for child in children.values())
+        and all(result.get("accepted", False) for result in all_cells)
+    )
+    overall_exact_pass = overall_pass and all(
+        result.get("status") in ("PASS", "KNOWN_LIMITATION")
+        for result in all_cells
+    )
 
     aggregate = {
         "meta": env_info(),
-        "matrix": {
-            case_id: {
-                m: (
-                    {"pass": True, "matches_baseline": True}
-                    if m == "BASELINE"
-                    else _match_status(per_mode, m, case_id, compare[case_id])
-                )
-                for m in mode_names
-            }
-            for case_id in compare
-        },
-        "local_cases": baseline.get("local_cases", {}),
+        "overall_pass": overall_pass,
+        "overall_exact_pass": overall_exact_pass,
+        "children": children,
+        "matrix": matrix,
+        "local_cases": local_cases,
+        "local_case_status": local_case_status,
     }
     agg_path = save_json(base or repo_log_path("validate_engine_qwen35_aggregate"), aggregate)
     print(f"\naggregate JSON: {agg_path}")
-    print("OVERALL:", "ALL PASS" if all_pass else "FAILURES PRESENT")
+    print("OVERALL:", "ALL PASS" if overall_pass else "FAILURES PRESENT")
 
 
-def _match_status(per_mode: dict, m: str, case_id: str, bcase: dict) -> dict:
+def _baseline_status(per_mode: dict, case_id: str) -> dict[str, Any]:
+    child = per_mode.get("BASELINE", {})
+    if child.get("child_rc") or child.get("child_error"):
+        return {
+            "status": "CHILD_ERROR",
+            "pass": False,
+            "matches_baseline": False,
+            "numeric_tie": False,
+            "accepted": False,
+            "error": child.get("child_error", ""),
+        }
+    case = child.get("compare_cases", {}).get(case_id)
+    if case is None:
+        return {
+            "status": "MISSING",
+            "pass": False,
+            "matches_baseline": False,
+            "numeric_tie": False,
+            "accepted": False,
+        }
+    if case.get("error"):
+        return {
+            "status": "ERROR",
+            "pass": False,
+            "matches_baseline": False,
+            "numeric_tie": False,
+            "accepted": False,
+            "error": case["error"],
+        }
+    exact_pass = bool(case.get("pass"))
+    accepted = bool(case.get("accepted", exact_pass))
+    status = "PASS" if exact_pass else "NUMERIC_TIE" if accepted else "FAIL"
+    return {
+        "status": status,
+        "pass": exact_pass,
+        "matches_baseline": True,
+        "numeric_tie": status == "NUMERIC_TIE",
+        "accepted": accepted,
+        "error": "",
+        "first_mismatch": case.get("first_mismatch"),
+        "first_non_numeric_mismatch": case.get(
+            "first_non_numeric_mismatch"
+        ),
+    }
+
+
+def _match_status(
+    per_mode: dict,
+    m: str,
+    case_id: str,
+    bcase: dict | None,
+) -> dict[str, Any]:
+    child = per_mode.get(m, {})
+    if child.get("child_rc") or child.get("child_error"):
+        return {
+            "status": "CHILD_ERROR",
+            "pass": False,
+            "matches_baseline": False,
+            "numeric_tie": False,
+            "accepted": False,
+            "error": child.get("child_error", ""),
+        }
     c = per_mode.get(m, {}).get("compare_cases", {}).get(case_id)
     if c is None:
-        return {"pass": False, "matches_baseline": False, "note": "child missing"}
+        return {
+            "status": "MISSING",
+            "pass": False,
+            "matches_baseline": False,
+            "numeric_tie": False,
+            "accepted": False,
+        }
+    if c.get("error"):
+        return {
+            "status": "ERROR",
+            "pass": False,
+            "matches_baseline": False,
+            "numeric_tie": False,
+            "accepted": False,
+            "error": c["error"],
+        }
+    baseline_accepted = bool(
+        bcase
+        and not bcase.get("error")
+        and bcase.get("accepted", bcase.get("pass", False))
+    )
+    if not baseline_accepted:
+        return {
+            "status": "BASELINE_FAIL",
+            "pass": bool(c.get("pass")),
+            "matches_baseline": False,
+            "numeric_tie": False,
+            "accepted": False,
+            "error": "baseline missing or failed",
+            "case_first_mismatch": c.get("first_mismatch"),
+            "case_first_non_numeric_mismatch": c.get(
+                "first_non_numeric_mismatch"
+            ),
+        }
+
+    exact_pass = bool(c.get("pass"))
+    case_accepted = bool(c.get("accepted", exact_pass))
+    if not case_accepted:
+        return {
+            "status": "FAIL",
+            "pass": exact_pass,
+            "matches_baseline": False,
+            "numeric_tie": False,
+            "accepted": False,
+            "error": "",
+            "first_mismatch": c.get("first_mismatch"),
+            "first_non_numeric_mismatch": c.get(
+                "first_non_numeric_mismatch"
+            ),
+        }
+
+    comparison = _signature_comparison(bcase, c)
+    matches_baseline = comparison["matches_baseline"]
+    numeric_tie = bool(comparison["numeric_tie"] or not exact_pass)
+    if matches_baseline:
+        status = "PASS" if exact_pass else "NUMERIC_TIE"
+    elif comparison["numeric_tie"]:
+        status = "NUMERIC_TIE"
+    else:
+        status = "MISMATCH"
+    accepted = status in ("PASS", "NUMERIC_TIE")
     return {
-        "pass": bool(c.get("pass")),
-        "matches_baseline": c.get("signature") == bcase.get("signature"),
-        "numeric_tie": bool(
-            (bcase.get("ambiguous_argmax_rows", 0) or 0)
-            or (c.get("ambiguous_argmax_rows", 0) or 0)
+        "status": status,
+        "pass": exact_pass,
+        "matches_baseline": matches_baseline,
+        "numeric_tie": numeric_tie,
+        "accepted": accepted,
+        "error": "",
+        "first_mismatch": (
+            comparison.get("first_mismatch") or c.get("first_mismatch")
         ),
-        "error": c.get("error", ""),
+        "case_first_mismatch": c.get("first_mismatch"),
+        "case_first_non_numeric_mismatch": c.get(
+            "first_non_numeric_mismatch"
+        ),
     }
 
 

@@ -139,18 +139,141 @@ class ArgmaxSampler(nn.Module):
         self.tie_tolerance = tie_tolerance
         self.ambiguous_rows = 0
         self.total_rows = 0
+        self._diagnostics_enabled = False
+        self._capture_state = False
+        self._batch_context: list[tuple[str | None, int | None]] | None = None
+        self._pending_state_stats: torch.Tensor | None = None
+        self._pending_layer_ids: list[int] = []
+        self._diagnostics: dict[str, dict[int, dict[str, Any]]] = {}
 
     def reset_stats(self) -> None:
         self.ambiguous_rows = 0
         self.total_rows = 0
+        self._batch_context = None
+        self._pending_state_stats = None
+        self._pending_layer_ids = []
+        self._diagnostics.clear()
+
+    def enable_diagnostics(self, *, capture_state: bool = False) -> None:
+        self._diagnostics_enabled = True
+        self._capture_state = capture_state
+
+    def disable_diagnostics(self) -> None:
+        self._diagnostics_enabled = False
+        self._capture_state = False
+        self._batch_context = None
+        self._pending_state_stats = None
+        self._pending_layer_ids = []
+
+    def set_batch_context(self, seqs, is_prefill: bool) -> None:
+        """Bind each sampler row to a stable request key/token position."""
+        if not self._diagnostics_enabled:
+            return
+        context: list[tuple[str | None, int | None]] = []
+        for seq in seqs:
+            produces_token = (
+                not is_prefill
+                or seq.num_cached_tokens + seq.num_scheduled_tokens
+                >= seq.num_tokens
+            )
+            key = getattr(seq, "_diagnostic_key", None)
+            position = seq.num_completion_tokens if produces_token else None
+            context.append((key, position))
+        self._batch_context = context
+
+    def observe_gdn_state(self, layers, slots: torch.Tensor) -> None:
+        """Capture compact post-forward GDN state summaries on the GPU."""
+        if not self._diagnostics_enabled or not self._capture_state:
+            return
+
+        def stats(tensor: torch.Tensor) -> torch.Tensor:
+            value = tensor.float()
+            dims = tuple(range(1, value.ndim))
+            return torch.stack(
+                (
+                    value.mean(dim=dims),
+                    value.abs().mean(dim=dims),
+                    value.square().mean(dim=dims).sqrt(),
+                    value.abs().amax(dim=dims),
+                ),
+                dim=-1,
+            )
+
+        per_layer = []
+        layer_ids = []
+        for layer in layers:
+            conv = layer.conv_states.index_select(0, slots)
+            recurrent = layer.recurrent_states.index_select(0, slots)
+            per_layer.append(torch.cat((stats(conv), stats(recurrent)), dim=-1))
+            layer_ids.append(layer.layer_idx)
+        self._pending_state_stats = (
+            torch.stack(per_layer, dim=1) if per_layer else None
+        )
+        self._pending_layer_ids = layer_ids
+
+    def get_diagnostic(self, key: str, position: int) -> dict[str, Any] | None:
+        return self._diagnostics.get(key, {}).get(position)
 
     def forward(self, logits: torch.Tensor, temperatures: torch.Tensor) -> torch.Tensor:
         assert torch.isfinite(logits).all(), "non-finite logits observed"
-        values = logits.float().topk(2, dim=-1).values
+        values, indices = logits.float().topk(2, dim=-1)
+        margins = (values[:, 0] - values[:, 1]).abs()
+        row_scales = values.abs().amax(dim=-1)
+        dtype_eps = torch.finfo(logits.dtype).eps
+        effective_tolerances = torch.maximum(
+            margins.new_full(margins.shape, self.tie_tolerance),
+            row_scales * dtype_eps,
+        )
         self.total_rows += logits.shape[0]
         self.ambiguous_rows += int(
-            (values[:, 0] - values[:, 1]).abs().le(self.tie_tolerance).sum().item()
+            margins.le(effective_tolerances).sum().item()
         )
+
+        if (
+            self._diagnostics_enabled
+            and self._batch_context is not None
+            and len(self._batch_context) == logits.shape[0]
+        ):
+            top_values = values.detach().cpu().tolist()
+            top_indices = indices.detach().cpu().tolist()
+            margin_values = margins.detach().cpu().tolist()
+            tolerance_values = effective_tolerances.detach().cpu().tolist()
+            state_stats = (
+                self._pending_state_stats.detach().cpu().tolist()
+                if self._pending_state_stats is not None
+                else None
+            )
+            metric_names = ("mean", "abs_mean", "rms", "max_abs")
+            for row, (key, position) in enumerate(self._batch_context):
+                if key is None or position is None:
+                    continue
+                diagnostic: dict[str, Any] = {
+                    "top_tokens": top_indices[row],
+                    "top_logits": top_values[row],
+                    "margin": margin_values[row],
+                    "base_tolerance": self.tie_tolerance,
+                    "effective_tolerance": tolerance_values[row],
+                    "near_tie": margin_values[row] <= tolerance_values[row],
+                    "logits_dtype": str(logits.dtype).removeprefix("torch."),
+                    "state_stage": "post_forward",
+                }
+                if state_stats is not None:
+                    diagnostic["gdn_state"] = [
+                        {
+                            "layer_idx": layer_idx,
+                            "conv": dict(zip(metric_names, metrics[:4])),
+                            "recurrent": dict(zip(metric_names, metrics[4:])),
+                        }
+                        for layer_idx, metrics in zip(
+                            self._pending_layer_ids,
+                            state_stats[row],
+                        )
+                    ]
+                self._diagnostics.setdefault(key, {})[position] = diagnostic
+
+        self._batch_context = None
+        self._pending_state_stats = None
+        self._pending_layer_ids = []
         return logits.argmax(dim=-1)
 
 

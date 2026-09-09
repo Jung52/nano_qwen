@@ -625,9 +625,19 @@ class ModelRunner:
             )
             logits = logits.index_select(0, last_indices_gpu)
 
+        slots = self.batch_slots_gpu[:bs]
+        # Validation-only samplers may request row-aligned logits/GDN-state
+        # diagnostics. The production sampler has no hooks, so its behavior
+        # remains unchanged.
+        set_batch_context = getattr(self.sampler, "set_batch_context", None)
+        if set_batch_context is not None:
+            set_batch_context(seqs, is_prefill)
+        observe_gdn_state = getattr(self.sampler, "observe_gdn_state", None)
+        if observe_gdn_state is not None:
+            observe_gdn_state(self.gdn_layers, slots)
+
         with trace_event("sampler", "runner", args={"prefill": is_prefill, "bs": bs}):
             token_ids = self.sampler(logits, temperatures)
-        slots = self.batch_slots_gpu[:bs]
         self.sampled_token_ids_gpu.scatter_(0, slots, token_ids)
 
         buf_idx = self._output_buf_idx
