@@ -146,9 +146,13 @@ def workload_varlen_prefill(engine, counter: GraphPathCounter, args) -> dict[str
 
 
 def workload_decode(engine, counter: GraphPathCounter, args) -> dict[str, Any]:
-    """Decode throughput per batch size; 1/2/4/8/16 graph hits, 3/5 eager fallback."""
+    """Decode throughput from tiny batches through the configured maximum."""
     vocab = engine.config.hf_config.vocab_size
-    batch_sizes = [1, 2, 3, 4, 5, 8, 16]
+    batch_sizes = [1, 2, 3, 4, 5, 8] + [
+        size for size in (16, 32, 64, 96, 112) if size <= args.max_num_seqs
+    ]
+    if args.max_num_seqs not in batch_sizes:
+        batch_sizes.append(args.max_num_seqs)
     runs: list[dict[str, Any]] = []
     for bs in batch_sizes:
         snapshot = counter.as_dict()
@@ -190,7 +194,10 @@ def workload_mixed(engine, counter: GraphPathCounter, args) -> dict[str, Any]:
     prompt_lengths = [32, 64, 128, 256, 512]
     runs: list[dict[str, Any]] = []
     snapshot = counter.as_dict()
-    for n_requests in (8, 16):
+    request_counts = [count for count in (8, 16, 32, 64, 96, 112) if count <= args.max_num_seqs]
+    if args.max_num_seqs not in request_counts:
+        request_counts.append(args.max_num_seqs)
+    for n_requests in request_counts:
         for out_len in (32, 64):
             def build(r, n_requests=n_requests, out_len=out_len):
                 seqs = []
@@ -387,7 +394,7 @@ def main() -> None:
     parser.add_argument("--model", default=os.environ.get("NANO_QWEN_MODEL", "/home/wei/code/models/qwen"))
     parser.add_argument("--mode", default="parent", choices=["parent"] + [m.name for m in PERF_MODES])
     parser.add_argument("--json-out", default="")
-    parser.add_argument("--max-num-seqs", type=int, default=16)
+    parser.add_argument("--max-num-seqs", type=int, default=112)
     parser.add_argument("--max-num-batched-tokens", type=int, default=2048)
     parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
