@@ -1,54 +1,37 @@
 #!/usr/bin/env python3
 """Profile one fixed batch through nano_qwen's real LLMEngine.step().
 
-Place in the repository root or benchmarks/. No engine_bench_utils dependency.
-Checked against Jung52/nano_qwen commit b50ac456ab0c2e1e809154d6d7f18d34a6d05e3c.
-Inspired by SGLang's synthetic batch / warmup / Chrome trace workflow:
-https://github.com/sgl-project/sglang/blob/main/python/sglang/benchmark/one_batch.py
-Profiler API: https://docs.pytorch.org/docs/stable/profiler.html
+Simplified version: no engine monkey-patching and no extra unprofiled timing
+pass. One profiled workload produces ONE Chrome trace file. GPU events are
+normalized onto their own Perfetto process/thread tracks, so the UI shows the
+host thread and GPU stream threads as separate tracks:
 
-Examples (local model directory, one visible GPU, TP=1):
+  *.trace.json      CPU ops/runtime + GPU kernels, with CPU->GPU arrows
+
+Examples:
   CUDA_VISIBLE_DEVICES=0 python bench_one_batch.py --model /path/to/Qwen3.5
-  python bench_one_batch.py --model /path/to/Qwen3.5 --trace-stage decode
   python bench_one_batch.py --model /path/to/Qwen3.5 --enforce-eager --with-stack
 
 Defaults: BS=64, input=64 tokens/request, 32 decode forwards/request.
 Prefill produces token #1; max_tokens=decode_steps+1, ignore_eos=True.
-One full warmup and one unprofiled timing pass precede the profiled pass.
-No extra synchronization or per-step logging inside the decode loop.
-Only benchmark boundaries synchronize; the engine's own waits stay intact.
+Warmup runs unprofiled. Only the profiled pass is traced.
 
 Trace reading:
-  Open *.trace.json in https://ui.perfetto.dev (Open trace file).
-  Look for nq/engine/{schedule,execute_model,sample_tokens,d2h_wait},
-  nq/runner/{prepare_inputs,prepare_decode,run_model,sampler,d2h_copy},
-  nq/graph/decode/bs64, nq/scheduler/postprocess, and CUDA runtime/GPU streams.
-  CPU record_function durations measure host scopes, NOT GPU kernel duration.
-  CUDA Graph replay does not re-execute Python layers; inspect GPU kernels and
-  use a separate --enforce-eager trace with --with-stack for op attribution.
-  record_shapes/stack/memory tracing add overhead and are opt-in.
-
-Current-repo caveats:
-  in_flight requests cannot be rescheduled until postprocess. A single full
-  batch may therefore have queue occupancy=1 even with queue depth=2.
-  Packed prefill >512 tokens takes eager fallback in current run_model;
-  BS64 x input64=4096 is eager prefill even when decode graphs are enabled.
-  This script observes those paths; it does not implement a different pipeline.
-  Fixed-length synthetic tokens test performance, not generation correctness.
+  Open *.trace.json in https://ui.perfetto.dev (Open trace file). CPU and GPU
+  events live under different tracks; each CUDA stream gets its own GPU thread
+  track. CPU record_function durations are host scopes, not GPU kernel time.
+  For CUDA Graph replay, op attribution requires --enforce-eager --with-stack.
 """
 
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import os
 import random
 import subprocess
 import sys
 import time
-from collections import Counter
-from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 
@@ -70,7 +53,7 @@ def parse_args():
     p.add_argument("--with-stack", action="store_true")
     p.add_argument("--profile-memory", action="store_true")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--output-dir", default="logs/bench_one_batch")
+    p.add_argument("--output-dir", default="logs/traces")
     args = p.parse_args()
     for name in ("batch_size", "input_len", "decode_steps", "warmup_rounds", "max_model_len"):
         if getattr(args, name) < 1:
@@ -91,80 +74,6 @@ def find_repo():
             sys.path.insert(0, str(root / "src"))
             return root
     return None  # An editable/installed nano_qwen package is also supported.
-
-
-@contextmanager
-def annotate_engine(engine, torch, batch_size):
-    """Temporary profiler annotations, with no change to scheduling semantics."""
-    stats = Counter()
-    runner = engine.model_runner
-
-    @contextmanager
-    def trace_event(name, cat="bench", args=None):
-        suffix = "" if not args else " " + " ".join(f"{k}={v}" for k, v in args.items())
-        with torch.profiler.record_function(f"nq/{cat}/{name}{suffix}"):
-            yield
-
-    with ExitStack() as cleanup:
-        def patch(obj, name, replacement):
-            # Remove temporary instance overrides on exit, restoring descriptors.
-            owned = name in vars(obj)
-            old = getattr(obj, name)
-            setattr(obj, name, replacement)
-            cleanup.callback(setattr if owned else delattr, obj, name, *([old] if owned else []))
-            return old
-
-        # These files import trace_event directly: patch both aliases, not only
-        # nano_qwen.utils.trace.trace_event. Do not enable the CPU-only collector.
-        for module in ("nano_qwen.engine.llm_engine", "nano_qwen.engine.model_runner"):
-            patch(importlib.import_module(module), "trace_event", trace_event)
-
-        def wrap(obj, name, label):
-            old = getattr(obj, name)
-            def call(*a, **kw):
-                with torch.profiler.record_function(label):
-                    return old(*a, **kw)
-            patch(obj, name, call)
-
-        wrap(engine.scheduler, "postprocess", "nq/scheduler/postprocess")
-        for name in ("prepare_prefill", "prepare_decode", "prepare_block_tables", "prepare_sample"):
-            wrap(runner, name, f"nq/runner/{name}")
-        wrap(runner.model, "compute_logits", "nq/model/compute_logits")
-        wrap(runner.input_batch, "update", "nq/input_batch/update")
-        wrap(runner, "remove_request", "nq/runner/remove_request")
-
-        original_execute = runner.execute_model
-        def execute(seqs, is_prefill):
-            if len(seqs) != batch_size:
-                raise RuntimeError(f"Expected fixed BS={batch_size}, got {len(seqs)}; batch was split")
-            stats["prefill_batches" if is_prefill else "decode_batches"] += 1
-            return original_execute(seqs, is_prefill)
-        patch(runner, "execute_model", execute)
-
-        original_postprocess = engine.scheduler.postprocess
-        def postprocess(*a, **kw):
-            # step() pops the consumed batch just before postprocess.
-            stats["max_queue_occupancy"] = max(stats["max_queue_occupancy"], len(engine.batch_queue) + 1)
-            return original_postprocess(*a, **kw)
-        patch(engine.scheduler, "postprocess", postprocess)
-
-        # Scope the actual replay call; counters are actual replay invocations.
-        def graph_range(graph, label, counter):
-            replay = graph.replay
-            def call():
-                stats[counter] += 1
-                with torch.profiler.record_function(label):
-                    return replay()
-            patch(graph, "replay", call)
-
-        for bs, graph in getattr(runner, "graphs", {}).items():
-            graph_range(graph, f"nq/graph/decode/bs{bs}", "decode_graph_replays")
-        for bucket, entries in getattr(runner, "prefill_piecewise_graphs", {}).items():
-            for layer, segments in entries.items():
-                for part in ("pre", "post"):
-                    graph_range(segments[part]["graph"], f"nq/graph/prefill/bucket{bucket}/layer{layer}/{part}",
-                                "prefill_segment_replays")
-        yield stats
 
 
 def enqueue(engine, args, Sequence, SamplingParams, seed):
@@ -190,7 +99,6 @@ def check_finished(engine, seqs, args):
 
 
 def full_run(engine, seqs, args, torch):
-    # This separate, uninstrumented pass supplies timing unaffected by profiler.
     torch.cuda.synchronize()
     start = time.perf_counter()
     engine.step()
@@ -205,6 +113,53 @@ def full_run(engine, seqs, args, torch):
             "decode_wall_ms": (end - prefill_end) * 1000,
             "decode_mean_step_ms": (end - prefill_end) * 1000 / args.decode_steps,
             "decode_tokens_per_s": args.batch_size * args.decode_steps / (end - prefill_end)}
+
+
+def is_gpu_event(event):
+    category = str(event.get("cat", ""))
+    return category == "kernel" or category.startswith("gpu_")
+
+
+def ensure_gpu_tracks(source, device_label):
+    """Put GPU device events on their own Perfetto process/thread tracks.
+
+    PyTorch normally exports kernels under a separate GPU pid and one tid per
+    CUDA stream. This pass also handles exporters that share the host pid and
+    always adds explicit track names so Perfetto renders distinct CPU/GPU
+    threads instead of overlapping them.
+    """
+    data = json.loads(source.read_text(encoding="utf-8"))
+    events = data.get("traceEvents", [])
+    timed = [e for e in events if e.get("ph") in ("X", "i")]
+    host_pids = {e["pid"] for e in timed if not is_gpu_event(e) and e.get("pid") is not None}
+    gpu_events = [e for e in timed if is_gpu_event(e)]
+    gpu_pids = {e["pid"] for e in gpu_events if e.get("pid") is not None}
+
+    if gpu_events and (gpu_pids & host_pids):
+        # Pathological exporter: remap device events to a dedicated GPU pid,
+        # keeping one thread per CUDA stream.
+        gpu_pid = max(host_pids | gpu_pids, default=0) + 1
+        stream_tids = {}
+        for event in gpu_events:
+            stream = event.get("args", {}).get("stream", event.get("tid", 0))
+            event["pid"] = gpu_pid
+            event["tid"] = stream_tids.setdefault(stream, 1000 + len(stream_tids))
+        gpu_pids = {gpu_pid}
+
+    metadata = {(m.get("pid"), m.get("tid"), m.get("name"))
+                for m in events if m.get("ph") == "M"}
+    for pid in sorted(gpu_pids):
+        if (pid, 0, "process_name") not in metadata:
+            events.append({"ph": "M", "name": "process_name", "pid": pid, "tid": 0,
+                           "args": {"name": f"{device_label} (pid {pid})"}})
+    for pid, tid in sorted({(e["pid"], e["tid"]) for e in gpu_events}):
+        if (pid, tid, "thread_name") not in metadata:
+            events.append({"ph": "M", "name": "thread_name", "pid": pid, "tid": tid,
+                           "args": {"name": f"stream {tid}"}})
+
+    source.write_text(json.dumps(data), encoding="utf-8")
+    tracks = ({"pid": p, "tid": t} for p, t in {(e["pid"], e["tid"]) for e in gpu_events})
+    return len(gpu_events), sorted(tracks, key=lambda track: (track["pid"], track["tid"]))
 
 
 def main():
@@ -254,35 +209,32 @@ def main():
             for r in range(args.warmup_rounds):
                 print(f"Warmup {r + 1}/{args.warmup_rounds} (full workload, profiler off)", flush=True)
                 seqs = enqueue(engine, args, Sequence, SamplingParams, args.seed + r)
-                full_run(engine, seqs, args, torch)
-            print("Unprofiled timing pass", flush=True)
+                timing = full_run(engine, seqs, args, torch)
             seqs = enqueue(engine, args, Sequence, SamplingParams, args.seed + args.warmup_rounds)
-            timing = full_run(engine, seqs, args, torch)
-            seqs = enqueue(engine, args, Sequence, SamplingParams, args.seed + args.warmup_rounds + 1)
             if args.trace_stage == "decode":
                 engine.step()  # Populate KV/GDN state and consume the prefill sample.
             torch.cuda.synchronize()
             torch.cuda.reset_peak_memory_stats()
             print(f"Recording {args.trace_stage} trace", flush=True)
-            with annotate_engine(engine, torch, args.batch_size) as counters:
-                with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
-                                                       torch.profiler.ProfilerActivity.CUDA],
-                                            record_shapes=args.record_shapes, with_stack=args.with_stack,
-                                            profile_memory=args.profile_memory) as prof:
-                    if args.trace_stage == "all":
-                        with torch.profiler.record_function(f"nq/prefill/bs{args.batch_size}"):
-                            engine.step()
-                        prof.step()
-                    for i in range(args.decode_steps):
-                        with torch.profiler.record_function(f"nq/decode/step{i:03d}/bs{args.batch_size}"):
-                            engine.step()
-                        prof.step()
-                    with torch.profiler.record_function("nq/benchmark_boundary/final_synchronize"):
-                        torch.cuda.synchronize()
+            with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                                   torch.profiler.ProfilerActivity.CUDA],
+                                        record_shapes=args.record_shapes, with_stack=args.with_stack,
+                                        profile_memory=args.profile_memory) as prof:
+                if args.trace_stage == "all":
+                    with torch.profiler.record_function(f"nq/prefill/bs{args.batch_size}"):
+                        engine.step()
+                    prof.step()
+                for i in range(args.decode_steps):
+                    with torch.profiler.record_function(f"nq/decode/step{i:03d}/bs{args.batch_size}"):
+                        engine.step()
+                    prof.step()
+                with torch.profiler.record_function("nq/benchmark_boundary/final_synchronize"):
+                    torch.cuda.synchronize()
             check_finished(engine, seqs, args)
 
-        trace_path = str(stem) + ".trace.json"
-        prof.export_chrome_trace(trace_path)
+        trace_path = Path(str(stem) + ".trace.json")
+        prof.export_chrome_trace(str(trace_path))
+        gpu_event_count, gpu_tracks = ensure_gpu_tracks(trace_path, torch.cuda.get_device_name())
         averages = prof.key_averages(group_by_input_shape=args.record_shapes)
         table = "CPU self time\n" + averages.table(sort_by="self_cpu_time_total", row_limit=40)
         table += "\nGPU self time\n" + averages.table(sort_by="self_device_time_total", row_limit=40)
@@ -292,22 +244,25 @@ def main():
                                              text=True, stderr=subprocess.DEVNULL).strip()
         except (OSError, subprocess.CalledProcessError):
             commit = "unknown"
-        gpu_events = sum(getattr(e, "device_type", None) == torch.autograd.DeviceType.CUDA for e in prof.events())
         summary = {"args": vars(args), "git_commit": commit,
                    "torch": torch.__version__, "cuda": torch.version.cuda,
                    "gpu": torch.cuda.get_device_name(), "tensor_parallel_size": 1,
-                   "trace": trace_path, "cuda_device_events": gpu_events,
-                   "unprofiled_single_pass": timing, "profiled_counters": dict(counters),
+                   "trace": str(trace_path), "gpu_device_events": gpu_event_count,
+                   "gpu_tracks": gpu_tracks,
+                   "last_warmup_pass": timing,
                    "allocated_peak_mib": torch.cuda.max_memory_allocated() / 2**20,
-                   "notes": ["Timing is a single separate unprofiled pass, not a statistical benchmark.",
+                   "notes": ["Warmup timing is not a statistical benchmark.",
                              "Synthetic fixed-length workload; no numerical correctness validation.",
-                             "Prefill >512 packed tokens is eager in the checked repository.",
-                             "Single in-flight batch cannot demonstrate overlap between independent batches."]}
+                             "CPU and GPU events are normalized onto separate Perfetto tracks.",
+                             "One GPU thread track is emitted per CUDA stream."]}
         Path(str(stem) + ".summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         print(table)
-        print(json.dumps({"unprofiled": timing, "profiled_counters": dict(counters)}, indent=2))
-        print(f"Trace: {trace_path}\nSummary: {stem}.summary.json\nOperators: {stem}.operators.txt")
-        if not gpu_events:
+        print(json.dumps({"last_warmup_pass": timing,
+                          "gpu_device_events": gpu_event_count,
+                          "gpu_tracks": gpu_tracks}, indent=2))
+        print(f"Trace (CPU + separate GPU tracks): {trace_path}")
+        print(f"Summary: {stem}.summary.json\nOperators: {stem}.operators.txt")
+        if not gpu_event_count:
             raise RuntimeError("Trace saved but has no CUDA device events. Check CUPTI/profiler permissions; do not use it to infer GPU idle gaps.")
     finally:
         engine.exit()
