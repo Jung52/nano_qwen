@@ -340,6 +340,10 @@ class ModelRunner:
         max_seqlen_k = 0
         slot_mapping = []
         block_tables = None
+        # Chunked prefill and prefix-cache prefill both need paged KV reads.
+        # A fresh request has already allocated its full block table before
+        # this point; warmup intentionally has no cache and stays on the
+        # packed K/V path.
         for seq in seqs:
             start = seq.num_cached_tokens
             seqlen_q = seq.num_scheduled_tokens
@@ -364,10 +368,11 @@ class ModelRunner:
                 else:
                     slot_end = seq.block_table[i] * self.block_size + end - i * self.block_size
                 slot_mapping.extend(range(slot_start, slot_end))
-        if cu_seqlens_k[-1] > cu_seqlens_q[-1]:
-            raise RuntimeError(
-                "prefix-cache prefill is not supported by this runner"
-            )
+        # Keep the fast packed K/V path for a fresh full prefill. Only a
+        # continuation chunk (or a prefix-cache hit) needs paged KV reads.
+        needs_paged_prefill = any(seq.num_cached_tokens > 0 for seq in seqs)
+        if needs_paged_prefill and seqs and all(seq.block_table for seq in seqs):
+            block_tables = self.prepare_block_tables(seqs)
         prefill_slices = list(zip(cu_seqlens_q[:-1], cu_seqlens_q[1:]))
         prefill_chunk_indices = []
         for batch_idx, (start, end) in enumerate(prefill_slices):
@@ -485,10 +490,6 @@ class ModelRunner:
         share these graphs without capturing a dynamic kernel launch grid.
         """
         context = get_context()
-        if context.block_tables is not None:
-            raise RuntimeError(
-                "prefix-cache prefill is not supported by the CUDA Graph path"
-            )
         if context.prefill_slices is None:
             raise RuntimeError("prefill graph requires Context.prefill_slices")
 

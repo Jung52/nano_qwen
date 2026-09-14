@@ -53,16 +53,20 @@ class Scheduler:
             if not seq.block_table:
                 self.block_manager.allocate(seq, num_cached_blocks)
             seq.num_scheduled_tokens = min(num_tokens, remaining)
+            seq.is_prefill = True
             num_batched_tokens += seq.num_scheduled_tokens
             self.waiting.popleft()
             self.in_flight.add(seq.seq_id)
             scheduled_seqs.append(seq)
 
-        if scheduled_seqs:
-            return scheduled_seqs, True
-
-        # decode: running only holds seqs not currently in flight.
+        # Fill any remaining token budget with decode rows. This produces a
+        # mixed prefill+decode batch when a prefill request leaves budget
+        # available, and remains a pure decode batch when no prefill was
+        # scheduled.
         while self.running and len(scheduled_seqs) < self.max_num_seqs:
+            remaining = self.max_num_batched_tokens - num_batched_tokens
+            if remaining <= 0:
+                break
             seq = self.running.popleft()
             while not self.block_manager.can_append(seq):
                 if self.running:
@@ -76,7 +80,10 @@ class Scheduler:
                 self.block_manager.may_append(seq)
                 self.in_flight.add(seq.seq_id)
                 scheduled_seqs.append(seq)
-        return scheduled_seqs, False
+                num_batched_tokens += 1
+
+        any_prefill = any(seq.is_prefill for seq in scheduled_seqs)
+        return scheduled_seqs, any_prefill
 
     def preempt(self, seq: Sequence):
         seq.status = SequenceStatus.WAITING

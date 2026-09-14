@@ -287,15 +287,22 @@ class GatedDeltaNet(nn.Module):
         # Depthwise causal convolution has no cu_seqlens argument. Run it on
         # a padded batch so each request starts with an independent zero
         # history, then pack only the valid token ranges for the chunk scan.
+        # For chunked prefill, the stored conv state provides the left context
+        # for the current chunk; a fresh request's state is zero after reset.
         lengths = [end - start for start, end in context.prefill_slices]
         max_len = max(lengths, default=0)
+        state_width = self.conv_kernel_size - 1
+        history = self.conv_states.index_select(0, context.state_indices)
         padded_qkv = raw_qkv.new_zeros(
-            len(lengths), self.conv_dim, max_len,
+            len(lengths), self.conv_dim, max_len + state_width,
         )
+        padded_qkv[:, :, :state_width] = history
         for batch_idx, (start, end) in enumerate(context.prefill_slices):
-            padded_qkv[batch_idx, :, : end - start] = raw_qkv[0, :, start:end]
+            padded_qkv[batch_idx, :, state_width:state_width + end - start] = (
+                raw_qkv[0, :, start:end]
+            )
         padded_conv = F.silu(
-            self.conv1d(padded_qkv)[:, :, :max_len]
+            self.conv1d(padded_qkv)[:, :, state_width:state_width + max_len]
         )
         qkv = torch.cat(
             [
@@ -351,19 +358,19 @@ class GatedDeltaNet(nn.Module):
         # already written into the pool in-place by the chunk kernel's
         # INPLACE_UPDATE epilogue — do NOT write h[:, -1] back (it is the
         # state entering the last chunk, not the final state).
-        state_width = self.conv_kernel_size - 1
-        conv_states = []
-        for start, end in context.prefill_slices:
-            sequence_qkv = raw_qkv[0, :, start:end]
-            if sequence_qkv.size(-1) < state_width:
-                padding = raw_qkv.new_zeros(
-                    self.conv_dim, state_width - sequence_qkv.size(-1)
-                )
-                sequence_qkv = torch.cat((padding, sequence_qkv), dim=-1)
-            else:
-                sequence_qkv = sequence_qkv[:, -state_width:]
-            conv_states.append(sequence_qkv)
-        new_conv = torch.stack(conv_states, dim=0).clone()
+        # The combined [history, current chunk] sequence is exactly what the
+        # next decode step needs as its left context. Rows have different
+        # lengths in mixed prefill/decode and multi-request prefill batches, so
+        # slice each row before its per-row padding, never from the padded tail.
+        new_conv = torch.stack(
+            [
+                padded_qkv[batch_idx, :, :state_width + length][
+                    :, -state_width:
+                ]
+                for batch_idx, length in enumerate(lengths)
+            ],
+            dim=0,
+        )
         self.conv_states.index_copy_(0, ctx.state_indices, new_conv)
         return self.out_proj(out)
 
