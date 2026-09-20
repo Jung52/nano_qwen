@@ -36,6 +36,8 @@ the ModelRunner-managed request lifecycle. Each sequence reads/writes its own
 persistent slot via context.state_indices.
 """
 
+import os
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -196,12 +198,19 @@ class GatedDeltaNet(nn.Module):
         # The convolution cache stores raw qkv projection values, so it uses
         # the projection/compute dtype. FlashInfer's pretranspose decode uses
         # its bf16-state backend for Qwen3.5's K=V=128 layout; other supported
-        # layouts fall back to the legacy fp32-state path.
+        # layouts fall back to the legacy fp32-state path. FP32 recurrent
+        # state is debug-only: it doubles GDN state memory without removing
+        # the bf16 conv/KV shape-dependent drift observed in w11/w12.
         conv_dtype = self.in_proj_qkv.weight.dtype
+        fp32_state_debug = os.environ.get(
+            "NANO_QWEN_GDN_FP32_STATE", ""
+        ).lower() in ("1", "true", "yes")
         recurrent_dtype = (
-            torch.bfloat16
-            if self.head_k_dim == 128 and self.head_v_dim == 128
-            else torch.float32
+            torch.float32
+            if fp32_state_debug
+            or self.head_k_dim != 128
+            or self.head_v_dim != 128
+            else torch.bfloat16
         )
         self.conv_states = torch.zeros(
             num_slots,

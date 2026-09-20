@@ -156,6 +156,7 @@ def workload_decode(engine, counter: GraphPathCounter, args) -> dict[str, Any]:
     runs: list[dict[str, Any]] = []
     for bs in batch_sizes:
         snapshot = counter.as_dict()
+        coalesce_snapshot = dict(engine.coalesce_stats)
 
         def build(r, bs=bs):
             return [
@@ -168,6 +169,7 @@ def workload_decode(engine, counter: GraphPathCounter, args) -> dict[str, Any]:
         graph_hits = delta["decode_graph_hits"]
         fallbacks = delta["decode_eager_fallbacks"]
         status = "graph" if graph_hits and not fallbacks else ("fallback" if fallbacks and not graph_hits else "mixed")
+        coalesce_delta = _counter_delta(coalesce_snapshot, engine.coalesce_stats)
         for wall, res, seqs in measured:
             ttfts = [res.ttft_s[s.seq_id] for s in seqs]
             itls = [v for s in seqs for v in res.itl_s[s.seq_id]]
@@ -177,6 +179,7 @@ def workload_decode(engine, counter: GraphPathCounter, args) -> dict[str, Any]:
             runs.append({
                 "batch_size": bs,
                 "graph": status,
+                "coalesce_stats": coalesce_delta,
                 "wall_s": round(wall, 4),
                 "ttft_s": round(med(ttfts), 4),
                 "tpot_s": round(med(itls), 4),
@@ -194,6 +197,7 @@ def workload_mixed(engine, counter: GraphPathCounter, args) -> dict[str, Any]:
     prompt_lengths = [32, 64, 128, 256, 512]
     runs: list[dict[str, Any]] = []
     snapshot = counter.as_dict()
+    coalesce_snapshot = dict(engine.coalesce_stats)
     request_counts = [count for count in (8, 16, 32, 64, 96, 112) if count <= args.max_num_seqs]
     if args.max_num_seqs not in request_counts:
         request_counts.append(args.max_num_seqs)
@@ -233,11 +237,22 @@ def workload_mixed(engine, counter: GraphPathCounter, args) -> dict[str, Any]:
                     "e2e_p95": round(percentile(e2es, 95), 4),
                 })
     delta = _counter_delta(snapshot, counter.as_dict())
-    return {"runs": runs, "graph_stats": delta}
+    coalesce_delta = _counter_delta(coalesce_snapshot, engine.coalesce_stats)
+    return {"runs": runs, "graph_stats": delta, "coalesce_stats": coalesce_delta}
 
 
-def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
-    return {k: after[k] - before.get(k, 0) for k in after}
+def _counter_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    delta = {}
+    for key, value in after.items():
+        previous = before.get(key, 0)
+        if isinstance(value, dict):
+            delta[key] = {
+                subkey: subvalue - previous.get(subkey, 0)
+                for subkey, subvalue in value.items()
+            }
+        else:
+            delta[key] = value - previous
+    return delta
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +284,7 @@ def run_child(args) -> None:
                 "max_num_batched_tokens": args.max_num_batched_tokens,
                 "max_model_len": args.max_model_len,
                 "gpu_memory_utilization": args.gpu_memory_utilization,
+                "num_kvcache_blocks": engine.config.num_kvcache_blocks,
             },
         },
         "memory": {"after_init": mem_after_init},
@@ -288,6 +304,7 @@ def run_child(args) -> None:
         results["workloads"]["decode"] = workload_decode(engine, counter, args)
         results["workloads"]["mixed"] = workload_mixed(engine, counter, args)
         results["graph_stats"] = counter.as_dict()
+        results["coalesce_stats"] = dict(engine.coalesce_stats)
 
     results["memory"]["overall_peak"] = {
         "max_memory_allocated_mib": round(torch.cuda.max_memory_allocated() / 2**20, 1),
@@ -394,7 +411,10 @@ def main() -> None:
     parser.add_argument("--model", default=os.environ.get("NANO_QWEN_MODEL", "/home/wei/code/models/qwen"))
     parser.add_argument("--mode", default="parent", choices=["parent"] + [m.name for m in PERF_MODES])
     parser.add_argument("--json-out", default="")
-    parser.add_argument("--max-num-seqs", type=int, default=112)
+    # Historical P0-P3 baselines (including the 16x64 throughput comparison)
+    # ran at max_num_seqs=16; 32 additionally covers the 32-request load.
+    # Higher values need a KV pool large enough for every concurrent request.
+    parser.add_argument("--max-num-seqs", type=int, default=32)
     parser.add_argument("--max-num-batched-tokens", type=int, default=2048)
     parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)

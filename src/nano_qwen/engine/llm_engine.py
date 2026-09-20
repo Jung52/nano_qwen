@@ -66,6 +66,17 @@ class LLMEngine:
         # flight, CPU runs ahead of GPU by N-1 steps (core.py:622-736).
         self.max_concurrent_batches = 2
         self.batch_queue: deque[tuple[list[Sequence], bool, int, object]] = deque()
+        self.coalesce_stats = {
+            "coalesce_attempts": 0,
+            "coalesce_successes": 0,
+            "merged_batches": 0,
+            "merged_requests": 0,
+            "batch_size_before": {},
+            "batch_size_after": {},
+        }
+        self._coalesce_armed = False
+        self._coalesce_before = 0
+        self._coalesce_source_ids: frozenset[int] = frozenset()
         # Keep the exact callback so manual exit can unregister it. Leaving a
         # bound method in atexit keeps the whole engine alive until interpreter
         # shutdown, including CUDA graph/model references.
@@ -120,13 +131,84 @@ class LLMEngine:
         enqueue execute_model + sample_tokens back-to-back (both non-blocking).
         Phase 2 (consume): pop the oldest batch and block only on its D2H
         event, then postprocess. Zombie seqs are handled by Scheduler.in_flight.
+
+        Decode coalescing: dispatching a decode batch while another decode
+        batch is still in flight permanently splits the ready set into
+        cohorts (e.g. 11/21 instead of 32), because the in-flight rows are
+        not in ``running`` when the next batch is formed. Once the queued
+        work contains decode rows, wait for it to drain before scheduling
+        more decode; new prefill work is still allowed to dispatch so
+        late arrivals keep making progress.
         """
         # Phase 1: fill the queue (never blocks).
         while len(self.batch_queue) < self.max_concurrent_batches:
+            decode_batches = [
+                batch_seqs for batch_seqs, _, _, _ in self.batch_queue
+                if any(not seq.is_prefill for seq in batch_seqs)
+            ]
+            if decode_batches and not self.scheduler.waiting:
+                if self.scheduler.running and not self._coalesce_armed:
+                    source_seqs = [
+                        seq for batch_seqs in decode_batches for seq in batch_seqs
+                        if not seq.is_prefill
+                    ]
+                    self._coalesce_armed = True
+                    self._coalesce_before = len(source_seqs)
+                    self._coalesce_source_ids = frozenset(
+                        seq.seq_id for seq in source_seqs
+                    )
+                    self.coalesce_stats["coalesce_attempts"] += 1
+                    self.coalesce_stats["batch_size_before"][
+                        self._coalesce_before
+                    ] = (
+                        self.coalesce_stats["batch_size_before"].get(
+                            self._coalesce_before, 0
+                        )
+                        + 1
+                    )
+                break
             with trace_event("schedule", "engine"):
                 seqs, is_prefill = self.scheduler.schedule()
             if not seqs:
                 break
+            batch_ids = [seq.seq_id for seq in seqs]
+            assert len(set(batch_ids)) == len(batch_ids), (
+                "engine produced a duplicate request in one dispatch batch"
+            )
+            queued_ids = {
+                seq.seq_id
+                for queued_seqs, _, _, _ in self.batch_queue
+                for seq in queued_seqs
+            }
+            assert not (set(batch_ids) & queued_ids), (
+                "engine dispatched a request that is already in flight"
+            )
+            if self._coalesce_armed:
+                source_still_pending = bool(
+                    self._coalesce_source_ids & queued_ids
+                )
+                if not is_prefill:
+                    batch_size_after = len(seqs)
+                    coalesced = (
+                        batch_size_after > self._coalesce_before
+                        and bool(self._coalesce_source_ids & set(batch_ids))
+                    )
+                    if coalesced:
+                        self.coalesce_stats["coalesce_successes"] += 1
+                        self.coalesce_stats["merged_batches"] += 1
+                        self.coalesce_stats["merged_requests"] += batch_size_after
+                    self.coalesce_stats["batch_size_after"][batch_size_after] = (
+                        self.coalesce_stats["batch_size_after"].get(
+                            batch_size_after, 0
+                        )
+                        + 1
+                    )
+                    self._coalesce_armed = False
+                elif not source_still_pending and not (
+                    self._coalesce_source_ids
+                    & {seq.seq_id for seq in seqs}
+                ):
+                    self._coalesce_armed = False
             num_tokens = (
                 sum(seq.num_scheduled_tokens for seq in seqs)
                 if is_prefill

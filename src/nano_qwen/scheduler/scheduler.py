@@ -31,6 +31,17 @@ class Scheduler:
     def schedule(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
         num_batched_tokens = 0
+        # A sequence is either awaiting dispatch (waiting/running) or in
+        # flight. Overlap would let the engine dispatch the same request
+        # twice and corrupt its KV/GDN state slots.
+        ready_ids = {
+            seq.seq_id for seq in self.waiting
+        } | {
+            seq.seq_id for seq in self.running
+        }
+        assert not (self.in_flight & ready_ids), (
+            "scheduler state overlap: seq is both in_flight and ready"
+        )
 
         # prefill
         while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
@@ -39,11 +50,18 @@ class Scheduler:
             if remaining == 0:
                 break
             if not seq.block_table:
-                num_cached_blocks = (
-                    self.block_manager.can_allocate(seq)
-                    if self.enable_prefix_cache else 0
-                )
+                # Always check capacity. can_allocate() doubles as the
+                # free-block admission check; skipping it when prefix caching
+                # is disabled let allocate() pop from an empty deque once the
+                # KV pool was exhausted (benchmark bs=112 crash).
+                num_cached_blocks = self.block_manager.can_allocate(seq)
                 if num_cached_blocks == -1:
+                    if not scheduled_seqs and not self.running:
+                        raise RuntimeError(
+                            "KV cache exhausted before admission: "
+                            f"need {seq.num_blocks} blocks, "
+                            f"have {len(self.block_manager.free_block_ids)} free"
+                        )
                     break
                 num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
             else:
@@ -83,6 +101,10 @@ class Scheduler:
                 num_batched_tokens += 1
 
         any_prefill = any(seq.is_prefill for seq in scheduled_seqs)
+        scheduled_ids = [seq.seq_id for seq in scheduled_seqs]
+        assert len(set(scheduled_ids)) == len(scheduled_ids), (
+            "scheduler produced a duplicate request in one batch"
+        )
         return scheduled_seqs, any_prefill
 
     def preempt(self, seq: Sequence):

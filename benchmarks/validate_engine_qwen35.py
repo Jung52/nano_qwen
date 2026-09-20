@@ -15,6 +15,16 @@ Usage::
 
     python benchmarks/validate_engine_qwen35.py --model /path/to/model
     python benchmarks/validate_engine_qwen35.py --model /path/to/model --mode C
+    python benchmarks/validate_engine_qwen35.py --model /path/to/model --cases w11,w12
+
+W11/W12 verify chunk-path correctness, finite GDN/KV states, bounded state
+drift, and exact tokens (or a first mismatch classified as a bounded bf16
+near-tie). One-shot and chunked/mixed batches intentionally use different
+GEMM/kernel shapes, so elementwise allclose, RMSE, and max_abs are reported
+as drift diagnostics rather than pass/fail gates. State snapshots transfer
+to CPU and synchronize; do not use their runtimes as performance
+measurements. Test-only runtime budgets change on one idle engine so model
+weights need not be reloaded for every chunk size.
 
 Each mode runs in its own subprocess (dist.init_process_group can only be
 initialized once per process).  ``--mode parent`` (default) spawns
@@ -25,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -45,6 +56,15 @@ from engine_bench_utils import (
     repo_log_path,
     run_until_idle,
     save_json,
+    validation_settings,
+    drive_probe,
+    compare_probed_request,
+    compare_probed_request_drift,
+    competing_tokens_are_tied,
+    sampling_diagnostic_summary,
+    STATE_DRIFT_RMSE_LIMITS,
+    tensor_snapshot_diff,
+    token_mismatch_records,
 )
 
 try:
@@ -104,57 +124,6 @@ def _state_fingerprint_diff(
         "atol": atol,
         "rtol": rtol,
     }
-
-
-def _competing_tokens_are_tied(
-    baseline: dict[str, Any] | None,
-    candidate: dict[str, Any] | None,
-    baseline_token: Any,
-    candidate_token: Any,
-) -> bool:
-    """Accept a winner flip explainable by bounded bf16 perturbations."""
-    if (
-        not baseline
-        or not candidate
-        or not isinstance(baseline_token, int)
-        or not isinstance(candidate_token, int)
-        or baseline_token == candidate_token
-    ):
-        return False
-    rows = []
-    competing_tokens = {baseline_token, candidate_token}
-    for diagnostic in (baseline, candidate):
-        tokens = diagnostic.get("top_tokens", [])
-        values = diagnostic.get("top_logits", [])
-        if len(tokens) < 2 or len(values) < 2:
-            return False
-        if set(tokens[:2]) != competing_tokens:
-            return False
-        value_by_token = dict(zip(tokens[:2], values[:2]))
-        gap = abs(
-            float(value_by_token[baseline_token])
-            - float(value_by_token[candidate_token])
-        )
-        tolerance = float(diagnostic.get("effective_tolerance", 0.0))
-        rows.append((value_by_token, gap, tolerance))
-
-    # Original rule: both rows are independently near-ties.
-    if all(gap <= tolerance for _, gap, tolerance in rows):
-        return True
-
-    # A tied pair can separate by two ULPs when the two logits each move by
-    # one ULP in opposite directions. Compare each competing token across
-    # runs instead of rejecting solely on the final within-row margin.
-    baseline_values, _, baseline_tolerance = rows[0]
-    candidate_values, _, candidate_tolerance = rows[1]
-    cross_run_tolerance = max(baseline_tolerance, candidate_tolerance)
-    return all(
-        abs(
-            float(baseline_values[token])
-            - float(candidate_values[token])
-        ) <= cross_run_tolerance
-        for token in competing_tokens
-    )
 
 
 def _first_signature_mismatch(
@@ -235,7 +204,7 @@ def _signature_comparison(
     )
     return {
         "matches_baseline": False,
-        "numeric_tie": _competing_tokens_are_tied(
+        "numeric_tie": competing_tokens_are_tied(
             baseline_diag,
             candidate_diag,
             mismatch.get("baseline_token"),
@@ -514,7 +483,7 @@ def case_w6_batched_decode(engine) -> dict[str, Any]:
                     "position": position,
                     "solo_logits": _logits_summary(solo_diag),
                     "batched_logits": _logits_summary(batched_diag),
-                    "numeric_tie": _competing_tokens_are_tied(
+                    "numeric_tie": competing_tokens_are_tied(
                         solo_diag,
                         batched_diag,
                         mismatch.get("baseline_token"),
@@ -719,33 +688,432 @@ def case_w10_long_decode(engine) -> dict[str, Any]:
     }
 
 
-def case_known_limitation_chunked_prefill(model: str, mode: ModeConfig) -> dict[str, Any]:
-    """KNOWN LIMITATION: chunked prefill raises in prepare_prefill."""
-    engine = make_engine(
-        model, mode,
-        max_num_seqs=1,
-        max_num_batched_tokens=128,
-        sampler=ArgmaxSampler(),
-        reset_cuda_stats=True,
-    )
-    try:
-        vocab = engine.config.hf_config.vocab_size
-        seq = Sequence(make_random_prompt(512, seed=1, vocab_size=vocab), make_params(4))
+def _new_case_config(engine):
+    args = engine.validation_args
+    output_tokens = args.regression_decode_steps + 1  # token #0 comes from prefill
+    if engine.config.max_model_len < 1024 + output_tokens:
+        raise AssertionError("w11/w12 need --max-model-len >= 1024 + regression-decode-steps + 1")
+    if engine.config.max_num_seqs < 2:
+        raise AssertionError("w12 needs --max-num-seqs >= 2")
+    return output_tokens, args.state_atol, args.state_rtol
+
+
+def _probe_single(engine, label, prompt, output_tokens, budget, *, reference):
+    with validation_settings(engine, budget=budget, reference=reference):
+        seq = Sequence(prompt, make_params(output_tokens))
         engine.scheduler.add(seq)
-        observed = "NO ERROR (unexpected: chunked prefill completed)"
-        try:
-            run_until_idle(engine, [seq])
-        except RuntimeError as e:
-            observed = str(e)
-        expected_phrase = "prefix-cache prefill is not supported by this runner"
-        is_known_limitation = expected_phrase in observed
-        return {
-            "pass": is_known_limitation,
-            "detail": f"observed: {observed!r}",
-            "signature": [observed],
-        }
-    finally:
-        engine.exit()
+        return drive_probe(engine, {label: seq})
+
+
+def case_w11_chunked_prefill(engine, mode: ModeConfig) -> dict[str, Any]:
+    """One-shot eager reference vs actual scheduler chunks, then free decode.
+
+    Acceptance: observed chunk path, finite states, per-group relative RMSE
+    drift bounds, and exact tokens (or a bounded near-tie first flip).
+    Elementwise metrics stay diagnostic-only for cross-shape bf16 noise.
+    """
+    output_tokens, atol, rtol = _new_case_config(engine)
+    vocab = engine.config.hf_config.vocab_size
+    lengths = [63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513, 1024]
+    chunks = [64, 128, 256]
+    runs, signature = [], []
+    signature_diagnostics = []
+    for length in lengths:
+        prompt = make_random_prompt(length, seed=11000 + length, vocab_size=vocab)
+        reference = _probe_single(engine, "Q", prompt, output_tokens, length, reference=True)
+        ref_prefills = [r["q_len"] for batch in reference.batches for r in batch["rows"] if r["prefill"]]
+        if ref_prefills != [length]:
+            raise AssertionError(f"Reference was not a single prefill: {ref_prefills}")
+        for chunk in chunks:
+            try:
+                candidate = _probe_single(engine, "Q", prompt, output_tokens, chunk, reference=False)
+            except Exception as exc:
+                raise RuntimeError(f"w11 failed during execution: prompt={length}, chunk={chunk}") from exc
+            observed = [r["q_len"] for batch in candidate.batches for r in batch["rows"] if r["prefill"]]
+            expected = [min(chunk, length - start) for start in range(0, length, chunk)]
+            comparison = compare_probed_request_drift(
+                reference, candidate, "Q", output_tokens=output_tokens,
+                atol=atol, rtol=rtol,
+            )
+            path_ok = observed == expected
+            entry = {"prompt_len": length, "chunk": chunk, "reference_prefill": ref_prefills,
+                     "expected_chunks": expected, "observed_chunks": observed,
+                     "actually_chunked": len(expected) > 1, "chunk_path_pass": path_ok,
+                     "pass": path_ok and comparison["pass"], "comparison": comparison,
+                     "batches": candidate.batches}
+            runs.append(entry)
+            signature.append(list(candidate.seqs["Q"].completion_token_ids))
+            signature_diagnostics.append([
+                sampling_diagnostic_summary(
+                    candidate.diagnostics.get("Q", {}).get(position)
+                )
+                for position in range(output_tokens)
+            ])
+            print(f"[{mode.name}] w11 prompt={length} chunk={chunk}: "
+                  f"{'PASS' if entry['pass'] else 'FAIL'} chunks={observed}", flush=True)
+            del candidate
+        del reference
+    passed = all(r["pass"] for r in runs)
+    first = next((r for r in runs if not r["pass"]), None)
+    return {"pass": passed, "accepted": passed, "signature": signature,
+            "signature_diagnostics": signature_diagnostics,
+            "detail": f"{sum(r['pass'] for r in runs)}/{len(runs)} chunk-path/bounded-drift/token comparisons",
+            "state_atol": atol, "state_rtol": rtol, "output_tokens": output_tokens,
+            "runs": runs, "first_mismatch": None if first is None else {
+                "prompt_len": first["prompt_len"], "chunk": first["chunk"],
+                "chunk_path_pass": first["chunk_path_pass"],
+                "token_index": first["comparison"]["first_token_mismatch"],
+                "state": first["comparison"]["first_state_mismatch"]}}
+
+
+def case_w12_mixed_prefill_decode(engine, mode: ModeConfig) -> dict[str, Any]:
+    """Late B arrives after A has already executed one decode forward.
+
+    Scheduler must dispatch B's 128-token prefill and A's one-token decode in
+    ONE batch. Both natural free-running trajectories are compared with A and
+    B executed completely independently on eager/depth1 reference paths.
+    A lengths 254/255/256 put the mixed decode at positions 255/256/257.
+    Two B prompts exercise isolation against different competing contents.
+    """
+    output_tokens, atol, rtol = _new_case_config(engine)
+    if output_tokens < 4:
+        raise AssertionError("w12 requires --regression-decode-steps >= 3")
+    vocab = engine.config.hf_config.vocab_size
+    runs, signature = [], []
+    signature_diagnostics = []
+    for a_len in (254, 255, 256):
+        prompt_a = make_random_prompt(a_len, seed=12000 + a_len, vocab_size=vocab)
+        reference_a = _probe_single(engine, "A", prompt_a, output_tokens, a_len, reference=True)
+        # Different B inputs must not alter A's state or output trajectory.
+        for b_seed in (12001, 12099):
+            prompt_b = make_random_prompt(128, seed=b_seed, vocab_size=vocab)
+            reference_b = _probe_single(engine, "B", prompt_b, output_tokens, 128, reference=True)
+            with validation_settings(engine, budget=max(a_len, 129), reference=False):
+                a = Sequence(prompt_a, make_params(output_tokens))
+                b = Sequence(prompt_b, make_params(output_tokens))
+                engine.scheduler.add(a)
+                injected = False
+                def late_arrival(probe):
+                    nonlocal injected
+                    if not injected and a.num_completion_tokens == 2:
+                        # One prefill + one decode consumed; A is schedulable.
+                        if engine.batch_queue or a.seq_id in engine.scheduler.in_flight:
+                            raise AssertionError("A still in flight at controlled B arrival")
+                        if a not in engine.scheduler.running:
+                            raise AssertionError("A not in scheduler.running before B arrival")
+                        engine.config.max_num_batched_tokens = 129
+                        engine.scheduler.max_num_batched_tokens = 129
+                        engine.scheduler.add(b)
+                        injected = True
+                try:
+                    candidate = drive_probe(engine, {"A": a, "B": b}, after_step=late_arrival)
+                except Exception as exc:
+                    raise RuntimeError(f"w12 failed during execution: A={a_len}, B=128, B_seed={b_seed}") from exc
+            mixed = [batch for batch in candidate.batches if any(r["prefill"] for r in batch["rows"])
+                     and any(not r["prefill"] for r in batch["rows"])]
+            target = [batch for batch in mixed if batch["any_prefill"]
+                      and {r["label"] for r in batch["rows"]} == {"A", "B"}
+                      and any(r["label"] == "A" and not r["prefill"] and r["q_len"] == 1
+                              and r["completion_index"] == 2 for r in batch["rows"])
+                      and any(r["label"] == "B" and r["prefill"] and r["q_len"] == 128
+                              and r["start"] == 0 for r in batch["rows"])]
+            path_ok = injected and len(target) == 1 and len(mixed) == 1
+            # In the real scheduler order B comes first while A owns slot 0.
+            # Require that nonidentity indirection was actually exercised.
+            if target:
+                path_ok &= ([r["label"] for r in target[0]["rows"]] == ["B", "A"]
+                            and target[0]["metadata"]["state_slots"] == [1, 0]
+                            and target[0]["metadata"]["paged"])
+            ca = compare_probed_request_drift(
+                reference_a, candidate, "A", output_tokens=output_tokens,
+                atol=atol, rtol=rtol,
+            )
+            cb = compare_probed_request_drift(
+                reference_b, candidate, "B", output_tokens=output_tokens,
+                atol=atol, rtol=rtol,
+            )
+            entry = {"a_prompt_len": a_len, "b_prompt_len": 128, "b_seed": b_seed,
+                     "pass": bool(path_ok and ca["pass"] and cb["pass"]),
+                     "mixed_path_pass": bool(path_ok), "mixed_batches": mixed,
+                     "A": ca, "B": cb, "batches": candidate.batches,
+                     "unscheduled_isolation_checks": candidate.isolation_checks}
+            runs.append(entry)
+            signature.extend([list(a.completion_token_ids), list(b.completion_token_ids)])
+            signature_diagnostics.extend([
+                [
+                    sampling_diagnostic_summary(
+                        candidate.diagnostics.get("A", {}).get(position)
+                    )
+                    for position in range(output_tokens)
+                ],
+                [
+                    sampling_diagnostic_summary(
+                        candidate.diagnostics.get("B", {}).get(position)
+                    )
+                    for position in range(output_tokens)
+                ],
+            ])
+            print(f"[{mode.name}] w12 A={a_len} B=128 seed={b_seed}: "
+                  f"{'PASS' if entry['pass'] else 'FAIL'} mixed_batches={len(mixed)}", flush=True)
+            del candidate, reference_b
+        del reference_a
+    passed = all(r["pass"] for r in runs)
+    first = next((r for r in runs if not r["pass"]), None)
+    return {"pass": passed, "accepted": passed, "signature": signature,
+            "signature_diagnostics": signature_diagnostics,
+            "detail": f"{sum(r['pass'] for r in runs)}/{len(runs)} mixed-path/bounded-drift/token comparisons",
+            "state_atol": atol, "state_rtol": rtol, "output_tokens": output_tokens,
+            "runs": runs, "first_mismatch": None if first is None else {
+                "a_prompt_len": first["a_prompt_len"], "b_seed": first["b_seed"],
+                "mixed_path_pass": first["mixed_path_pass"],
+                "A_token_index": first["A"]["first_token_mismatch"],
+                "B_token_index": first["B"]["first_token_mismatch"],
+                "A_state": first["A"]["first_state_mismatch"],
+                "B_state": first["B"]["first_state_mismatch"]}}
+
+
+STABILITY_SCALES: dict[str, dict[str, Any]] = {
+    "smoke": {"prompts": [1019], "chunks": [256], "batches": [1, 2],
+              "seeds": [13001], "decode": 32},
+    "default": {"prompts": [1019, 2043], "chunks": [128, 256], "batches": [1, 4],
+                "seeds": [13001, 13099]},
+    "full": {"prompts": [1019, 2043, 4091, 8189], "chunks": [128, 256, 512, 1024],
+             "batches": [1, 4, 8], "seeds": [13001, 13099]},
+}
+
+
+def _state_summary_is_finite(summary: Any) -> bool:
+    if not summary:
+        return True
+    layers = summary.get("gdn_state") if isinstance(summary, dict) else None
+    if not isinstance(layers, list):
+        return True
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        for state in ("conv", "recurrent"):
+            metrics = layer.get(state)
+            if not isinstance(metrics, dict):
+                continue
+            for value in metrics.values():
+                try:
+                    if not math.isfinite(float(value)):
+                        return False
+                except (TypeError, ValueError):
+                    return False
+    return True
+
+
+def case_w13_chunked_mixed_stability(engine, mode: ModeConfig) -> dict[str, Any]:
+    """Long chunked/mixed stability; explicit selection required (--cases w13).
+
+    Covers ~1K..8K prompts, multiple chunk sizes, batches, seeds, and long
+    decode. Checks chunk paths, per-step finite GDN summaries, finite terminal
+    snapshots, bounded drift versus one-shot (when it fits the built token
+    budget), near-tie-classified token divergence, idle-request isolation,
+    and slot cleanup. Runtime is dominated by decode length; use the smoke
+    preset while iterating.
+    """
+    args = engine.validation_args
+    preset = STABILITY_SCALES[args.stability_scale]
+    decode_tokens = int(preset.get("decode") or args.stability_decode_tokens)
+    max_model_len = engine.config.max_model_len
+    max_num_seqs = engine.config.max_num_seqs
+    built_budget = engine.config.max_num_batched_tokens
+    vocab = engine.config.hf_config.vocab_size
+    limits = dict(STATE_DRIFT_RMSE_LIMITS)
+    atol, rtol = args.state_atol, args.state_rtol
+    snapshot_positions = {0, decode_tokens - 1}
+    runs: list[dict[str, Any]] = []
+
+    def sparse_probe(prompts, budget, *, reference, snapshot_labels=None):
+        with validation_settings(engine, budget=budget, reference=reference):
+            labeled = {}
+            for index, prompt in enumerate(prompts):
+                seq = Sequence(prompt, make_params(decode_tokens))
+                labeled[f"r{index}"] = seq
+                engine.scheduler.add(seq)
+            return drive_probe(
+                engine, labeled,
+                snapshot_positions=snapshot_positions,
+                snapshot_labels=snapshot_labels,
+                capture_state=True, capture_logits=False,
+            )
+
+    def drift_checks(reference, candidate, label):
+        ref_tokens = list(reference.seqs[label].completion_token_ids)
+        got_tokens = list(candidate.seqs[label].completion_token_ids)
+        first_mismatch = next(
+            (
+                index for index, (lhs, rhs) in enumerate(zip(ref_tokens, got_tokens))
+                if lhs != rhs
+            ),
+            None,
+        )
+        positions = sorted(
+            set(reference.snapshots[label]) & set(candidate.snapshots[label])
+        )
+        # Only checkpoints whose producing forward consumed the same sampled
+        # token history can gate drift. Positions after the first flip (and
+        # the flip position itself for later state groups) remain diagnostic.
+        positions = [
+            position for position in positions
+            if first_mismatch is None or position <= first_mismatch
+        ]
+        checks = []
+        for position in positions:
+            diff = tensor_snapshot_diff(
+                reference.snapshots[label][position],
+                candidate.snapshots[label][position],
+                atol=atol, rtol=rtol,
+            )
+            drift_pass = all(
+                group.get("nonfinite", 1) == 0
+                and group.get("relative_rmse", float("inf"))
+                <= limits.get(name, float("inf"))
+                for name, group in diff["groups"].items()
+            )
+            checks.append({
+                "position": position,
+                "drift_pass": drift_pass,
+                "groups": {
+                    name: {
+                        "rmse": group["rmse"],
+                        "relative_rmse": group["relative_rmse"],
+                        "max_abs": group["max_abs"],
+                    } for name, group in diff["groups"].items()
+                },
+            })
+        return checks
+
+    for prompt_len in preset["prompts"]:
+        if prompt_len + decode_tokens > max_model_len:
+            runs.append({"prompt_len": prompt_len, "skipped": True,
+                         "reason": f"needs max_model_len >= {prompt_len + decode_tokens}"})
+            continue
+        for seed in preset["seeds"]:
+            prompt = make_random_prompt(prompt_len, seed=seed, vocab_size=vocab)
+            reference = None
+            if prompt_len <= built_budget:
+                reference = sparse_probe([prompt], prompt_len, reference=True)
+            for chunk in preset["chunks"]:
+                if chunk > min(prompt_len, built_budget):
+                    continue
+                expected_chunks = [
+                    min(chunk, prompt_len - start)
+                    for start in range(0, prompt_len, chunk)
+                ]
+                solo = sparse_probe([prompt], chunk, reference=False)
+                for batch_size in preset["batches"]:
+                    if batch_size == 1:
+                        candidate, labels = solo, ["r0"]
+                    else:
+                        if batch_size > max_num_seqs:
+                            continue
+                        prompts = [
+                            make_random_prompt(
+                                prompt_len, seed=seed + 101 * index, vocab_size=vocab,
+                            )
+                            for index in range(batch_size)
+                        ]
+                        candidate = sparse_probe(
+                            prompts, chunk, reference=False,
+                            snapshot_labels={"r0"},
+                        )
+                        labels = [f"r{index}" for index in range(batch_size)]
+                    path_ok = True
+                    counts_ok = True
+                    finite_ok = True
+                    drift_ok = True
+                    token_ok = True
+                    for label in labels:
+                        rows = [
+                            r["q_len"] for batch in candidate.batches
+                            for r in batch["rows"]
+                            if r["prefill"] and r["label"] == label
+                        ]
+                        path_ok &= rows == expected_chunks
+                        seq = candidate.seqs[label]
+                        counts_ok &= len(seq.completion_token_ids) == decode_tokens
+                        diagnostics = candidate.diagnostics.get(label, {})
+                        finite_ok &= all(
+                            _state_summary_is_finite(diagnostics.get(position))
+                            for position in range(decode_tokens)
+                        )
+                        if (reference is not None
+                                and reference.snapshots.get(label)
+                                and candidate.snapshots.get(label)):
+                            drift_ok &= all(
+                                check["drift_pass"]
+                                for check in drift_checks(reference, candidate, label)
+                            )
+                        solo_tokens = list(solo.seqs["r0"].completion_token_ids)
+                        got_tokens = list(seq.completion_token_ids)
+                        if label == "r0" and got_tokens != solo_tokens:
+                            records = token_mismatch_records(
+                                solo_tokens, got_tokens,
+                                solo.diagnostics.get("r0", {}),
+                                candidate.diagnostics.get(label, {}),
+                            )
+                            token_ok &= bool(records) and records[0].get("near_tie", False)
+                    runs.append({
+                        "prompt_len": prompt_len, "chunk": chunk,
+                        "batch_size": len(labels), "seed": seed,
+                        "num_chunks": len(expected_chunks),
+                        "expected_chunks": expected_chunks,
+                        "path_ok": bool(path_ok), "counts_ok": bool(counts_ok),
+                        "finite_ok": bool(finite_ok),
+                        "drift_available": reference is not None,
+                        "drift_ok": bool(drift_ok),
+                        "token_ok": bool(token_ok),
+                        "isolation_checks": candidate.isolation_checks,
+                        "drift": (
+                            drift_checks(reference, candidate, "r0")
+                            if reference is not None else None
+                        ),
+                        "pass": bool(path_ok and counts_ok and finite_ok
+                                     and drift_ok and token_ok),
+                    })
+                    print(f"[{mode.name}] w13 P={prompt_len} C={chunk} "
+                          f"B={len(labels)} seed={seed}: "
+                          f"{'PASS' if runs[-1]['pass'] else 'FAIL'}", flush=True)
+                del solo
+            del reference
+
+    slot_reuse_ok = False
+    try:
+        short = Sequence(
+            make_random_prompt(64, seed=13900, vocab_size=vocab),
+            make_params(4),
+        )
+        engine.scheduler.add(short)
+        run_until_idle(engine, [short])
+        slot_reuse_ok = (
+            short.is_finished
+            and len(short.completion_token_ids) == 4
+            and not engine.model_runner.input_batch.seq_id_to_slot
+        )
+    except Exception:
+        slot_reuse_ok = False
+
+    executed = [r for r in runs if not r.get("skipped")]
+    passed = bool(executed) and all(r["pass"] for r in executed) and slot_reuse_ok
+    max_relative = {}
+    for run in executed:
+        if run.get("drift"):
+            for check in run["drift"]:
+                for name, group in check["groups"].items():
+                    max_relative[name] = max(
+                        max_relative.get(name, 0.0), group["relative_rmse"]
+                    )
+    return {
+        "pass": passed, "accepted": passed, "signature": [],
+        "detail": f"{sum(r['pass'] for r in executed)}/{len(executed)} stable runs; "
+                  f"slot_reuse={slot_reuse_ok}; skipped={len(runs) - len(executed)}",
+        "scale": args.stability_scale, "decode_tokens": decode_tokens,
+        "drift_limits": limits, "max_relative_rmse": max_relative,
+        "runs": runs, "slot_reuse_ok": slot_reuse_ok,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +1137,12 @@ COMPARE_CASES: list[tuple[str, Callable[..., dict[str, Any]], str]] = [
      "sync vs async D2H double-buffered copy"),
     ("w10_long_decode", lambda eng, mode: case_w10_long_decode(eng),
      "128-step decode, batch 1/4, finite logits/state"),
+    ("w11_chunked_prefill", case_w11_chunked_prefill,
+     "one-shot vs chunks 64/128/256; full GDN/KV snapshots and free decode"),
+    ("w12_mixed_prefill_decode", case_w12_mixed_prefill_decode,
+     "real B-prefill128 + A-decode1 batch vs independent eager requests"),
+    ("w13_chunked_mixed_stability", case_w13_chunked_mixed_stability,
+     "opt-in long chunked/mixed stability (~1K..8K prompts; --cases w13)"),
 ]
 
 LOCAL_CASES: list[tuple[str, Callable[..., dict[str, Any]], str]] = [
@@ -776,8 +1150,6 @@ LOCAL_CASES: list[tuple[str, Callable[..., dict[str, Any]], str]] = [
      "GDN state lifecycle (nonzero after prefill, mutated by decode)"),
     ("w5_slot_reuse", lambda model, mode, args: case_w5_slot_reuse(model, mode, args),
      "GDN slot reuse vs fresh engine"),
-    ("known_limit_chunked_prefill", lambda model, mode, args: case_known_limitation_chunked_prefill(model, mode),
-     "KNOWN LIMITATION: chunked prefill"),
 ]
 
 
@@ -808,9 +1180,12 @@ def run_child(args) -> None:
         gpu_memory_utilization=args.gpu_memory_utilization,
         sampler=sampler,
     )
+    engine.validation_args = args
     try:
         for case_id, fn, desc in COMPARE_CASES:
-            if args.cases and not any(case_id.startswith(c) for c in args.cases):
+            if not args.cases and case_id == "w13_chunked_mixed_stability":
+                continue
+            if args.cases and not any((case_id == c or case_id.startswith(c + "_")) for c in args.cases):
                 continue
             print(f"[{mode.name}] {case_id}: {desc} ...", flush=True)
             try:
@@ -837,11 +1212,11 @@ def run_child(args) -> None:
     finally:
         engine.exit()
 
-    # Local cases (state lifecycle / slot reuse / known limitation) are
+    # Local cases (state lifecycle / slot reuse) are
     # mode-independent; run them in the BASELINE child only.
     if mode.name == "BASELINE":
         for case_id, fn, desc in LOCAL_CASES:
-            if args.cases and not any(case_id.startswith(c) for c in args.cases):
+            if args.cases and not any((case_id == c or case_id.startswith(c + "_")) for c in args.cases):
                 continue
             print(f"[{mode.name}] {case_id}: {desc} ...", flush=True)
             try:
@@ -867,11 +1242,12 @@ def run_parent(args) -> None:
     mode_names = ["BASELINE", "A", "B", "C"]
     selected_compare = [
         case_id for case_id, _, _ in COMPARE_CASES
-        if not args.cases or any(case_id.startswith(c) for c in args.cases)
+        if (args.cases or case_id != "w13_chunked_mixed_stability")
+        and (not args.cases or any((case_id == c or case_id.startswith(c + "_")) for c in args.cases))
     ]
     selected_local = [
         case_id for case_id, _, _ in LOCAL_CASES
-        if not args.cases or any(case_id.startswith(c) for c in args.cases)
+        if not args.cases or any((case_id == c or case_id.startswith(c + "_")) for c in args.cases)
     ]
     per_mode: dict[str, dict[str, Any]] = {}
     base = args.json_out or None
@@ -886,6 +1262,11 @@ def run_parent(args) -> None:
             "--max-num-batched-tokens", str(args.max_num_batched_tokens),
             "--max-model-len", str(args.max_model_len),
             "--gpu-memory-utilization", str(args.gpu_memory_utilization),
+            "--state-atol", str(args.state_atol),
+            "--state-rtol", str(args.state_rtol),
+            "--regression-decode-steps", str(args.regression_decode_steps),
+            "--stability-scale", args.stability_scale,
+            "--stability-decode-tokens", str(args.stability_decode_tokens),
         ]
         if args.cases:
             cmd += ["--cases", ",".join(sorted(args.cases))]
@@ -967,10 +1348,7 @@ def run_parent(args) -> None:
             detail = case.get("detail", "")
         else:
             exact_pass = bool(case.get("pass"))
-            if case_id == "known_limit_chunked_prefill":
-                status = "KNOWN_LIMITATION" if exact_pass else "UNEXPECTED"
-            else:
-                status = "PASS" if exact_pass else "FAIL"
+            status = "PASS" if exact_pass else "FAIL"
             result = {
                 "status": status,
                 "pass": exact_pass,
@@ -991,7 +1369,7 @@ def run_parent(args) -> None:
         and all(result.get("accepted", False) for result in all_cells)
     )
     overall_exact_pass = overall_pass and all(
-        result.get("status") in ("PASS", "KNOWN_LIMITATION")
+        result.get("status") == "PASS"
         for result in all_cells
     )
 
@@ -1161,8 +1539,24 @@ def main() -> None:
     parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
     parser.add_argument("--cases", default="", help="comma-separated case ids to run (default: all)")
+    parser.add_argument("--state-atol", type=float, default=5e-4,
+                        help="W11/W12 full GDN and KV elementwise absolute tolerance")
+    parser.add_argument("--state-rtol", type=float, default=5e-3,
+                        help="W11/W12 full GDN and KV elementwise relative tolerance")
+    parser.add_argument("--regression-decode-steps", type=int, default=8,
+                        help="W11/W12 decode forwards after prefill (>=3)")
+    parser.add_argument("--stability-scale", choices=("smoke", "default", "full"),
+                        default="default",
+                        help="W13 workload preset (case must be selected explicitly)")
+    parser.add_argument("--stability-decode-tokens", type=int, default=128,
+                        help="W13 decode tokens unless the preset overrides them")
     args = parser.parse_args()
     args.cases = set(c for c in args.cases.split(",") if c)
+    if (not math.isfinite(args.state_atol) or not math.isfinite(args.state_rtol)
+            or args.state_atol < 0 or args.state_rtol < 0 or args.regression_decode_steps < 3):
+        parser.error("state tolerances must be nonnegative and regression-decode-steps >=3")
+    if args.stability_decode_tokens < 4:
+        parser.error("stability-decode-tokens must be >= 4")
 
     if args.mode == "parent":
         run_parent(args)
