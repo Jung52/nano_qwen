@@ -439,6 +439,9 @@ class GraphPathCounter:
         self.decode_eager_fallbacks = 0
         self.prefill_graph_hits = 0
         self.prefill_eager_fallbacks = 0
+        self.prefill_piecewise_hits = 0
+        self.prefill_piecewise_mixed_fallbacks = 0
+        self.prefill_piecewise_large_fallbacks = 0
         self.decode_batch_sizes: dict[int, int] = {}
         self.prefill_token_counts: dict[int, int] = {}
         self._orig = runner.run_model
@@ -450,7 +453,7 @@ class GraphPathCounter:
     def __exit__(self, *exc) -> None:
         self.runner.run_model = self._orig  # type: ignore[method-assign]
 
-    def _wrapped(self, input_ids, positions, is_prefill):
+    def _wrapped(self, input_ids, positions, is_prefill, pure_prefill=False):
         num_rows = input_ids.size(0)
         eager_branch = (
             self.runner.enforce_eager
@@ -469,11 +472,32 @@ class GraphPathCounter:
             self.prefill_token_counts[num_rows] = (
                 self.prefill_token_counts.get(num_rows, 0) + 1
             )
-            if (not eager_branch) and self.runner.use_prefill_cudagraph:
+            piecewise_configured = (
+                not self.runner.enforce_eager
+                and hasattr(self.runner, "graphs")
+                and self.runner.use_prefill_cudagraph
+            )
+            graph_sizes = getattr(self.runner, "prefill_graph_sizes", [])
+            piecewise_fits = any(size >= num_rows for size in graph_sizes)
+            if (
+                piecewise_configured
+                and piecewise_fits
+                and pure_prefill
+            ):
                 self.prefill_graph_hits += 1
+                self.prefill_piecewise_hits += 1
             else:
                 self.prefill_eager_fallbacks += 1
-        return self._orig(input_ids, positions, is_prefill)
+            if piecewise_configured and not pure_prefill:
+                self.prefill_piecewise_mixed_fallbacks += 1
+            elif piecewise_configured and not piecewise_fits:
+                self.prefill_piecewise_large_fallbacks += 1
+        return self._orig(
+            input_ids,
+            positions,
+            is_prefill,
+            pure_prefill=pure_prefill,
+        )
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -481,6 +505,13 @@ class GraphPathCounter:
             "decode_eager_fallbacks": self.decode_eager_fallbacks,
             "prefill_graph_hits": self.prefill_graph_hits,
             "prefill_eager_fallbacks": self.prefill_eager_fallbacks,
+            "prefill_piecewise_hits": self.prefill_piecewise_hits,
+            "prefill_piecewise_mixed_fallbacks": (
+                self.prefill_piecewise_mixed_fallbacks
+            ),
+            "prefill_piecewise_large_fallbacks": (
+                self.prefill_piecewise_large_fallbacks
+            ),
             "decode_batch_sizes": dict(sorted(self.decode_batch_sizes.items())),
             "prefill_token_counts": dict(sorted(self.prefill_token_counts.items())),
         }

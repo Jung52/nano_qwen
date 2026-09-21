@@ -446,12 +446,18 @@ class ModelRunner:
         return input_ids, positions, temperatures
 
     @torch.inference_mode()
-    def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
+    def run_model(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        is_prefill: bool,
+        pure_prefill: bool = False,
+    ):
         # Model warmup runs before graph buffers are allocated. Keep that
         # bootstrap pass eager; graph replay starts after capture_cudagraph().
         if self.enforce_eager or not hasattr(self, "graphs") or input_ids.size(0) > 512:
             return self.model.compute_logits(self.model(input_ids, positions))
-        if is_prefill and self.use_prefill_cudagraph:
+        if is_prefill and pure_prefill and self.use_prefill_cudagraph:
             return self.run_prefill_piecewise(input_ids, positions)
 
         if is_prefill:
@@ -592,7 +598,13 @@ class ModelRunner:
             "run_model", "runner",
             args={"prefill": is_prefill, "tokens": input_ids.size(0)},
         ):
-            logits = self.run_model(input_ids, positions, is_prefill)
+            pure_prefill = is_prefill and all(seq.is_prefill for seq in seqs)
+            logits = self.run_model(
+                input_ids,
+                positions,
+                is_prefill,
+                pure_prefill=pure_prefill,
+            )
         # Depth-1 async: store the sampling state for the immediately-
         # following sample_tokens() call. batch_slots_gpu is safe to reuse
         # here because no second batch can be dispatched before sampling.
