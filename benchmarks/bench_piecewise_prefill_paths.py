@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
+from dataclasses import replace
 from statistics import median
 from typing import Any, Callable
 
@@ -139,7 +140,7 @@ def capture_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 def instrument_capture(runner) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    original = runner.capture_prefill_layer_segments
+    original = runner.cuda_graphs.capture_prefill_layer_segments
 
     def wrapped(layer, graph_size: int, has_residual: bool):
         started = time.perf_counter()
@@ -150,7 +151,7 @@ def instrument_capture(runner) -> list[dict[str, Any]]:
         })
         return output
 
-    runner.capture_prefill_layer_segments = wrapped
+    runner.cuda_graphs.capture_prefill_layer_segments = wrapped
     return records
 
 
@@ -336,19 +337,31 @@ def workload_mixed(
     }
 
 
+def capture_prefill_buckets(runner, buckets: list[int]) -> None:
+    runner.cuda_graphs.capture_prefill(list(buckets))
+
+
 def run_child(args) -> dict[str, Any]:
     mode: ModeConfig = PERF_MODE_NAMES[args.mode]
     print(f"[{mode.name}] building engine...", flush=True)
+    # Defer prefill capture so the benchmark's custom bucket list is captured
+    # exactly once instead of first capturing the production default set.
     engine = make_engine(
         args.model,
-        mode,
+        replace(mode, prefill_cudagraph=False),
         max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
     )
 
-    engine.model_runner.prefill_graph_sizes = list(args.prefill_graph_buckets)
+    engine.model_runner.use_prefill_cudagraph = mode.prefill_cudagraph
+    if mode.prefill_cudagraph:
+        capture_prefill_buckets(
+            engine.model_runner,
+            list(args.prefill_graph_buckets),
+        )
+    engine.max_concurrent_batches = mode.queue_depth
     memory = {"after_init": memory_snapshot()}
     torch.cuda.reset_peak_memory_stats()
     capture_records = instrument_capture(engine.model_runner)

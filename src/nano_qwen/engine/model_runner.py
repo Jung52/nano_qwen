@@ -9,6 +9,7 @@ from multiprocessing.shared_memory import SharedMemory
 
 from nano_qwen.config import Config
 from nano_qwen.engine.sequence import Sequence
+from nano_qwen.engine.cuda_graph import CudaGraphManager
 from nano_qwen.layers.gated_delta_net import GatedDeltaNet
 from nano_qwen.layers.sampler import Sampler
 from nano_qwen.models.qwen3_5 import Qwen3_5ForCausalLM
@@ -76,6 +77,7 @@ class ModelRunner:
         rank: int,
         event: Event | list[Event],
         port: int | None = None,
+        use_prefill_cudagraph: bool = True,
     ):
         self._closed = False
         self.config = config
@@ -127,7 +129,8 @@ class ModelRunner:
         self.async_output = True
         # The server benchmark can isolate prefill CUDA Graph overhead while
         # keeping decode graphs enabled. Production defaults to prefill graphs.
-        self.use_prefill_cudagraph = True
+        self.use_prefill_cudagraph = use_prefill_cudagraph
+        self.cuda_graphs = CudaGraphManager(self)
         self._output_buf_idx = 0
         # MRV2-style input-prep protection: the prior step's async H2D
         # transfers must be consumed before this step reuses the same
@@ -181,10 +184,7 @@ class ModelRunner:
         # containers. Clear every runner-owned GPU reference, including the
         # lazily-created piecewise graphs, before the engine is discarded.
         self._pending = None
-        for name in ("prefill_piecewise_graphs", "graph_vars", "graphs"):
-            value = getattr(self, name, None)
-            if value is not None:
-                value.clear()
+        self.cuda_graphs.clear()
         for name in ("gdn_layers", "decode_gpu", "decode_cpu",
                      "_output_pin_bufs", "_output_events"):
             value = getattr(self, name, None)
@@ -194,7 +194,6 @@ class ModelRunner:
             self.input_batch.clear()
         self.model = None
         self.kv_cache = None
-        self.graph_pool = None
         self.sampled_token_ids_gpu = None
         self.batch_slots_gpu = None
         self.prepare_inputs_event = None
@@ -451,14 +450,13 @@ class ModelRunner:
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         is_prefill: bool,
-        pure_prefill: bool = False,
     ):
         # Model warmup runs before graph buffers are allocated. Keep that
         # bootstrap pass eager; graph replay starts after capture_cudagraph().
-        if self.enforce_eager or not hasattr(self, "graphs") or input_ids.size(0) > 512:
+        if self.enforce_eager or not self.cuda_graphs.decode_graphs:
             return self.model.compute_logits(self.model(input_ids, positions))
-        if is_prefill and pure_prefill and self.use_prefill_cudagraph:
-            return self.run_prefill_piecewise(input_ids, positions)
+        if is_prefill and self.use_prefill_cudagraph:
+            return self.cuda_graphs.run_prefill(input_ids, positions)
 
         if is_prefill:
             return self.model.compute_logits(self.model(input_ids, positions))
@@ -468,89 +466,7 @@ class ModelRunner:
         # The current graph set uses exact batch sizes (1, 2, 4, ...). Do not
         # run a larger graph with an uninitialized padding row: GDN mutates
         # recurrent state, so a fake row could corrupt a real request slot.
-        if bs not in self.graphs:
-            return self.model.compute_logits(self.model(input_ids, positions))
-        graph = self.graphs[bs]
-        graph_vars = self.graph_vars
-        graph_vars["input_ids"][:bs] = input_ids
-        graph_vars["positions"][:bs] = positions
-        graph_vars["slot_mapping"].fill_(-1)
-        graph_vars["slot_mapping"][:bs] = context.slot_mapping
-        graph_vars["context_lens"].zero_()
-        graph_vars["context_lens"][:bs] = context.context_lens
-        graph_vars["block_tables"].fill_(-1)
-        graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
-        graph_vars["state_indices"].zero_()
-        graph_vars["state_indices"][:bs] = context.state_indices
-        graph.replay()
-        return self.model.compute_logits(graph_vars["outputs"][:bs])
-
-    @torch.inference_mode()
-    def run_prefill_piecewise(self, input_ids: torch.Tensor, positions: torch.Tensor):
-        """Run prefill with vLLM-style token-bucketed graph segments.
-
-        Token-wise dense work before and after attention is captured with a
-        fixed padded token count. Variable-length GDN/full-attention remains
-        eager and consumes the real packed rows and metadata. Consequently,
-        different request layouts with the same padded total-token count can
-        share these graphs without capturing a dynamic kernel launch grid.
-        """
-        context = get_context()
-        if context.prefill_slices is None:
-            raise RuntimeError("prefill graph requires Context.prefill_slices")
-
-        num_tokens = input_ids.size(0)
-        graph_size = next(
-            (size for size in self.prefill_graph_sizes if size >= num_tokens),
-            None,
-        )
-        if graph_size is None:
-            return self.model.compute_logits(self.model(input_ids, positions))
-
-        entries = self.prefill_piecewise_graphs.setdefault(graph_size, {})
-        hidden = self.model.model.embed_tokens(input_ids)
-        residual = None
-        for layer_idx, layer in enumerate(self.model.model.layers):
-            entry = entries.get(layer_idx)
-            if entry is None:
-                entry = self.capture_prefill_layer_segments(
-                    layer,
-                    graph_size,
-                    has_residual=residual is not None,
-                )
-                entries[layer_idx] = entry
-
-            pre = entry["pre"]
-            pre["hidden_in"].zero_()
-            pre["hidden_in"][:num_tokens].copy_(hidden[:num_tokens])
-            if residual is not None:
-                pre["residual_in"].zero_()
-                pre["residual_in"][:num_tokens].copy_(residual[:num_tokens])
-            pre["graph"].replay()
-            attention_input = pre["hidden_out"][:num_tokens]
-            layer_residual = pre["residual_out"]
-
-            # This is the graph break: only real packed tokens enter the
-            # variable-length operator, with the current request boundaries.
-            attention_output = layer.forward_attention(
-                positions,
-                attention_input,
-                context.prefill_slices,
-            )
-
-            post = entry["post"]
-            post["hidden_in"].zero_()
-            post["hidden_in"][:num_tokens].copy_(attention_output)
-            post["residual_in"].copy_(layer_residual)
-            post["graph"].replay()
-            hidden = post["hidden_out"]
-            residual = post["residual_out"]
-
-        hidden, _ = self.model.model.norm(
-            hidden[:num_tokens],
-            residual[:num_tokens],
-        )
-        return self.model.compute_logits(hidden)
+        return self.cuda_graphs.run_decode(input_ids, positions)
 
     def execute_model(self, seqs: list[Sequence], is_prefill: bool) -> None:
         """MRV2 step: prepare inputs, enqueue the forward, return None.
@@ -598,12 +514,10 @@ class ModelRunner:
             "run_model", "runner",
             args={"prefill": is_prefill, "tokens": input_ids.size(0)},
         ):
-            pure_prefill = is_prefill and all(seq.is_prefill for seq in seqs)
             logits = self.run_model(
                 input_ids,
                 positions,
                 is_prefill,
-                pure_prefill=pure_prefill,
             )
         # Depth-1 async: store the sampling state for the immediately-
         # following sample_tokens() call. batch_slots_gpu is safe to reuse
@@ -655,7 +569,7 @@ class ModelRunner:
 
         buf_idx = self._output_buf_idx
         self._output_buf_idx ^= 1 #ping-pong buffer index, switch between 0 and 1 for double buffering
-        output_buf = self._output_pin_bufs[buf_idx][:bs] 
+        output_buf = self._output_pin_bufs[buf_idx][:bs]
         ready_event = self._output_events[buf_idx]
 
         if self.async_output:
@@ -678,125 +592,34 @@ class ModelRunner:
     def remove_request(self, seq_id: int):
         self.input_batch.remove(seq_id)
 
-    @torch.inference_mode()
     def capture_cudagraph(self):
-        config = self.config
-        hf_config = config.hf_config
-        max_bs = min(self.config.max_num_seqs, 512)
-        max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
-        device = torch.cuda.current_device()
-        input_ids = torch.zeros(max_bs, dtype=torch.int64, device=device)
-        positions = torch.zeros(max_bs, dtype=torch.int64, device=device)
-        slot_mapping = torch.zeros(max_bs, dtype=torch.int32, device=device)
-        context_lens = torch.zeros(max_bs, dtype=torch.int32, device=device)
-        block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32, device=device)
-        state_indices = torch.zeros(max_bs, dtype=torch.int64, device=device)
-        outputs = torch.zeros(max_bs, hf_config.hidden_size, device=device)
-        self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
-        self.graphs = {}
-        self.graph_pool = None
+        """Capture decode and piecewise-prefill graphs through the manager."""
+        self.cuda_graphs.capture()
 
-        for bs in reversed(self.graph_bs):
-            graph = torch.cuda.CUDAGraph()
-            set_context(
-                False,
-                slot_mapping=slot_mapping[:bs],
-                context_lens=context_lens[:bs],
-                block_tables=block_tables[:bs],
-                state_indices=state_indices[:bs],
-            )
-            # Warm up on a side stream (per the CUDA Graph recipe) so that
-            # torch.compile finishes tracing/compilation before capture;
-            # Dynamo tracing during capture would issue a host->device
-            # scalar copy, which is illegal while a stream is capturing.
-            warmup_stream = torch.cuda.Stream()
-            warmup_stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(warmup_stream):
-                for _ in range(3):
-                    outputs[:bs] = self.model(input_ids[:bs], positions[:bs])
-            torch.cuda.current_stream().wait_stream(warmup_stream)
-            with torch.cuda.graph(graph, self.graph_pool):
-                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
-            if self.graph_pool is None:
-                self.graph_pool = graph.pool()
-            self.graphs[bs] = graph
-            torch.cuda.synchronize()
-            reset_context()
+    @property
+    def graph_bs(self):
+        return self.cuda_graphs.decode_graph_sizes
 
-        self.graph_vars = dict(
-            input_ids=input_ids,
-            positions=positions,
-            slot_mapping=slot_mapping,
-            context_lens=context_lens,
-            block_tables=block_tables,
-            state_indices=state_indices,
-            outputs=outputs,
-        )
-        max_prefill_tokens = min(config.max_num_batched_tokens, 512)
-        self.prefill_graph_sizes = [
-            size
-            for size in ([1, 2, 4, 8] + list(range(16, max_prefill_tokens + 1, 16)))
-            if size <= max_prefill_tokens
-        ]
-        if (
-            max_prefill_tokens > 0
-            and max_prefill_tokens not in self.prefill_graph_sizes
-        ):
-            self.prefill_graph_sizes.append(max_prefill_tokens)
-        # Piecewise prefill graphs are captured lazily by padded total-token
-        # count. Decode graphs above remain full graphs by exact batch size.
-        self.prefill_piecewise_graphs = {}
+    @property
+    def graphs(self):
+        return self.cuda_graphs.decode_graphs
 
-    @torch.inference_mode()
-    def capture_prefill_layer_segments(
-        self,
-        layer,
-        graph_size: int,
-        has_residual: bool,
-    ):
-        """Capture the two static pieces around one dynamic attention op."""
-        hidden_size = self.config.hf_config.hidden_size
-        model_weight = self.model.model.embed_tokens.weight
-        pre_hidden = torch.zeros(
-            graph_size,
-            hidden_size,
-            dtype=model_weight.dtype,
-            device=model_weight.device,
-        )
-        pre_residual = (
-            torch.zeros_like(pre_hidden) if has_residual else None
-        )
-        for _ in range(2):
-            pre_outputs = layer.forward_input(pre_hidden, pre_residual)
-        torch.cuda.synchronize()
-        pre_graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(pre_graph, self.graph_pool):
-            pre_outputs = layer.forward_input(pre_hidden, pre_residual)
-        torch.cuda.synchronize()
+    @property
+    def graph_vars(self):
+        return self.cuda_graphs.decode_graph_vars
 
-        post_hidden = torch.zeros_like(pre_hidden)
-        post_residual = torch.zeros_like(pre_hidden)
-        for _ in range(2):
-            post_outputs = layer.forward_output(post_hidden, post_residual)
-        torch.cuda.synchronize()
-        post_graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(post_graph, self.graph_pool):
-            post_outputs = layer.forward_output(post_hidden, post_residual)
-        torch.cuda.synchronize()
+    @property
+    def graph_pool(self):
+        return self.cuda_graphs.decode_graph_pool
 
-        return {
-            "pre": {
-                "graph": pre_graph,
-                "hidden_in": pre_hidden,
-                "residual_in": pre_residual,
-                "hidden_out": pre_outputs[0],
-                "residual_out": pre_outputs[1],
-            },
-            "post": {
-                "graph": post_graph,
-                "hidden_in": post_hidden,
-                "residual_in": post_residual,
-                "hidden_out": post_outputs[0],
-                "residual_out": post_outputs[1],
-            },
-        }
+    @property
+    def prefill_graph_sizes(self):
+        return self.cuda_graphs.prefill_graph_sizes
+
+    @prefill_graph_sizes.setter
+    def prefill_graph_sizes(self, value):
+        self.cuda_graphs.prefill_graph_sizes = list(value)
+
+    @property
+    def prefill_piecewise_graphs(self):
+        return self.cuda_graphs.prefill_graphs

@@ -82,14 +82,14 @@ def run_mode(args, mode, prompts, params):
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
         gpu_memory_utilization=0.75,
+        use_prefill_cudagraph=(mode == "all_graph"),
     )
     try:
-        engine.model_runner.use_prefill_cudagraph = mode == "all_graph"
         runner = engine.model_runner
         totals, counts = install_phase_trace(engine)
         torch.manual_seed(args.seed)
 
-        # Cold run includes the first piecewise prefill capture when enabled.
+        # The first request still includes cold allocator/model work.
         cold_time, cold_outputs = timed_generate(engine, prompts, params, totals)
         cold_tokens = sum(len(item["token_ids"]) for item in cold_outputs)
 

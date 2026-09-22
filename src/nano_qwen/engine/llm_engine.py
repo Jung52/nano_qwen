@@ -31,7 +31,7 @@ class LLMEngine:
     Sequence, KV-cache and scheduler state stay consistent.
     """
 
-    def __init__(self, model: str, **kwargs):
+    def __init__(self, model: str, use_prefill_cudagraph: bool = True, **kwargs):
         self._exited = False
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
@@ -49,13 +49,19 @@ class LLMEngine:
             event = ctx.Event()
             process = ctx.Process(
                 target=ModelRunner,
-                args=(self.config, rank, event, dist_port),
+                args=(self.config, rank, event, dist_port, use_prefill_cudagraph),
             )
             process.start()
             self.ps.append(process)
             self.events.append(event)
 
-        self.model_runner = ModelRunner(self.config, 0, self.events, dist_port)
+        self.model_runner = ModelRunner(
+            self.config,
+            0,
+            self.events,
+            dist_port,
+            use_prefill_cudagraph,
+        )
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.model,
             use_fast=True,

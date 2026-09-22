@@ -383,6 +383,96 @@ class GatedDeltaNet(nn.Module):
         self.conv_states.index_copy_(0, ctx.state_indices, new_conv)
         return self.out_proj(out)
 
+    def forward_dense_pre(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        raw_qkv = self.in_proj_qkv(hidden_states)
+        z = self.in_proj_z(hidden_states)
+        b = self.in_proj_b(hidden_states)
+        a = self.in_proj_a(hidden_states)
+        return raw_qkv, z, b, a
+
+    def forward_core_from_dense(
+        self,
+        attention_pre: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        raw_qkv_packed, z, b, a = attention_pre
+        context = get_context()
+        if context.prefill_slices is None or context.cu_seqlens_q is None:
+            raise RuntimeError(
+                "GDN prefill requires packed slices and cu_seqlens"
+            )
+
+        total_tokens = raw_qkv_packed.shape[0]
+        raw_qkv = raw_qkv_packed.unsqueeze(0).transpose(1, 2)
+        lengths = [end - start for start, end in context.prefill_slices]
+        max_len = max(lengths, default=0)
+        state_width = self.conv_kernel_size - 1
+        history = self.conv_states.index_select(0, context.state_indices)
+        padded_qkv = raw_qkv.new_zeros(
+            len(lengths), self.conv_dim, max_len + state_width,
+        )
+        padded_qkv[:, :, :state_width] = history
+        for batch_idx, (start, end) in enumerate(context.prefill_slices):
+            padded_qkv[batch_idx, :, state_width:state_width + end - start] = (
+                raw_qkv[0, :, start:end]
+            )
+        padded_conv = F.silu(
+            self.conv1d(padded_qkv)[:, :, state_width:state_width + max_len]
+        )
+        qkv = torch.cat(
+            [
+                padded_conv[batch_idx, :, :length].transpose(0, 1)
+                for batch_idx, length in enumerate(lengths)
+            ],
+            dim=0,
+        ).unsqueeze(0)
+
+        query = qkv[..., : self.key_dim].reshape(1, total_tokens, -1, self.head_k_dim)
+        key = qkv[..., self.key_dim:self.key_dim * 2].reshape(
+            1, total_tokens, -1, self.head_k_dim
+        )
+        value = qkv[..., self.key_dim * 2:].reshape(
+            1, total_tokens, -1, self.head_v_dim
+        )
+        z = z.unsqueeze(0).reshape(1, total_tokens, -1, self.head_v_dim)
+        b = b.unsqueeze(0).reshape(1, total_tokens, -1)
+        a = a.unsqueeze(0).reshape(1, total_tokens, -1)
+        beta = torch.sigmoid(b)
+        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias.float())
+        if self.gqa_ratio > 1:
+            query = query.repeat_interleave(self.gqa_ratio, dim=2)
+            key = key.repeat_interleave(self.gqa_ratio, dim=2)
+
+        out = chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            g,
+            beta,
+            initial_state=self.recurrent_states,
+            initial_state_indices=context.state_indices,
+            cu_seqlens=context.cu_seqlens_q,
+            chunk_indices=context.prefill_chunk_indices,
+        )
+        out = out.reshape(-1, self.head_v_dim)
+        z = z.reshape(-1, self.head_v_dim)
+        out = self.norm(out, z)
+        out = out.reshape(1, total_tokens, -1)
+
+        new_conv = torch.stack(
+            [
+                padded_qkv[batch_idx, :, :state_width + length][
+                    :, -state_width:
+                ]
+                for batch_idx, length in enumerate(lengths)
+            ],
+            dim=0,
+        )
+        self.conv_states.index_copy_(0, context.state_indices, new_conv)
+        return self.out_proj(out)
+
     def _forward_decode(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Batched decode: all B sequences in ONE kernel launch per layer. Each
         # row reads and writes its own persistent pool slot via

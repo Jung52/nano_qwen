@@ -146,6 +146,34 @@ class Qwen3_5Attention(nn.Module):
         attn_output = attn_output * torch.sigmoid(gate)
         return self.o_proj(attn_output)
 
+    def forward_dense_pre(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        q_gate = self.q_proj(hidden_states)
+        key = self.k_proj(hidden_states)
+        value = self.v_proj(hidden_states)
+        return q_gate, key, value
+
+    def forward_core_from_dense(
+        self,
+        attention_pre: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        q_gate, key, value = attention_pre
+        q_gate = q_gate.view(-1, self.num_heads, 2 * self.head_dim)
+        query, gate = q_gate.chunk(2, dim=-1)
+        key = key.view(-1, self.num_kv_heads, self.head_dim)
+        value = value.view(-1, self.num_kv_heads, self.head_dim)
+        query = self.q_norm(query.reshape(-1, self.head_dim)).reshape_as(query)
+        key = self.k_norm(key.reshape(-1, self.head_dim)).reshape_as(key)
+        query, key = self.rotary_emb(positions, query, key)
+        attn_output = self.attn(query, key, value)
+        attn_output = attn_output.reshape(-1, self.q_size)
+        gate = gate.reshape(-1, self.q_size)
+        attn_output = attn_output * torch.sigmoid(gate)
+        return self.o_proj(attn_output)
+
 
 class Qwen3_5MLP(nn.Module):
 
@@ -280,6 +308,36 @@ class Qwen3_5DecoderLayer(nn.Module):
                 prefill_slices,
             )
         return self.self_attn(positions, hidden_states)
+
+    def forward_piecewise_pre(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ):
+        """Graphable dense work before the attention core."""
+        hidden_states, residual = self.forward_input(hidden_states, residual)
+        if self.block_type == "linear_attention":
+            attention_pre = self.linear_attn.forward_dense_pre(
+                hidden_states,
+            )
+        else:
+            attention_pre = self.self_attn.forward_dense_pre(hidden_states)
+        return attention_pre, residual
+
+    def forward_attention_core(
+        self,
+        attention_pre: tuple[torch.Tensor, ...],
+        positions: torch.Tensor,
+        prefill_slices: list[tuple[int, int]] | None = None,
+    ) -> torch.Tensor:
+        """Eager attention core, ending just before the residual/MLP block."""
+        if self.block_type == "linear_attention":
+            output = self.linear_attn.forward_core_from_dense(attention_pre)
+            return output.squeeze(0)
+        return self.self_attn.forward_core_from_dense(
+            attention_pre,
+            positions,
+        )
 
     def forward_output(
         self,

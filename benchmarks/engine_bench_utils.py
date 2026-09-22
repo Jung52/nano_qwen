@@ -330,6 +330,7 @@ def make_engine(
     engine = LLMEngine(
         model,
         enforce_eager=mode.enforce_eager,
+        use_prefill_cudagraph=mode.prefill_cudagraph,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_model_len,
@@ -453,12 +454,11 @@ class GraphPathCounter:
     def __exit__(self, *exc) -> None:
         self.runner.run_model = self._orig  # type: ignore[method-assign]
 
-    def _wrapped(self, input_ids, positions, is_prefill, pure_prefill=False):
+    def _wrapped(self, input_ids, positions, is_prefill):
         num_rows = input_ids.size(0)
         eager_branch = (
             self.runner.enforce_eager
             or not hasattr(self.runner, "graphs")
-            or num_rows > 512
         )
         if not is_prefill:
             self.decode_batch_sizes[num_rows] = (
@@ -479,24 +479,17 @@ class GraphPathCounter:
             )
             graph_sizes = getattr(self.runner, "prefill_graph_sizes", [])
             piecewise_fits = any(size >= num_rows for size in graph_sizes)
-            if (
-                piecewise_configured
-                and piecewise_fits
-                and pure_prefill
-            ):
+            if piecewise_configured and piecewise_fits:
                 self.prefill_graph_hits += 1
                 self.prefill_piecewise_hits += 1
             else:
                 self.prefill_eager_fallbacks += 1
-            if piecewise_configured and not pure_prefill:
-                self.prefill_piecewise_mixed_fallbacks += 1
-            elif piecewise_configured and not piecewise_fits:
+            if piecewise_configured and not piecewise_fits:
                 self.prefill_piecewise_large_fallbacks += 1
         return self._orig(
             input_ids,
             positions,
             is_prefill,
-            pure_prefill=pure_prefill,
         )
 
     def as_dict(self) -> dict[str, int]:

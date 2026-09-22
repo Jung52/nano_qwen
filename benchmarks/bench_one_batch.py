@@ -185,6 +185,7 @@ def main():
     engine = LLMEngine(args.model, tensor_parallel_size=1, max_num_seqs=args.batch_size,
                        max_num_batched_tokens=args.batch_size * args.input_len,
                        max_model_len=args.max_model_len, enforce_eager=args.enforce_eager,
+                       use_prefill_cudagraph=not args.disable_prefill_cudagraph,
                        enable_prefix_cache=False, gpu_memory_utilization=args.gpu_memory_utilization)
     try:
         engine.max_concurrent_batches = args.queue_depth
