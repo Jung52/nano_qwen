@@ -13,7 +13,7 @@ from nano_qwen.engine.cuda_graph import CudaGraphManager
 from nano_qwen.layers.gated_delta_net import GatedDeltaNet
 from nano_qwen.layers.sampler import Sampler
 from nano_qwen.models.qwen3_5 import Qwen3_5ForCausalLM
-from nano_qwen.utils.context import set_context, get_context, reset_context
+from nano_qwen.utils.context import set_context, get_context, reset_context, BatchDescriptor
 from nano_qwen.utils.loader import load_model
 from nano_qwen.utils.trace import trace_event
 
@@ -385,6 +385,13 @@ class ModelRunner:
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         state_indices = self.batch_slots_gpu[:len(seqs)]
+        descriptor = BatchDescriptor(
+            mode="prefill",
+            num_tokens=len(input_ids),
+            num_reqs=len(seqs),
+            uniform_token_count=None,
+            max_query_len=max_seqlen_q,
+        )
         set_context(
             True,
             cu_seqlens_q=cu_seqlens_q,
@@ -400,6 +407,7 @@ class ModelRunner:
                 dtype=torch.int32,
                 device=input_ids.device,
             ),
+            batch_descriptor=descriptor,
         )
         return input_ids, positions
 
@@ -424,12 +432,20 @@ class ModelRunner:
         context_lens = gpu["context_lens"][:bs]
         block_tables = self.prepare_block_tables(seqs)
         state_indices = self.batch_slots_gpu[:bs]
+        descriptor = BatchDescriptor(
+            mode="decode",
+            num_tokens=bs,
+            num_reqs=bs,
+            uniform_token_count=1,
+            max_query_len=1,
+        )
         set_context(
             False,
             slot_mapping=slot_mapping,
             context_lens=context_lens,
             block_tables=block_tables,
             state_indices=state_indices,
+            batch_descriptor=descriptor,
         )
         return input_ids, positions
 
@@ -451,21 +467,22 @@ class ModelRunner:
         positions: torch.Tensor,
         is_prefill: bool,
     ):
-        # Model warmup runs before graph buffers are allocated. Keep that
-        # bootstrap pass eager; graph replay starts after capture_cudagraph().
+        context = get_context()
+        descriptor = context.batch_descriptor
+        if descriptor is not None:
+            mode = descriptor.mode
+        else:
+            mode = "prefill" if is_prefill else "decode"
+
         if self.enforce_eager or not self.cuda_graphs.decode_graphs:
             return self.model.compute_logits(self.model(input_ids, positions))
-        if is_prefill and self.use_prefill_cudagraph:
-            return self.cuda_graphs.run_prefill(input_ids, positions)
 
-        if is_prefill:
+        if mode == "prefill" and self.use_prefill_cudagraph:
+            return self.cuda_graphs.run_prefill(input_ids, positions)
+        if mode == "prefill":
             return self.model.compute_logits(self.model(input_ids, positions))
 
-        bs = input_ids.size(0)
-        context = get_context()
-        # The current graph set uses exact batch sizes (1, 2, 4, ...). Do not
-        # run a larger graph with an uninitialized padding row: GDN mutates
-        # recurrent state, so a fake row could corrupt a real request slot.
+        # Decode / spec_decode: dispatch through the graph manager.
         return self.cuda_graphs.run_decode(input_ids, positions)
 
     def execute_model(self, seqs: list[Sequence], is_prefill: bool) -> None:

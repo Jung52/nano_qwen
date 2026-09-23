@@ -2,7 +2,7 @@
 
 Run in WSL with the ``triton`` environment::
 
-    PYTHONPATH=src python -m nano_qwen.server.test_cudagraph_prefill \
+    PYTHONPATH=src python benchmarks/test_cudagraph_prefill \
         --model /mnt/d/nano-vllm/Qwen3.5-0.8B
 
 ``all_graph`` uses the piecewise prefill graphs plus the existing decode
@@ -227,7 +227,7 @@ def main() -> None:
         command = [
             sys.executable,
             "-m",
-            "nano_qwen.server.test_cudagraph_prefill",
+            "benchmarks.test_cudagraph_prefill",
             *passthrough,
             "--mode",
             mode,

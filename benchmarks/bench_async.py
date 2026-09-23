@@ -2,7 +2,7 @@
 
 Run in WSL with the ``triton`` environment, for example::
 
-    PYTHONPATH=src python -m nano_qwen.server.bench_async \
+    PYTHONPATH=src python benchmarks/bench_async \
         --model /mnt/d/nano-vllm/Qwen3.5-0.8B
 
 The model is created once. Each (d2h mode, queue depth) configuration is
