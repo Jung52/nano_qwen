@@ -184,6 +184,8 @@ class GatedDeltaNet(nn.Module):
         self.norm = RMSNormGated(self.head_v_dim, eps=config.rms_norm_eps)
         self.norm.weight = nn.Parameter(self.norm.weight.data.to(torch.float32))
         self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
+        self._speculative_conv_state: torch.Tensor | None = None
+        self._speculative_recurrent_state: torch.Tensor | None = None
 
         # State pools, allocated by ModelRunner after init.
         self.conv_states: torch.Tensor = torch.tensor([])
@@ -250,6 +252,11 @@ class GatedDeltaNet(nn.Module):
         self.conv_states.index_fill_(0, slot_indices, 0)
         self.recurrent_states.index_fill_(0, slot_indices, 0)
 
+    def allocate_speculative_snapshot(self):
+        """Keep the first verified row's state in graph-stable GPU buffers."""
+        self._speculative_conv_state = torch.empty_like(self.conv_states)
+        self._speculative_recurrent_state = torch.empty_like(self.recurrent_states)
+
     def _read_state(self, idx: torch.Tensor):
         # index_select/index_copy are graph-capturable; advanced indexing can
         # require a host-side scalar conversion during CUDA Graph capture.
@@ -270,6 +277,21 @@ class GatedDeltaNet(nn.Module):
         self.conv_states.index_copy_(0, idx, conv_state)
         self.recurrent_states.index_copy_(0, idx, rec_state)
 
+    def commit_speculative_state(self):
+        # The next verification overwrites the snapshot on the GPU.
+        pass
+
+    def rollback_speculative_state(self, slot: int):
+        if self._speculative_conv_state is None:
+            return
+        slot_tensor = torch.tensor([slot], device=self.conv_states.device)
+        self.conv_states.index_copy_(
+            0, slot_tensor, self._speculative_conv_state.index_select(0, slot_tensor)
+        )
+        self.recurrent_states.index_copy_(
+            0, slot_tensor, self._speculative_recurrent_state.index_select(0, slot_tensor)
+        )
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         context = get_context()
         if context.is_prefill:
@@ -283,6 +305,40 @@ class GatedDeltaNet(nn.Module):
             raise RuntimeError(
                 "GDN prefill requires packed slices and cu_seqlens"
             )
+        # The FLA chunk kernel currently faults on short continuations after a
+        # completed prefill. MTP2 verify is exactly that shape; use the already
+        # correct recurrent decode kernel per token while retaining the packed
+        # 2-token path for dense/GQA layers.
+        if (
+            all(end - start <= 2 for start, end in context.prefill_slices)
+            and context.state_indices is not None
+            and context.state_indices.numel() == len(context.prefill_slices)
+        ):
+            outputs = []
+            for batch_idx, (start, end) in enumerate(context.prefill_slices):
+                state_index = context.state_indices[batch_idx:batch_idx + 1]
+                first = self._forward_decode(
+                    hidden_states[0, start:start + 1].unsqueeze(0),
+                    state_index,
+                )
+                if self._speculative_conv_state is not None:
+                    self._speculative_conv_state.index_copy_(
+                        0, state_index,
+                        self.conv_states.index_select(0, state_index),
+                    )
+                    self._speculative_recurrent_state.index_copy_(
+                        0, state_index,
+                        self.recurrent_states.index_select(0, state_index),
+                    )
+                for position in range(start + 1, end):
+                    outputs.append(self._forward_decode(
+                        hidden_states[0, position:position + 1].unsqueeze(0),
+                        state_index,
+                    ).squeeze(0))
+                outputs.insert(start, first.squeeze(0))
+            return torch.cat(
+                outputs, dim=0
+            ).unsqueeze(0)
         if hidden_states.dim() != 3 or hidden_states.shape[0] != 1:
             raise ValueError(
                 "GDN prefill expects packed hidden states shaped "
@@ -473,12 +529,16 @@ class GatedDeltaNet(nn.Module):
         self.conv_states.index_copy_(0, context.state_indices, new_conv)
         return self.out_proj(out)
 
-    def _forward_decode(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _forward_decode(
+        self,
+        hidden_states: torch.Tensor,
+        state_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         # Batched decode: all B sequences in ONE kernel launch per layer. Each
         # row reads and writes its own persistent pool slot via
         # context.state_indices (index_select/index_copy are graph-capturable).
         B = hidden_states.shape[0]
-        idx = get_context().state_indices
+        idx = get_context().state_indices if state_indices is None else state_indices
         if idx is None or idx.numel() == 0:
             raise RuntimeError(
                 "GDN decode requires Context.state_indices; "

@@ -22,6 +22,11 @@ class CudaGraphManager:
         self.decode_graph_pool = None
         self.decode_graph_vars: dict[str, torch.Tensor] | None = None
 
+        self.verify_graph: torch.cuda.CUDAGraph | None = None
+        self.verify_graph_vars: dict[str, torch.Tensor] | None = None
+        self.mtp_decode_graph: torch.cuda.CUDAGraph | None = None
+        self.mtp_decode_graph_vars: dict[str, torch.Tensor] | None = None
+
         self.prefill_graph_sizes: list[int] = []
         self.prefill_graphs: dict[int, dict[int, dict]] = {}
         self.prefill_graph_pool = None
@@ -38,8 +43,146 @@ class CudaGraphManager:
 
     def capture(self) -> None:
         self._capture_decode()
+        if self.runner.mtp is not None:
+            self._capture_verify()
+            self._capture_mtp_decode()
         if self.runner.use_prefill_cudagraph:
             self.capture_prefill()
+
+    def _capture_verify(self) -> None:
+        """Capture the packed two-row target verify, including GDN rollback state."""
+        max_blocks = (
+            self.config.max_model_len + self.runner.block_size - 1
+        ) // self.runner.block_size
+        device = torch.cuda.current_device()
+        input_ids = torch.zeros(2, dtype=torch.int64, device=device)
+        positions = torch.arange(2, dtype=torch.int64, device=device)
+        slot_mapping = torch.arange(2, dtype=torch.int32, device=device)
+        block_tables = torch.zeros((1, max_blocks), dtype=torch.int32, device=device)
+        cu_seqlens_q = torch.tensor([0, 2], dtype=torch.int32, device=device)
+        cu_seqlens_k = torch.tensor([0, 2], dtype=torch.int32, device=device)
+        state_indices = torch.zeros(1, dtype=torch.int64, device=device)
+        outputs = torch.empty(
+            (2, self.config.hf_config.hidden_size),
+            dtype=self.model.model.embed_tokens.weight.dtype,
+            device=device,
+        )
+
+        set_context(
+            True,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=2,
+            max_seqlen_k=2,
+            slot_mapping=slot_mapping,
+            context_lens=cu_seqlens_k[1:],
+            block_tables=block_tables,
+            state_indices=state_indices,
+            prefill_slices=[(0, 2)],
+            is_verify=True,
+        )
+        try:
+            warmup_stream = torch.cuda.Stream()
+            warmup_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(warmup_stream):
+                for _ in range(3):
+                    outputs.copy_(self.model.model(input_ids, positions))
+            torch.cuda.current_stream().wait_stream(warmup_stream)
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                outputs.copy_(self.model.model(input_ids, positions))
+            self.verify_graph = graph
+            self.verify_graph_vars = {
+                "input_ids": input_ids,
+                "positions": positions,
+                "slot_mapping": slot_mapping,
+                "block_tables": block_tables,
+                "cu_seqlens_k": cu_seqlens_k,
+                "state_indices": state_indices,
+                "outputs": outputs,
+            }
+        finally:
+            reset_context()
+            for layer in self.runner.gdn_layers:
+                layer.reset_state([0])
+
+    def run_verify(self, input_ids: torch.Tensor, positions: torch.Tensor):
+        context = get_context()
+        buffers = self.verify_graph_vars
+        buffers["input_ids"].copy_(input_ids)
+        buffers["positions"].copy_(positions)
+        buffers["slot_mapping"].copy_(context.slot_mapping)
+        buffers["block_tables"].fill_(-1)
+        buffers["block_tables"][:, :context.block_tables.size(1)].copy_(
+            context.block_tables
+        )
+        buffers["cu_seqlens_k"].copy_(context.cu_seqlens_k)
+        buffers["state_indices"].copy_(context.state_indices)
+        self.verify_graph.replay()
+        hidden = buffers["outputs"]
+        self.runner._target_hidden = hidden
+        return self.model.compute_logits(hidden)
+
+    def _capture_mtp_decode(self) -> None:
+        max_blocks = (
+            self.config.max_model_len + self.runner.block_size - 1
+        ) // self.runner.block_size
+        device = torch.cuda.current_device()
+        input_ids = torch.zeros(1, dtype=torch.int64, device=device)
+        positions = torch.ones(1, dtype=torch.int64, device=device)
+        target_hidden = torch.zeros(
+            (1, self.config.hf_config.hidden_size),
+            dtype=self.model.model.embed_tokens.weight.dtype, device=device,
+        )
+        slot_mapping = torch.ones(1, dtype=torch.int32, device=device)
+        context_lens = torch.ones(1, dtype=torch.int32, device=device)
+        block_tables = torch.zeros((1, max_blocks), dtype=torch.int32, device=device)
+        drafts = torch.empty(1, dtype=torch.int64, device=device)
+
+        set_context(
+            False, slot_mapping=slot_mapping, context_lens=context_lens,
+            block_tables=block_tables,
+        )
+        try:
+            def forward():
+                hidden = self.runner.mtp(
+                    input_ids, positions, target_hidden,
+                    self.model.model.embed_tokens,
+                )
+                drafts.copy_(self.model.compute_logits(hidden).argmax(dim=-1))
+
+            warmup_stream = torch.cuda.Stream()
+            warmup_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(warmup_stream):
+                for _ in range(3):
+                    forward()
+            torch.cuda.current_stream().wait_stream(warmup_stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                forward()
+            self.mtp_decode_graph = graph
+            self.mtp_decode_graph_vars = {
+                "input_ids": input_ids, "positions": positions,
+                "target_hidden": target_hidden, "slot_mapping": slot_mapping,
+                "context_lens": context_lens, "block_tables": block_tables,
+                "drafts": drafts,
+            }
+        finally:
+            reset_context()
+
+    def run_mtp_decode(self, input_ids, positions, target_hidden, slot_mapping,
+                       context_lens, block_tables):
+        buffers = self.mtp_decode_graph_vars
+        buffers["input_ids"].copy_(input_ids)
+        buffers["positions"].copy_(positions)
+        buffers["target_hidden"].copy_(target_hidden)
+        buffers["slot_mapping"].copy_(slot_mapping)
+        buffers["context_lens"].copy_(context_lens)
+        buffers["block_tables"].fill_(-1)
+        buffers["block_tables"][:, :block_tables.size(1)].copy_(block_tables)
+        self.mtp_decode_graph.replay()
+        return buffers["drafts"]
 
     def _capture_decode(self) -> None:
         config = self.config
@@ -160,7 +303,9 @@ class CudaGraphManager:
             None,
         )
         if graph_size is None or graph_size not in self.prefill_graphs:
-            return self.model.compute_logits(self.model(input_ids, positions))
+            hidden = self.model.model(input_ids, positions)
+            self.runner._target_hidden = hidden
+            return self.model.compute_logits(hidden)
 
         entries = self.prefill_graphs[graph_size]
         hidden = self.model.model.embed_tokens(input_ids)
@@ -199,12 +344,15 @@ class CudaGraphManager:
             hidden[:num_tokens],
             residual[:num_tokens],
         )
+        self.runner._target_hidden = hidden
         return self.model.compute_logits(hidden)
 
     def run_decode(self, input_ids: torch.Tensor, positions: torch.Tensor):
         bs = input_ids.size(0)
         if bs not in self.decode_graphs:
-            return self.model.compute_logits(self.model(input_ids, positions))
+            hidden = self.model.model(input_ids, positions)
+            self.runner._target_hidden = hidden
+            return self.model.compute_logits(hidden)
 
         context = get_context()
         graph = self.decode_graphs[bs]
@@ -222,7 +370,9 @@ class CudaGraphManager:
         graph_vars["state_indices"].zero_()
         graph_vars["state_indices"][:bs] = context.state_indices
         graph.replay()
-        return self.model.compute_logits(graph_vars["outputs"][:bs])
+        hidden = graph_vars["outputs"][:bs]
+        self.runner._target_hidden = hidden
+        return self.model.compute_logits(hidden)
 
     def clear_prefill(self) -> None:
         self.prefill_graphs.clear()
@@ -238,6 +388,10 @@ class CudaGraphManager:
         self.decode_graphs.clear()
         self.decode_graph_vars = None
         self.decode_graph_pool = None
+        self.verify_graph = None
+        self.verify_graph_vars = None
+        self.mtp_decode_graph = None
+        self.mtp_decode_graph_vars = None
 
     def _allocate_piecewise_buffers(
         self,

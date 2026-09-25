@@ -61,7 +61,17 @@ class Attention(nn.Module):
         k_cache, v_cache = self.k_cache, self.v_cache
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
-        if context.is_prefill:
+        if context.is_verify:
+            # The verify batch is one request with two consecutive queries.
+            # Paged decode attention keeps the exact cache length on the GPU
+            # and supports CUDA Graph replay across changing sequence lengths.
+            o = flash_attn_with_kvcache(
+                q.unsqueeze(0), k_cache, v_cache,
+                cache_seqlens=context.context_lens,
+                block_table=context.block_tables,
+                softmax_scale=self.scale, causal=True,
+            ).squeeze(0)
+        elif context.is_prefill:
             if context.block_tables is not None:    # chunked prefill / prefix cache
                 k, v = k_cache, v_cache
             o = flash_attn_varlen_func(q, k, v,

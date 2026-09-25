@@ -150,13 +150,13 @@ class LLMEngine:
         while len(self.batch_queue) < self.max_concurrent_batches:
             decode_batches = [
                 batch_seqs for batch_seqs, _, _, _ in self.batch_queue
-                if any(not seq.is_prefill for seq in batch_seqs)
+                if any(not seq.is_prefill or seq.is_speculative for seq in batch_seqs)
             ]
             if decode_batches and not self.scheduler.waiting:
                 if self.scheduler.running and not self._coalesce_armed:
                     source_seqs = [
                         seq for batch_seqs in decode_batches for seq in batch_seqs
-                        if not seq.is_prefill
+                        if not seq.is_prefill or seq.is_speculative
                     ]
                     self._coalesce_armed = True
                     self._coalesce_before = len(source_seqs)
@@ -220,6 +220,10 @@ class LLMEngine:
                 if is_prefill
                 else -len(seqs)
             )
+            if is_prefill and any(seq.is_speculative for seq in seqs):
+                num_tokens = -sum(
+                    seq.num_scheduled_tokens for seq in seqs if seq.is_speculative
+                )
             with trace_event(
                 "execute_model", "engine",
                 args={"prefill": is_prefill, "bs": len(seqs)},
@@ -240,20 +244,26 @@ class LLMEngine:
         ):
             token_ids = async_output.get_output()
 
-        for seq, token_id in zip(seqs, token_ids):
+        for seq, row in zip(seqs, token_ids):
             if (
                 is_prefill
                 and seq.num_cached_tokens + seq.num_scheduled_tokens
                 < seq.num_tokens
             ):
                 continue
-            if (
-                (not seq.ignore_eos and token_id == self.config.eos)
-                or seq.num_completion_tokens + 1 == seq.max_tokens
-            ):
-                self.model_runner.call("remove_request", seq.seq_id)
+            seq.draft_token = row[2] if row[2] != -1 else None
 
-        self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        self.scheduler.postprocess(
+            seqs,
+            [
+                [token for token in row[:2] if token != -1]
+                for row in token_ids
+            ],
+            is_prefill,
+        )
+        for seq in seqs:
+            if seq.is_finished:
+                self.model_runner.call("remove_request", seq.seq_id)
         outputs = [
             (seq.seq_id, seq.completion_token_ids)
             for seq in seqs

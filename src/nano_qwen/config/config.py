@@ -15,6 +15,10 @@ class Config:
     # GDN recurrent state is not part of the prefix-cache block payload.
     # Keep prefix reuse opt-in until state snapshots are cached as well.
     enable_prefix_cache: bool = False
+    # MTP2 currently implements greedy one-draft speculative decoding. Keep it
+    # opt-in: older checkpoints may not contain ``mtp.*`` weights and the
+    # stochastic rejection-sampling path is not implemented yet.
+    enable_mtp: bool = False
     hf_config: AutoConfig | None = None
     full_config: AutoConfig | None = None
     eos: int = -1
@@ -27,6 +31,12 @@ class Config:
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8
+        assert not self.enable_mtp or self.tensor_parallel_size == 1, (
+            "MTP2 production decoding currently requires tensor_parallel_size=1"
+        )
+        assert not self.enable_mtp or self.max_num_seqs == 1, (
+            "MTP2 production decoding currently requires max_num_seqs=1"
+        )
 
         self.full_config = AutoConfig.from_pretrained(self.model)
         self.hf_config = getattr(self.full_config, "text_config", self.full_config)

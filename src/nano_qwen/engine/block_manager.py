@@ -107,6 +107,17 @@ class BlockManager:
         if len(seq) % self.block_size == 1:
             seq.block_table.append(self._allocate_block())
 
+    def ensure_capacity(self, seq: Sequence, num_new_tokens: int) -> bool:
+        """Allocate blocks for a multi-token extend without committing tokens."""
+        end = seq.num_cached_tokens + num_new_tokens
+        required = (end + self.block_size - 1) // self.block_size
+        needed = required - len(seq.block_table)
+        if needed > len(self.free_block_ids):
+            return False
+        for _ in range(needed):
+            seq.block_table.append(self._allocate_block())
+        return True
+
     def hash_blocks(self, seq: Sequence):
         start = seq.num_cached_tokens // self.block_size
         end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size

@@ -25,6 +25,8 @@ class Sequence:
         self.num_cached_tokens = 0
         self.num_scheduled_tokens = 0
         self.is_prefill = True
+        self.is_speculative = False
+        self.draft_token: int | None = None
         self.block_table = []
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
@@ -68,6 +70,11 @@ class Sequence:
         self.token_ids.append(token_id)
         self.last_token = token_id
         self.num_tokens += 1
+
+    def replace_last_token(self, token_id: int):
+        """Replace a speculative token rejected by the target model."""
+        self.token_ids[-1] = token_id
+        self.last_token = token_id
 
     def __getstate__(self):
         last_state = self.last_token if not self.is_prefill else self.token_ids

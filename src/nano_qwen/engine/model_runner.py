@@ -13,6 +13,7 @@ from nano_qwen.engine.cuda_graph import CudaGraphManager
 from nano_qwen.layers.gated_delta_net import GatedDeltaNet
 from nano_qwen.layers.sampler import Sampler
 from nano_qwen.models.qwen3_5 import Qwen3_5ForCausalLM
+from nano_qwen.models.qwen3_5_mtp import Qwen3_5MTP, load_mtp_weights
 from nano_qwen.utils.context import set_context, get_context, reset_context
 from nano_qwen.utils.loader import load_model
 from nano_qwen.utils.trace import trace_event
@@ -113,7 +114,7 @@ class ModelRunner:
         self.output_copy_stream = torch.cuda.Stream()
         self._output_pin_bufs = [
             torch.empty(
-                config.max_num_seqs,
+                (config.max_num_seqs, 3),
                 dtype=torch.int64,
                 device="cpu",
                 pin_memory=True,
@@ -130,7 +131,22 @@ class ModelRunner:
         # The server benchmark can isolate prefill CUDA Graph overhead while
         # keeping decode graphs enabled. Production defaults to prefill graphs.
         self.use_prefill_cudagraph = use_prefill_cudagraph
+        if self.config.enable_mtp:
+            # MTP uses its dedicated two-row verify graph. The ordinary
+            # piecewise-prefill graph does not preserve its hidden/state
+            # lifecycle during prompt ingestion.
+            self.use_prefill_cudagraph = False
         self.cuda_graphs = CudaGraphManager(self)
+        self.mtp = None
+        self.mtp_kv_cache = None
+        self._target_hidden = None
+        self._mtp_last_hidden: dict[int, torch.Tensor] = {}
+        self.mtp_stats = {
+            "draft_tokens": 0,
+            "accepted_tokens": 0,
+            "rejected_tokens": 0,
+            "verify_steps": 0,
+        }
         self._output_buf_idx = 0
         # MRV2-style input-prep protection: the prior step's async H2D
         # transfers must be consumed before this step reuses the same
@@ -152,6 +168,9 @@ class ModelRunner:
         self.allocate_gdn_state_pool()
         self.warmup_model()
         self.input_batch.clear()
+        if self.config.enable_mtp:
+            self.mtp = Qwen3_5MTP(hf_config).eval()
+            load_mtp_weights(self.mtp, config.model)
         self.allocate_kv_cache()
         if not self.enforce_eager:
             self.capture_cudagraph()
@@ -184,6 +203,8 @@ class ModelRunner:
         # containers. Clear every runner-owned GPU reference, including the
         # lazily-created piecewise graphs, before the engine is discarded.
         self._pending = None
+        self._target_hidden = None
+        self._mtp_last_hidden.clear()
         self.cuda_graphs.clear()
         for name in ("gdn_layers", "decode_gpu", "decode_cpu",
                      "_output_pin_bufs", "_output_events"):
@@ -193,7 +214,9 @@ class ModelRunner:
         if hasattr(self, "input_batch"):
             self.input_batch.clear()
         self.model = None
+        self.mtp = None
         self.kv_cache = None
+        self.mtp_kv_cache = None
         self.sampled_token_ids_gpu = None
         self.batch_slots_gpu = None
         self.prepare_inputs_event = None
@@ -272,7 +295,15 @@ class ModelRunner:
             * head_dim
             * hf_config.dtype.itemsize
         )
-        config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
+        mtp_block_bytes = 0
+        if self.mtp is not None:
+            mtp_block_bytes = (
+                2 * self.block_size * num_kv_heads * head_dim
+                * hf_config.dtype.itemsize
+            )
+        config.num_kvcache_blocks = int(
+            total * config.gpu_memory_utilization - used - peak + current
+        ) // (block_bytes + mtp_block_bytes)
         assert config.num_kvcache_blocks > 0
         self.kv_cache = torch.empty(
             2, num_attn_layers, config.num_kvcache_blocks,
@@ -288,11 +319,26 @@ class ModelRunner:
             f"attention layer drift: assigned {layer_id} caches but sized "
             f"for {num_attn_layers}"
         )
+        if self.mtp is not None:
+            self.mtp_kv_cache = torch.empty(
+                2,
+                config.num_kvcache_blocks,
+                self.block_size,
+                num_kv_heads,
+                head_dim,
+                dtype=hf_config.dtype,
+                device=self.kv_cache.device,
+            )
+            mtp_attention = self.mtp.layers[0].self_attn.attn
+            mtp_attention.k_cache = self.mtp_kv_cache[0]
+            mtp_attention.v_cache = self.mtp_kv_cache[1]
 
     def allocate_gdn_state_pool(self):
         num_slots = self.config.max_num_seqs
         for layer in self.gdn_layers:
             layer.allocate_state_pool(num_slots)
+            if self.config.enable_mtp:
+                layer.allocate_speculative_snapshot()
 
     def allocate_decode_buffers(self):
         size = self.config.max_num_seqs
@@ -385,6 +431,7 @@ class ModelRunner:
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         state_indices = self.batch_slots_gpu[:len(seqs)]
+        is_verify = all(seq.is_speculative for seq in seqs)
         set_context(
             True,
             cu_seqlens_q=cu_seqlens_q,
@@ -392,6 +439,7 @@ class ModelRunner:
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             slot_mapping=slot_mapping,
+            context_lens=cu_seqlens_k[1:] if is_verify else None,
             block_tables=block_tables,
             state_indices=state_indices,
             prefill_slices=prefill_slices,
@@ -400,6 +448,7 @@ class ModelRunner:
                 dtype=torch.int32,
                 device=input_ids.device,
             ),
+            is_verify=is_verify,
         )
         return input_ids, positions
 
@@ -450,16 +499,23 @@ class ModelRunner:
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         is_prefill: bool,
+        is_verify: bool = False,
     ):
         # Model warmup runs before graph buffers are allocated. Keep that
         # bootstrap pass eager; graph replay starts after capture_cudagraph().
         if self.enforce_eager or not self.cuda_graphs.decode_graphs:
-            return self.model.compute_logits(self.model(input_ids, positions))
+            hidden = self.model.model(input_ids, positions)
+            self._target_hidden = hidden
+            return self.model.compute_logits(hidden)
+        if is_verify and self.cuda_graphs.verify_graph is not None:
+            return self.cuda_graphs.run_verify(input_ids, positions)
         if is_prefill and self.use_prefill_cudagraph:
             return self.cuda_graphs.run_prefill(input_ids, positions)
 
         if is_prefill:
-            return self.model.compute_logits(self.model(input_ids, positions))
+            hidden = self.model.model(input_ids, positions)
+            self._target_hidden = hidden
+            return self.model.compute_logits(hidden)
 
         bs = input_ids.size(0)
         context = get_context()
@@ -518,12 +574,154 @@ class ModelRunner:
                 input_ids,
                 positions,
                 is_prefill,
+                is_prefill and all(seq.is_speculative for seq in seqs),
             )
         # Depth-1 async: store the sampling state for the immediately-
         # following sample_tokens() call. batch_slots_gpu is safe to reuse
         # here because no second batch can be dispatched before sampling.
         self._pending = (logits, temperatures, seqs, is_prefill)
         return None
+
+    @torch.inference_mode()
+    def _run_mtp_prefill(
+        self,
+        seq: Sequence,
+        slot: int,
+        target_hidden: torch.Tensor,
+        sampled_token: torch.Tensor,
+        final_chunk: bool,
+    ) -> torch.Tensor | None:
+        """Extend MTP state for one target prefill chunk and return a draft."""
+        start = seq.num_cached_tokens
+        end = start + seq.num_scheduled_tokens
+        input_ids: list[int] = []
+        positions: list[int] = []
+        hidden_rows: list[torch.Tensor] = []
+
+        previous_hidden = self._mtp_last_hidden.get(slot)
+        if start > 0:
+            assert previous_hidden is not None
+            input_ids.append(seq[start])
+            positions.append(start)
+            hidden_rows.append(previous_hidden)
+        for position in range(start + 1, end):
+            input_ids.append(seq[position])
+            positions.append(position)
+            hidden_rows.append(target_hidden[position - start - 1])
+        if final_chunk:
+            input_ids.append(int(sampled_token.item()))
+            positions.append(end)
+            hidden_rows.append(target_hidden[-1])
+
+        count = len(input_ids)
+        if count == 0:
+            return None
+        input_ids_gpu = torch.tensor(
+            input_ids, dtype=torch.long, pin_memory=True
+        ).cuda(non_blocking=True)
+        positions_gpu = torch.tensor(
+            positions, dtype=torch.long, pin_memory=True
+        ).cuda(non_blocking=True)
+        hidden = torch.stack(hidden_rows, dim=0)
+        boundaries = torch.tensor([0, count], dtype=torch.int32, device=hidden.device)
+        slot_mapping = torch.tensor(
+            [
+                block_id * self.block_size + position % self.block_size
+                for position in positions
+                for block_id in (seq.block_table[position // self.block_size],)
+            ],
+            dtype=torch.int32,
+            device=hidden.device,
+        )
+        block_table = torch.tensor(
+            [seq.block_table], dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
+
+        self._mtp_last_hidden[slot] = target_hidden[-1].detach().clone()
+        set_context(
+            True,
+            cu_seqlens_q=boundaries,
+            cu_seqlens_k=boundaries,
+            max_seqlen_q=count,
+            max_seqlen_k=count,
+            slot_mapping=slot_mapping,
+            block_tables=block_table,
+            state_indices=None,
+            prefill_slices=[(0, count)],
+            prefill_chunk_indices=torch.tensor(
+                [(0, i) for i in range((count + 63) // 64)],
+                dtype=torch.int32,
+                device=hidden.device,
+            ),
+        )
+        try:
+            mtp_hidden = self.mtp(
+                input_ids_gpu,
+                positions_gpu,
+                hidden,
+                self.model.model.embed_tokens,
+            )
+            logits = self.model.compute_logits(mtp_hidden)
+            return logits[-1].argmax() if final_chunk else None
+        finally:
+            reset_context()
+
+    @torch.inference_mode()
+    def _run_mtp_decode(
+        self,
+        seqs: list[Sequence],
+        target_hidden: torch.Tensor,
+        input_tokens: torch.Tensor,
+        positions: list[int],
+    ) -> torch.Tensor:
+        """Run the one-layer MTP head as a batched decode step."""
+        max_blocks = max(len(seq.block_table) for seq in seqs)
+        block_tables = torch.tensor(
+            [
+                seq.block_table + [-1] * (max_blocks - len(seq.block_table))
+                for seq in seqs
+            ],
+            dtype=torch.int32,
+            pin_memory=True,
+        ).cuda(non_blocking=True)
+        slot_mapping = torch.tensor(
+            [
+                seq.block_table[position // self.block_size] * self.block_size
+                + position % self.block_size
+                for seq, position in zip(seqs, positions)
+            ],
+            dtype=torch.int32,
+            device=input_tokens.device,
+        )
+        positions_gpu = torch.tensor(
+            positions, dtype=torch.long, device=input_tokens.device,
+        )
+        context_lens = positions_gpu.to(torch.int32)
+        if self.cuda_graphs.mtp_decode_graph is not None:
+            return self.cuda_graphs.run_mtp_decode(
+                input_tokens, positions_gpu, target_hidden, slot_mapping,
+                context_lens, block_tables,
+            )
+        set_context(
+            False,
+            slot_mapping=slot_mapping,
+            # MTP positions are one-based: positions 1..p contain p cached
+            # tokens after the current write, so context length is p.
+            context_lens=context_lens,
+            block_tables=block_tables,
+            state_indices=None,
+        )
+        try:
+            mtp_hidden = self.mtp(
+                input_tokens,
+                positions_gpu,
+                target_hidden,
+                self.model.model.embed_tokens,
+            )
+            logits = self.model.compute_logits(mtp_hidden)
+            return logits.argmax(dim=-1)
+        finally:
+            reset_context()
 
     def sample_tokens(self) -> AsyncModelOutput | None:
         if self.rank != 0:
@@ -536,21 +734,28 @@ class ModelRunner:
         logits, temperatures, seqs, is_prefill = self._pending
         self._pending = None
         bs = len(seqs)
+        slot_ids = self.input_batch.slots_for(seqs)
+        speculative_batch = is_prefill and all(seq.is_speculative for seq in seqs)
 
-        # Prefill produces one logits row per scheduled token. Sampling only
-        # uses the final scheduled position of each request.
-        if is_prefill:
-            last_indices = []
-            offset = 0
-            for seq in seqs:
-                offset += seq.num_scheduled_tokens
-                last_indices.append(offset - 1)
-            last_indices_gpu = torch.tensor(
-                last_indices,
+        # Prefill normally samples one tail row. A speculative prefill has
+        # two rows per request: row 0 verifies the MTP draft and row 1 is
+        # valid only after acceptance.
+        starts = []
+        tail_indices = []
+        offset = 0
+        for seq in seqs:
+            starts.append(offset)
+            tail_indices.append(offset + seq.num_scheduled_tokens - 1)
+            offset += seq.num_scheduled_tokens
+
+        tail_logits = logits
+        if is_prefill and not speculative_batch:
+            tail_indices_gpu = torch.tensor(
+                tail_indices,
                 dtype=torch.int64,
                 device=logits.device,
             )
-            logits = logits.index_select(0, last_indices_gpu)
+            tail_logits = logits.index_select(0, tail_indices_gpu)
 
         slots = self.batch_slots_gpu[:bs]
         # Validation-only samplers may request row-aligned logits/GDN-state
@@ -564,8 +769,117 @@ class ModelRunner:
             observe_gdn_state(self.gdn_layers, slots)
 
         with trace_event("sampler", "runner", args={"prefill": is_prefill, "bs": bs}):
-            token_ids = self.sampler(logits, temperatures)
-        self.sampled_token_ids_gpu.scatter_(0, slots, token_ids)
+            # A verify batch uses greedy top-1 on both target rows below.
+            # The generic sampler's full-vocabulary softmax is unused here.
+            normal_tokens = (
+                torch.empty(bs, dtype=torch.int64, device=logits.device)
+                if speculative_batch
+                else self.sampler(tail_logits, temperatures)
+            )
+
+        output_gpu = torch.full(
+            (bs, 3), -1, dtype=torch.int64, device=logits.device
+        )
+        sampled_values = normal_tokens.clone()
+        mtp_seqs: list[Sequence] = []
+        mtp_hidden_rows: list[torch.Tensor] = []
+        mtp_inputs: list[torch.Tensor] = []
+        mtp_positions: list[int] = []
+
+        if speculative_batch:
+            assert self.mtp is not None
+            self.mtp_stats["verify_steps"] += 1
+
+        for i, seq in enumerate(seqs):
+            start = starts[i]
+            if is_prefill and seq.is_speculative:
+                first_token = logits[start].argmax()
+                draft_token = seq.draft_token
+                first_token_id = int(first_token.item())
+                accepted = first_token_id == draft_token
+                draft_is_eos = (
+                    not seq.ignore_eos and draft_token == self.config.eos
+                )
+                second_token = None
+                if accepted:
+                    output_gpu[i, 0] = draft_token
+                    self.mtp_stats["accepted_tokens"] += 1
+                    for layer in self.gdn_layers:
+                        layer.commit_speculative_state()
+                    if not draft_is_eos:
+                        second_token = logits[start + 1].argmax()
+                        output_gpu[i, 1] = second_token
+                        sampled_values[i] = second_token
+                    else:
+                        sampled_values[i] = draft_token
+                else:
+                    output_gpu[i, 0] = first_token
+                    sampled_values[i] = first_token
+                    self.mtp_stats["rejected_tokens"] += 1
+                    for layer in self.gdn_layers:
+                        layer.rollback_speculative_state(slot_ids[i])
+
+                committed_before = seq.num_tokens - seq.num_prompt_tokens - 1
+                produced = 2 if accepted and second_token is not None else 1
+                hit_eos = (
+                    not seq.ignore_eos
+                    and (
+                        first_token_id == self.config.eos
+                        or (
+                            second_token is not None
+                            and int(second_token.item()) == self.config.eos
+                        )
+                    )
+                )
+                if not hit_eos and committed_before + produced < seq.max_tokens:
+                    mtp_seqs.append(seq)
+                    mtp_hidden_rows.append(
+                        self._target_hidden[start + 1 if accepted else start]
+                    )
+                    mtp_inputs.append(sampled_values[i])
+                    mtp_positions.append(
+                        seq.num_tokens if accepted else seq.num_tokens - 1
+                    )
+                continue
+
+            token = normal_tokens[i]
+            output_gpu[i, 0] = token
+            if not (is_prefill and self.mtp is not None and seq.temperature <= 1e-6):
+                continue
+
+            final_chunk = (
+                seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens
+            )
+            draft = self._run_mtp_prefill(
+                seq,
+                slot_ids[i],
+                self._target_hidden[start:start + seq.num_scheduled_tokens],
+                token,
+                final_chunk,
+            )
+            if final_chunk and draft is not None and seq.num_completion_tokens + 1 < seq.max_tokens:
+                output_gpu[i, 2] = draft
+                self.mtp_stats["draft_tokens"] += 1
+
+        if mtp_seqs:
+            assert self.mtp is not None
+            self.mtp_stats["draft_tokens"] += len(mtp_seqs)
+            next_drafts = self._run_mtp_decode(
+                mtp_seqs,
+                torch.stack(mtp_hidden_rows, dim=0),
+                torch.stack(mtp_inputs, dim=0),
+                mtp_positions,
+            )
+            batch_indices = torch.tensor(
+                [seqs.index(seq) for seq in mtp_seqs],
+                dtype=torch.int64,
+                device=logits.device,
+            )
+            output_gpu[batch_indices, 2] = next_drafts
+
+        self.sampled_token_ids_gpu.scatter_(0, slots, sampled_values)
+        token_ids = output_gpu
+        self._target_hidden = None
 
         buf_idx = self._output_buf_idx
         self._output_buf_idx ^= 1 #ping-pong buffer index, switch between 0 and 1 for double buffering

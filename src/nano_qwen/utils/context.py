@@ -17,13 +17,14 @@ class Context:
     # them in the context avoids calling CUDA-tensor.tolist() in model.forward.
     prefill_slices: list[tuple[int, int]] | None = None
     prefill_chunk_indices: torch.Tensor | None = None
+    is_verify: bool = False
 
 _CONTEXT = Context()
 
 def get_context():
     return _CONTEXT
 
-def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None, state_indices=None, prefill_slices=None, prefill_chunk_indices=None):
+def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None, state_indices=None, prefill_slices=None, prefill_chunk_indices=None, is_verify=False):
     global _CONTEXT
     _CONTEXT = Context(
         is_prefill,
@@ -37,6 +38,7 @@ def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0
         state_indices,
         prefill_slices,
         prefill_chunk_indices,
+        is_verify,
     )
 
 def reset_context():
