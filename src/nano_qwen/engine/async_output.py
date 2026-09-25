@@ -14,9 +14,9 @@ class AsyncModelOutput:
         self._token_ids_gpu = token_ids_gpu
         self._token_ids_cpu = token_ids_cpu
         self._ready_event = ready_event
-        self._result: list[int] | None = None
+        self._result: list[list[int]] | None = None
 
-    def get_output(self) -> list[int]:
+    def get_output(self) -> list[list[int]]:
         if self._result is None:
             self._ready_event.synchronize()
             self._result = self._token_ids_cpu.tolist()

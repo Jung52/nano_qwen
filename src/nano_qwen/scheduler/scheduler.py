@@ -13,6 +13,7 @@ class Scheduler:
         self.eos = config.eos
         self.block_size = config.kvcache_block_size
         self.enable_prefix_cache = config.enable_prefix_cache
+        self.enable_mtp = config.enable_mtp
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
@@ -86,6 +87,35 @@ class Scheduler:
             if remaining <= 0:
                 break
             seq = self.running.popleft()
+            committed_completions = seq.num_tokens - seq.num_prompt_tokens
+            if (
+                self.enable_mtp
+                and seq.draft_token is not None
+                and seq.temperature <= 1e-6
+                and committed_completions + 2 <= seq.max_tokens
+                and remaining >= 2
+            ):
+                seq.append_token(seq.draft_token)
+                seq.is_speculative = True
+                # Two rows are verified by the target and the accepted-row
+                # sampler immediately writes one MTP KV row beyond them.
+                if self.block_manager.ensure_capacity(seq, 3):
+                    seq.num_scheduled_tokens = 2
+                    seq.is_prefill = True
+                    self.in_flight.add(seq.seq_id)
+                    scheduled_seqs.append(seq)
+                    num_batched_tokens += 2
+                    continue
+                # Rare KV-pressure fallback: discard the draft and replay the
+                # request as a normal prefill after preemption.
+                seq.token_ids.pop()
+                seq.num_tokens -= 1
+                seq.last_token = seq.token_ids[-1]
+                seq.is_speculative = False
+                seq.draft_token = None
+                self.preempt(seq)
+                continue
+
             while not self.block_manager.can_append(seq):
                 if self.running:
                     self.preempt(self.running.pop())
@@ -114,20 +144,47 @@ class Scheduler:
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
 
-    def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
+    def postprocess(
+        self,
+        seqs: list[Sequence],
+        token_ids: list[list[int]],
+        is_prefill: bool,
+    ):
         for seq, token_id in zip(seqs, token_ids):
             self.in_flight.discard(seq.seq_id)  # sample consumed, seq schedulable again
-            if self.enable_prefix_cache:
-                self.block_manager.hash_blocks(seq)
+            next_draft = seq.draft_token
+            cached_before = seq.num_cached_tokens
             seq.num_cached_tokens += seq.num_scheduled_tokens
             seq.num_scheduled_tokens = 0
             if is_prefill and seq.num_cached_tokens < seq.num_tokens:
                 self.waiting.append(seq)  # chunked prefill: back to waiting for the next chunk
                 continue
-            seq.append_token(token_id)
-            if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+
+            outputs = token_id if isinstance(token_id, list) else [token_id]
+            was_speculative = seq.is_speculative
+            seq.is_speculative = False
+            if was_speculative:
+                # The draft was appended before execution. On rejection the
+                # target token overwrites that slot; on acceptance the second
+                # target output is the only newly appended token.
+                if len(outputs) == 2:
+                    seq.append_token(outputs[1])
+                else:
+                    seq.replace_last_token(outputs[0])
+                    # The rejected draft was executed but never committed.
+                    # Keep its KV slot scheduled again with the corrected
+                    # target token.
+                    seq.num_cached_tokens = cached_before + 1
+            else:
+                seq.append_token(outputs[0])
+
+            hit_eos = not seq.ignore_eos and any(token == self.eos for token in outputs)
+            if hit_eos or seq.num_completion_tokens == seq.max_tokens:
                 seq.status = SequenceStatus.FINISHED
                 self.block_manager.deallocate(seq)
             else:
                 seq.status = SequenceStatus.RUNNING
                 self.running.append(seq)  # back to schedulable
+                seq.draft_token = next_draft
+            if self.enable_prefix_cache:
+                self.block_manager.hash_blocks(seq)
