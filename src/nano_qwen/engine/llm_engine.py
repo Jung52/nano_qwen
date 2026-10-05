@@ -33,7 +33,7 @@ class LLMEngine:
 
     def __init__(self, model: str, use_prefill_cudagraph: bool = True, **kwargs):
         self._exited = False
-        config_fields = {field.name for field in fields(Config)}
+        config_fields = {field.name for field in fields(Config) if field.init}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         self.config = Config(model, **config_kwargs)
         Sequence.block_size = self.config.kvcache_block_size

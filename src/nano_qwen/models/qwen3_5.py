@@ -24,6 +24,7 @@ from nano_qwen.layers.linear import (
     RowParallelLinear,
 )
 from nano_qwen.layers.rotary_embedding import InterleavedMRoPE
+from nano_qwen.quantization import QuantizationConfig
 from nano_qwen.utils.context import get_context
 
 
@@ -52,7 +53,10 @@ class Qwen3_5Attention(nn.Module):
     attention output is multiplied by ``sigmoid(gate)`` before ``o_proj``.
     """
 
-    def __init__(self, config: Qwen3_5TextConfig, layer_idx: int) -> None:
+    def __init__(
+        self, config: Qwen3_5TextConfig, layer_idx: int,
+        quant_config: QuantizationConfig | None = None, prefix: str = "",
+    ) -> None:
         super().__init__()
         del layer_idx  # Kept in the signature for parity with the HF model.
 
@@ -81,21 +85,25 @@ class Qwen3_5Attention(nn.Module):
             config.hidden_size,
             2 * self.total_num_heads * self.head_dim,
             bias=attention_bias,
+            quant_config=quant_config, prefix=f"{prefix}.q_proj",
         )
         self.k_proj = ColumnParallelLinear(
             config.hidden_size,
             self.total_num_kv_heads * self.head_dim,
             bias=attention_bias,
+            quant_config=quant_config, prefix=f"{prefix}.k_proj",
         )
         self.v_proj = ColumnParallelLinear(
             config.hidden_size,
             self.total_num_kv_heads * self.head_dim,
             bias=attention_bias,
+            quant_config=quant_config, prefix=f"{prefix}.v_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=attention_bias,
+            quant_config=quant_config, prefix=f"{prefix}.o_proj",
         )
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
@@ -177,7 +185,10 @@ class Qwen3_5Attention(nn.Module):
 
 class Qwen3_5MLP(nn.Module):
 
-    def __init__(self, config: Qwen3_5TextConfig) -> None:
+    def __init__(
+        self, config: Qwen3_5TextConfig,
+        quant_config: QuantizationConfig | None = None, prefix: str = "",
+    ) -> None:
         super().__init__()
         if config.hidden_act != "silu":
             raise ValueError(f"Qwen3.5 expects silu, got {config.hidden_act!r}")
@@ -185,11 +196,13 @@ class Qwen3_5MLP(nn.Module):
             config.hidden_size,
             [config.intermediate_size, config.intermediate_size],
             bias=False,
+            quant_config=quant_config, prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             bias=False,
+            quant_config=quant_config, prefix=f"{prefix}.down_proj",
         )
         self.act_fn = SiluAndMul()
 
@@ -199,7 +212,10 @@ class Qwen3_5MLP(nn.Module):
 
 class Qwen3_5DecoderLayer(nn.Module):
 
-    def __init__(self, config: Qwen3_5TextConfig, layer_idx: int) -> None:
+    def __init__(
+        self, config: Qwen3_5TextConfig, layer_idx: int,
+        quant_config: QuantizationConfig | None = None, prefix: str = "",
+    ) -> None:
         super().__init__()
         layer_types = getattr(config, "layer_types", None)
         if layer_types is None:
@@ -213,13 +229,17 @@ class Qwen3_5DecoderLayer(nn.Module):
 
         self.block_type = block_type
         if block_type == "linear_attention":
-            self.linear_attn = GatedDeltaNet(config, layer_idx)
+            self.linear_attn = GatedDeltaNet(
+                config, layer_idx, quant_config=quant_config, prefix=f"{prefix}.linear_attn",
+            )
         elif block_type == "full_attention":
-            self.self_attn = Qwen3_5Attention(config, layer_idx)
+            self.self_attn = Qwen3_5Attention(
+                config, layer_idx, quant_config=quant_config, prefix=f"{prefix}.self_attn",
+            )
         else:
             raise ValueError(f"Unsupported Qwen3.5 layer type: {block_type!r}")
 
-        self.mlp = Qwen3_5MLP(config)
+        self.mlp = Qwen3_5MLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
         self.input_layernorm = GemmaRMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
@@ -355,14 +375,20 @@ class Qwen3_5DecoderLayer(nn.Module):
 
 class Qwen3_5Model(nn.Module):
 
-    def __init__(self, config: Qwen3_5TextConfig) -> None:
+    def __init__(
+        self, config: Qwen3_5TextConfig,
+        quant_config: QuantizationConfig | None = None, prefix: str = "model",
+    ) -> None:
         super().__init__()
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
         )
         self.layers = nn.ModuleList(
-            Qwen3_5DecoderLayer(config, layer_idx)
+            Qwen3_5DecoderLayer(
+                config, layer_idx, quant_config=quant_config,
+                prefix=f"{prefix}.layers.{layer_idx}",
+            )
             for layer_idx in range(config.num_hidden_layers)
         )
         self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -409,9 +435,12 @@ class Qwen3_5ForCausalLM(nn.Module):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    def __init__(self, config: Qwen3_5TextConfig) -> None:
+    def __init__(
+        self, config: Qwen3_5TextConfig,
+        quant_config: QuantizationConfig | None = None,
+    ) -> None:
         super().__init__()
-        self.model = Qwen3_5Model(config)
+        self.model = Qwen3_5Model(config, quant_config=quant_config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         if config.tie_word_embeddings:
             self.lm_head.weight.data = self.model.embed_tokens.weight.data

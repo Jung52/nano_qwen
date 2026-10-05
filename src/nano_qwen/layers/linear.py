@@ -1,7 +1,8 @@
 import torch
 from torch import nn
-import torch.nn.functional as F
 import torch.distributed as dist
+
+from nano_qwen.quantization import QuantizationConfig, UnquantizedLinearMethod
 
 
 def divide(numerator, denominator):
@@ -17,18 +18,34 @@ class LinearBase(nn.Module):
         output_size: int,
         bias: bool = False,
         tp_dim: int | None = None,
+        *,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.tp_dim = tp_dim
         self.tp_rank = dist.get_rank()
         self.tp_size = dist.get_world_size()
-        self.weight = nn.Parameter(torch.empty(output_size, input_size))
-        self.weight.weight_loader = self.weight_loader
+        self.input_size = input_size
+        self.output_size = output_size
+        self._compute_dtype = torch.get_default_dtype()
+        self.prefix = prefix
+        self.quant_method = (
+            UnquantizedLinearMethod() if quant_config is None
+            else quant_config.get_quant_method(self, prefix)
+        )
+        self.quant_method.create_weights(self, input_size, output_size, self._compute_dtype)
         if bias:
             self.bias = nn.Parameter(torch.empty(output_size))
             self.bias.weight_loader = self.weight_loader
         else:
             self.register_parameter("bias", None)
+
+    @property
+    def compute_dtype(self) -> torch.dtype:
+        if isinstance(self.quant_method, UnquantizedLinearMethod):
+            return self.weight.dtype
+        return self._compute_dtype
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
@@ -41,14 +58,17 @@ class ReplicatedLinear(LinearBase):
         input_size: int,
         output_size: int,
         bias: bool = False,
+        *,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
-        super().__init__(input_size, output_size, bias)
+        super().__init__(input_size, output_size, bias, quant_config=quant_config, prefix=prefix)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         param.data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.linear(x, self.weight, self.bias)
+        return self.quant_method.apply(self, x, self.bias)
 
 
 class ColumnParallelLinear(LinearBase):
@@ -58,9 +78,13 @@ class ColumnParallelLinear(LinearBase):
         input_size: int,
         output_size: int,
         bias: bool = False,
+        *,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         tp_size = dist.get_world_size()
-        super().__init__(input_size, divide(output_size, tp_size), bias, 0)
+        super().__init__(input_size, divide(output_size, tp_size), bias, 0,
+                         quant_config=quant_config, prefix=prefix)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         param_data = param.data
@@ -70,7 +94,7 @@ class ColumnParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.linear(x, self.weight, self.bias)
+        return self.quant_method.apply(self, x, self.bias)
 
 
 class MergedColumnParallelLinear(ColumnParallelLinear):
@@ -80,9 +104,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         input_size: int,
         output_sizes: list[int],
         bias: bool = False,
+        *,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         self.output_sizes = output_sizes
-        super().__init__(input_size, sum(output_sizes), bias)
+        super().__init__(input_size, sum(output_sizes), bias,
+                         quant_config=quant_config, prefix=prefix)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: int):
         param_data = param.data
@@ -102,6 +130,9 @@ class QKVParallelLinear(ColumnParallelLinear):
         total_num_heads: int,
         total_num_kv_heads: int | None = None,
         bias: bool = False,
+        *,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         tp_size = dist.get_world_size()
         total_num_kv_heads = total_num_kv_heads or total_num_heads
@@ -109,7 +140,8 @@ class QKVParallelLinear(ColumnParallelLinear):
         self.num_heads = divide(total_num_heads, tp_size)
         self.num_kv_heads = divide(total_num_kv_heads, tp_size)
         output_size = (total_num_heads + 2 * total_num_kv_heads) * self.head_size
-        super().__init__(hidden_size, output_size, bias)
+        super().__init__(hidden_size, output_size, bias,
+                         quant_config=quant_config, prefix=prefix)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: str):
         param_data = param.data
@@ -135,9 +167,13 @@ class RowParallelLinear(LinearBase):
         input_size: int,
         output_size: int,
         bias: bool = False,
+        *,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         tp_size = dist.get_world_size()
-        super().__init__(divide(input_size, tp_size), output_size, bias, 1)
+        super().__init__(divide(input_size, tp_size), output_size, bias, 1,
+                         quant_config=quant_config, prefix=prefix)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         param_data = param.data
@@ -150,7 +186,7 @@ class RowParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
+        y = self.quant_method.apply(self, x, self.bias if self.tp_rank == 0 else None)
         if self.tp_size > 1:
             dist.all_reduce(y)
         return y

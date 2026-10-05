@@ -4,12 +4,28 @@ import torch
 from torch import nn
 from safetensors import safe_open
 
+from nano_qwen.quantization import UnquantizedLinearMethod
+from nano_qwen.quantization.checkpoint import (
+    checkpoint_spec, normalize_weight_name, read_quantization_metadata,
+    tied_head, validate_tensor,
+)
+
 
 def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
     param.data.copy_(loaded_weight)
 
 
 def load_model(model: nn.Module, path: str):
+    quantized = False
+    for module in model.modules():
+        method = getattr(module, "quant_method", None)
+        if method is not None and not isinstance(method, UnquantizedLinearMethod):
+            quantized = True
+    metadata = read_quantization_metadata(path)
+    if quantized or metadata is not None:
+        if not quantized or metadata is None:
+            raise ValueError("FP8 model and converted checkpoint metadata must match")
+        return _load_fp8_model(model, path)
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
     model_params = dict(model.named_parameters())
     for file in glob(os.path.join(path, "*.safetensors")):
@@ -38,3 +54,44 @@ def load_model(model: nn.Module, path: str):
                         continue
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, f.get_tensor(checkpoint_name))
+
+
+def _load_fp8_model(model: nn.Module, path: str):
+    spec = checkpoint_spec(model)
+    params = dict(model.named_parameters())
+    entries = {}
+    # Validate the complete schema before copying any weights into the model.
+    for file in sorted(glob(os.path.join(path, "*.safetensors"))):
+        with safe_open(file, "pt", "cpu") as checkpoint:
+            for raw_name in checkpoint.keys():
+                name = normalize_weight_name(raw_name)
+                if name not in spec or name in entries:
+                    raise ValueError(f"Unexpected or duplicate FP8 tensor: {raw_name}")
+                _, _, shape, dtype = spec[name]
+                tensor = checkpoint.get_tensor(raw_name)
+                validate_tensor(name, tensor, shape, dtype)
+                entries[name] = (file, raw_name)
+    missing = set(spec) - entries.keys()
+    is_tied = tied_head(model)
+    if is_tied and "model.embed_tokens.weight" in entries:
+        missing.discard("lm_head.weight")
+    if missing:
+        raise ValueError(f"Missing FP8 checkpoint tensors: {sorted(missing)}")
+    if is_tied and "lm_head.weight" in entries:
+        tensors = []
+        for name in ("lm_head.weight", "model.embed_tokens.weight"):
+            file, raw_name = entries[name]
+            with safe_open(file, "pt", "cpu") as checkpoint:
+                tensors.append(checkpoint.get_tensor(raw_name))
+        if not torch.equal(*tensors):
+            raise ValueError("Tied embedding and lm_head checkpoint tensors disagree")
+    for name, (file, raw_name) in entries.items():
+        param_name, shard, _, _ = spec[name]
+        param = params[param_name]
+        with safe_open(file, "pt", "cpu") as checkpoint:
+            tensor = checkpoint.get_tensor(raw_name)
+            loader = getattr(param, "weight_loader", default_weight_loader)
+            if shard is None:
+                loader(param, tensor)
+            else:
+                loader(param, tensor, shard)

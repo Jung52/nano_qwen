@@ -13,6 +13,7 @@ from nano_qwen.engine.cuda_graph import CudaGraphManager
 from nano_qwen.layers.gated_delta_net import GatedDeltaNet
 from nano_qwen.layers.sampler import Sampler
 from nano_qwen.models.qwen3_5 import Qwen3_5ForCausalLM
+from nano_qwen.layers.linear import LinearBase
 from nano_qwen.utils.context import set_context, get_context, reset_context, BatchDescriptor
 from nano_qwen.utils.loader import load_model
 from nano_qwen.utils.trace import trace_event
@@ -102,8 +103,11 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.dtype)
         torch.set_default_device("cuda")
-        self.model = Qwen3_5ForCausalLM(hf_config)
+        self.model = Qwen3_5ForCausalLM(hf_config, quant_config=config.quant_config)
         load_model(self.model, config.model)
+        for module in self.model.modules():
+            if isinstance(module, LinearBase):
+                module.quant_method.process_weights_after_loading(module)
         self.gdn_layers = [
             module
             for module in self.model.modules()

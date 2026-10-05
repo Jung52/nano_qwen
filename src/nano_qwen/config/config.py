@@ -1,6 +1,9 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from transformers import AutoConfig
+
+from nano_qwen.quantization import QuantizationConfig, get_quantization_config
+from nano_qwen.quantization.checkpoint import read_quantization_metadata
 
 
 @dataclass(slots=True)
@@ -22,8 +25,19 @@ class Config:
     num_kvcache_blocks: int = -1
     is_hybrid: bool = False
     max_state_slots: int = 0
+    quantization: str | None = None
+    quant_config: QuantizationConfig | None = field(default=None, init=False)
 
     def __post_init__(self):
+        metadata = read_quantization_metadata(self.model)
+        if metadata is not None and self.quantization is None:
+            self.quantization = metadata["quant_method"]
+        self.quant_config = get_quantization_config(self.quantization)
+        if self.quant_config is not None:
+            if self.tensor_parallel_size != 1:
+                raise ValueError("FP8 currently requires tensor_parallel_size=1")
+            if metadata is None:
+                raise ValueError("FP8 requires a converted nano_qwen checkpoint with quantization metadata")
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8

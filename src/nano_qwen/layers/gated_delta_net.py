@@ -43,6 +43,8 @@ import torch.nn.functional as F
 from torch import nn
 
 from nano_qwen.layers.layernorm import RMSNormGated
+from nano_qwen.layers.linear import ReplicatedLinear
+from nano_qwen.quantization import QuantizationConfig
 from nano_qwen.utils.context import get_context
 
 
@@ -153,7 +155,10 @@ def decode_gated_delta_rule(
 
 class GatedDeltaNet(nn.Module):
 
-    def __init__(self, config, layer_idx: int):
+    def __init__(
+        self, config, layer_idx: int,
+        quant_config: QuantizationConfig | None = None, prefix: str = "",
+    ):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.num_v_heads = config.linear_num_value_heads
@@ -167,7 +172,10 @@ class GatedDeltaNet(nn.Module):
         self.layer_idx = layer_idx
         self.gqa_ratio = self.num_v_heads // self.num_k_heads
 
-        self.in_proj_qkv = nn.Linear(self.hidden_size, self.conv_dim, bias=False)
+        self.in_proj_qkv = ReplicatedLinear(
+            self.hidden_size, self.conv_dim, bias=False,
+            quant_config=quant_config, prefix=f"{prefix}.in_proj_qkv",
+        )
         self.conv1d = nn.Conv1d(
             self.conv_dim,
             self.conv_dim,
@@ -176,14 +184,20 @@ class GatedDeltaNet(nn.Module):
             groups=self.conv_dim,
             padding=self.conv_kernel_size - 1,
         )
-        self.in_proj_z = nn.Linear(self.hidden_size, self.value_dim, bias=False)
+        self.in_proj_z = ReplicatedLinear(
+            self.hidden_size, self.value_dim, bias=False,
+            quant_config=quant_config, prefix=f"{prefix}.in_proj_z",
+        )
         self.in_proj_b = nn.Linear(self.hidden_size, self.num_v_heads, bias=False)
         self.in_proj_a = nn.Linear(self.hidden_size, self.num_v_heads, bias=False)
         self.A_log = nn.Parameter(torch.zeros(self.num_v_heads, dtype=torch.float32))
         self.dt_bias = nn.Parameter(torch.zeros(self.num_v_heads))
         self.norm = RMSNormGated(self.head_v_dim, eps=config.rms_norm_eps)
         self.norm.weight = nn.Parameter(self.norm.weight.data.to(torch.float32))
-        self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
+        self.out_proj = ReplicatedLinear(
+            self.value_dim, self.hidden_size, bias=False,
+            quant_config=quant_config, prefix=f"{prefix}.out_proj",
+        )
 
         # State pools, allocated by ModelRunner after init.
         self.conv_states: torch.Tensor = torch.tensor([])
@@ -201,7 +215,7 @@ class GatedDeltaNet(nn.Module):
         # layouts fall back to the legacy fp32-state path. FP32 recurrent
         # state is debug-only: it doubles GDN state memory without removing
         # the bf16 conv/KV shape-dependent drift observed in w11/w12.
-        conv_dtype = self.in_proj_qkv.weight.dtype
+        conv_dtype = self.in_proj_qkv.compute_dtype
         fp32_state_debug = os.environ.get(
             "NANO_QWEN_GDN_FP32_STATE", ""
         ).lower() in ("1", "true", "yes")
