@@ -279,10 +279,17 @@ class CudaGraphManager:
                 if kind == "pre"
                 else layer.forward_output
             )
-            self._piecewise_compiled[cache_key] = torch.compile(
-                fn,
-                dynamic=False,
-            )
+            if self.config.quant_config is not None:
+                # Inductor fuses BF16 normalization/casts before FP8 input
+                # quantization, changing rounding and subsequent FP8 bins.
+                # Capture the original operations so eager and graph use the
+                # same numerical path; CUDA Graph replay remains enabled.
+                self._piecewise_compiled[cache_key] = fn
+            else:
+                self._piecewise_compiled[cache_key] = torch.compile(
+                    fn,
+                    dynamic=False,
+                )
         return self._piecewise_compiled[cache_key]
 
     def _allocate_pre_out(

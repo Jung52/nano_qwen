@@ -31,6 +31,7 @@ def chunk_gated_delta_rule_fwd(
     initial_state_indices: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_indices: torch.LongTensor | None = None,
+    round_state_each_chunk: bool = False,
 ):
     g = chunk_local_cumsum(
         g, chunk_size=CHUNK_SIZE, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices
@@ -55,6 +56,7 @@ def chunk_gated_delta_rule_fwd(
         initial_state_indices=initial_state_indices,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        round_state_each_chunk=round_state_each_chunk,
     )
     o = chunk_fwd_o(
         q=q,
@@ -81,6 +83,7 @@ def chunk_gated_delta_rule(
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_indices: torch.LongTensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
+    round_state_each_chunk: bool = False,
 ):
     """Chunked GDN prefill kernel (inference).
 
@@ -123,5 +126,6 @@ def chunk_gated_delta_rule(
         initial_state_indices=initial_state_indices,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        round_state_each_chunk=round_state_each_chunk,
     )
     return o.to(q.dtype), None, h

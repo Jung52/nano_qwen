@@ -1,14 +1,22 @@
-"""Complete-model FP8 loading, common-input logits, generation and graph checks.
+"""Complete-model FP8 smoke checks and BF16/FP8 quality/performance evaluation.
 
 Run each mode separately to fit a 12GB GPU. Saved common-input logits allow
 BF16/FP8 comparison without keeping two complete models in GPU memory.
+
+Use --suite quality_performance --quality-text <UTF8 corpus> --hidden-out
+<reference.pt> for BF16, then --reference-hidden <reference.pt> for FP8.
+Reports retain token counts, protocol, full-vocabulary metrics and raw timings.
 """
 
 import argparse
+from contextlib import contextmanager
+import hashlib
 import json
+import math
 from pathlib import Path
 import statistics
 import sys
+import time
 
 import torch
 
@@ -28,6 +36,229 @@ TEXTS = [
     "def add(a, b):\n    return a + b\n\nassert add(2, 3) == 5\n# Adding two integers returns their sum.\n",
 ]
 QUESTIONS = ["Explain briefly why the sky appears blue.", "什么是模型量化？用两句话说明。"]
+
+# Supplemental fixtures are smoke inputs, not Chinese/code benchmark datasets.
+QUALITY_TEXTS = {
+    "chinese_sample": "\n\n".join([
+        TEXTS[1],
+        "春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。",
+        "如果每个盒子装六个苹果，四个盒子一共装二十四个苹果。送给朋友五个以后，还剩十九个。计算时需要先乘法，再减法。",
+        "推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。",
+    ]),
+    "code_sample": "\n\n".join([
+        TEXTS[2],
+        "def factorial(n):\n    if n < 0:\n        raise ValueError('negative input')\n    result = 1\n    for value in range(2, n + 1):\n        result *= value\n    return result\n\nassert factorial(5) == 120\n",
+        "def binary_search(values, target):\n    left, right = 0, len(values) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if values[mid] == target:\n            return mid\n        if values[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1\n",
+    ]),
+}
+
+
+def tensor_digest(tensor):
+    raw = tensor.detach().contiguous().cpu().view(torch.uint8).numpy()
+    return hashlib.sha256(raw.tobytes()).hexdigest()
+
+
+def quality_windows(ids, context):
+    """Independent windows: first token has no target, every later token is scored."""
+    for start in range(0, len(ids), context):
+        window = ids[start:start + context]
+        if len(window) > 1:
+            yield window
+
+
+def distribution_totals(logits, targets, reference_logits=None):
+    """Sum per-target statistics; caller divides by the actual scored-token count."""
+    current = logits.float()
+    if not torch.isfinite(current).all():
+        raise AssertionError("Non-finite quality logits")
+    logp = current.log_softmax(-1)
+    nll = -logp.gather(1, targets[:, None]).sum(dtype=torch.float64)
+    result = {"tokens": targets.numel(), "nll_sum": float(nll)}
+    if reference_logits is not None:
+        teacher = reference_logits.float()
+        if not torch.isfinite(teacher).all():
+            raise AssertionError("Non-finite reference logits")
+        ref_logp = teacher.log_softmax(-1)
+        ref_nll = -ref_logp.gather(1, targets[:, None]).sum(dtype=torch.float64)
+        result.update(
+            reference_nll_sum=float(ref_nll),
+            # Full vocabulary KL(BF16 || candidate), not a top-k approximation.
+            kl_sum=float((ref_logp.exp() * (ref_logp - logp)).sum(dtype=torch.float64)),
+            top1_matches=int((current.argmax(-1) == teacher.argmax(-1)).sum()),
+            logit_error_sq=float((current - teacher).square().sum(dtype=torch.float64)),
+            reference_logit_sq=float(teacher.square().sum(dtype=torch.float64)),
+        )
+    return result
+
+
+@contextmanager
+def standalone_prefill(runner):
+    attentions = [m for m in runner.model.modules() if isinstance(m, Attention)]
+    caches = [(m, m.k_cache, m.v_cache) for m in attentions]
+    try:
+        for m, _, _ in caches:
+            m.k_cache = m.v_cache = torch.empty(0, device="cuda")
+        yield
+    finally:
+        reset_context()
+        for m, k, v in caches:
+            m.k_cache, m.v_cache = k, v
+        for layer in runner.gdn_layers:
+            layer.reset_state([0])
+
+
+def quality_forward(runner, window):
+    ids = torch.tensor(window, device="cuda", dtype=torch.int64)
+    for layer in runner.gdn_layers:
+        layer.reset_state([0])
+    boundaries = torch.tensor([0, len(window)], device="cuda", dtype=torch.int32)
+    set_context(True, cu_seqlens_q=boundaries, cu_seqlens_k=boundaries,
+                max_seqlen_q=len(window), max_seqlen_k=len(window),
+                state_indices=torch.zeros(1, device="cuda", dtype=torch.int64),
+                prefill_slices=[(0, len(window))])
+    hidden = runner.model(ids, torch.arange(len(window), device="cuda"))
+    if not torch.isfinite(hidden).all():
+        raise AssertionError("Non-finite quality hidden states")
+    return ids, hidden
+
+
+def evaluate_quality(engine, args):
+    runner = engine.model_runner
+    raw = Path(args.quality_text).read_bytes()
+    corpus_ids = engine.tokenizer.encode(raw.decode("utf-8"), add_special_tokens=False)
+    if len(corpus_ids) < 2:
+        raise ValueError("Quality text must contain at least two tokens")
+    texts = {"wikitext2_test": corpus_ids[:args.quality_tokens]}
+    texts.update({name: engine.tokenizer.encode(text, add_special_tokens=False)
+                  for name, text in QUALITY_TEXTS.items()})
+    metadata = {
+        "text_sha256": hashlib.sha256(raw).hexdigest(),
+        "head_sha256": tensor_digest(runner.model.lm_head.weight),
+        "context_tokens": args.quality_context,
+        "token_limit": args.quality_tokens,
+        "tokenization": "raw text, add_special_tokens=False, no chat template",
+        "protocol": "non-overlapping independent windows; reset KV/GDN/positions; score ids[1:] with hidden[:-1]",
+        "forward_path": "standalone eager prefill, irrespective of generation mode",
+        "full_corpus_tokens": len(corpus_ids),
+        "subset": len(corpus_ids) > args.quality_tokens,
+    }
+    reference = None
+    if args.reference_hidden:
+        reference = torch.load(args.reference_hidden, map_location="cpu", weights_only=True)
+        if reference["metadata"] != metadata or reference["token_ids"] != texts:
+            raise ValueError("Reference head, corpus, tokenization or evaluation protocol differs")
+        if reference["quantization"] is not None:
+            raise ValueError("Quality reference must be the unquantized BF16 model")
+    saved = {"metadata": metadata, "token_ids": texts,
+             "quantization": engine.config.quantization, "hidden": {}}
+    reports = {}
+    with standalone_prefill(runner):
+        for domain, tokens in texts.items():
+            totals = {}
+            saved["hidden"][domain] = []
+            windows = list(quality_windows(tokens, args.quality_context))
+            if reference and len(reference["hidden"][domain]) != len(windows):
+                raise ValueError("Reference window count differs")
+            for index, window in enumerate(windows):
+                ids, hidden = quality_forward(runner, window)
+                ref_hidden = reference["hidden"][domain][index] if reference else None
+                if ref_hidden is not None and (ref_hidden.shape != hidden.shape or ref_hidden.dtype != hidden.dtype):
+                    raise ValueError("Reference hidden layout differs")
+                if args.hidden_out:
+                    saved["hidden"][domain].append(hidden.cpu())
+                # The unchanged BF16 head projects both hidden states with the
+                # same row shape; never store the full corpus x vocab matrix.
+                for start in range(0, len(window) - 1, args.logit_block):
+                    stop = min(start + args.logit_block, len(window) - 1)
+                    current = runner.model.compute_logits(hidden[start:stop])
+                    teacher = runner.model.compute_logits(ref_hidden[start:stop].to("cuda")) if reference else None
+                    values = distribution_totals(current, ids[start + 1:stop + 1], teacher)
+                    for key, value in values.items():
+                        totals[key] = totals.get(key, 0) + value
+                if (index + 1) % 8 == 0 or index + 1 == len(windows):
+                    print(f"QUALITY {domain} windows={index + 1}/{len(windows)}", flush=True)
+            count = totals["tokens"]
+            nll = totals["nll_sum"] / count
+            result = {"input_tokens": len(tokens), "scored_tokens": count,
+                      "windows": len(windows), "mean_nll": nll, "perplexity": math.exp(nll)}
+            if reference:
+                ref_nll = totals["reference_nll_sum"] / count
+                result.update(reference_perplexity=math.exp(ref_nll),
+                              delta_nll=nll - ref_nll, perplexity_ratio=math.exp(nll - ref_nll),
+                              mean_kl_bf16_to_candidate=totals["kl_sum"] / count,
+                              top1_agreement=totals["top1_matches"] / count,
+                              relative_l2_logits=math.sqrt(totals["logit_error_sq"] / totals["reference_logit_sq"]))
+            reports[domain] = result
+    if args.hidden_out:
+        hidden_path = Path(args.hidden_out)
+        hidden_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(saved, hidden_path)
+    return {"metadata": metadata, "domains": reports,
+            "supplemental_fixtures": QUALITY_TEXTS}
+
+
+def fixed_batch(engine, prompt, size, tokens):
+    """Whole-batch prefill followed by exactly tokens-1 production decode steps."""
+    if not engine.is_finished():
+        raise AssertionError("Previous fixed batch did not drain")
+    seqs = [Sequence(prompt, SamplingParams(temperature=1.0, max_tokens=tokens, ignore_eos=True))
+            for _ in range(size)]
+    block = engine.config.kvcache_block_size
+    needed = size * math.ceil((len(prompt) + tokens) / block)
+    if needed > engine.config.num_kvcache_blocks:
+        raise ValueError("Insufficient KV capacity for fixed batch")
+    # Startup warmup stays small on 12GB; timing workload gets a whole-prefill
+    # budget. Decode-graph mode has no static prefill buffers to resize.
+    previous = engine.scheduler.max_num_batched_tokens
+    engine.scheduler.max_num_batched_tokens = len(prompt) * size
+    try:
+        for seq in seqs:
+            engine.scheduler.add(seq)
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        engine.step()
+        prefill_end = time.perf_counter()
+        if any(seq.num_completion_tokens != 1 for seq in seqs):
+            raise AssertionError("Prefill was chunked or the fixed batch was split")
+        for _ in range(tokens - 1):
+            engine.step()
+        torch.cuda.synchronize()
+        end = time.perf_counter()
+        if not engine.is_finished() or any(seq.num_completion_tokens != tokens for seq in seqs):
+            raise AssertionError("Fixed batch did not finish in the expected step count")
+        if engine.model_runner.input_batch.seq_id_to_slot:
+            raise AssertionError("Finished batch leaked input slots")
+        return {"ttft_ms": (prefill_end - start) * 1000,
+                "decode_ms": (end - prefill_end) * 1000,
+                "decode_step_ms": (end - prefill_end) * 1000 / (tokens - 1),
+                "decode_tokens_per_s": size * (tokens - 1) / (end - prefill_end),
+                "e2e_ms": (end - start) * 1000}
+    finally:
+        engine.scheduler.max_num_batched_tokens = previous
+
+
+def evaluate_performance(engine, args):
+    cases = [(128, 1), (128, 4), (128, 8), (512, 1), (1024, 1), (512, 4)]
+    if args.mode == "piecewise_graph":
+        raise ValueError("Controlled performance suite currently uses eager or decode_graph; use smoke for piecewise checks")
+    reports = []
+    for length, size in cases:
+        base = engine.tokenizer.encode(TEXTS[0], add_special_tokens=False)
+        prompt = (base * math.ceil(length / len(base)))[:length]
+        runs = []
+        for index in range(args.warmup_rounds + args.rounds):
+            torch.manual_seed(20261006 + index)
+            result = fixed_batch(engine, prompt, size, args.decode_tokens + 1)
+            if index >= args.warmup_rounds:
+                runs.append(result)
+        medians = {key: statistics.median(run[key] for run in runs) for key in runs[0]}
+        reports.append({"prompt_tokens": length, "batch": size, "decode_forwards": args.decode_tokens,
+                        "completion_tokens": args.decode_tokens + 1, "runs": runs, **medians})
+        print(f"PERF prompt={length} bs={size} ttft={medians['ttft_ms']:.2f}ms "
+              f"decode={medians['decode_tokens_per_s']:.2f}t/s", flush=True)
+    return {"warmup_rounds": args.warmup_rounds, "rounds": args.rounds,
+            "protocol": "real engine.step, queue=2, async output, production sampler, no profiler; prefill emits token1 then fixed decode steps",
+            "workloads": reports}
 
 
 def storage_bytes(tensors):
@@ -66,19 +297,22 @@ class GraphCounter:
             setattr(self.manager, name, original)
 
 
-def batch(engine, prompts, tokens):
-    seqs = [Sequence(p, SamplingParams(temperature=1.0, max_tokens=tokens, ignore_eos=True))
+def batch(engine, prompts, tokens, *, ignore_eos=True):
+    seqs = [Sequence(p, SamplingParams(temperature=1.0, max_tokens=tokens, ignore_eos=ignore_eos))
             for p in prompts]
     for seq in seqs:
         engine.scheduler.add(seq)
     torch.cuda.synchronize()
     result = run_until_idle(engine, seqs)
     torch.cuda.synchronize()
-    assert all(len(s.completion_token_ids) == tokens for s in seqs)
+    assert all(s.is_finished and 0 < len(s.completion_token_ids) <= tokens for s in seqs)
+    if ignore_eos:
+        assert all(len(s.completion_token_ids) == tokens for s in seqs)
     assert not engine.model_runner.input_batch.seq_id_to_slot
     window = max(result.e2e_s.values()) - min(result.ttft_s.values())
+    decode_tokens = sum(len(s.completion_token_ids) - 1 for s in seqs)
     return {"outputs": result.outputs, "ttft_ms": statistics.median(result.ttft_s.values()) * 1000,
-            "decode_tokens_per_s": (tokens - 1) * len(seqs) / window if tokens > 1 else None}
+            "decode_tokens_per_s": decode_tokens / window if decode_tokens and window > 0 else None}
 
 
 @torch.inference_mode()
@@ -88,16 +322,35 @@ def main():
     parser.add_argument("--mode", choices=("eager", "decode_graph", "piecewise_graph"), default="eager")
     parser.add_argument("--json-out", required=True)
     parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--suite", choices=("smoke", "quality", "performance", "quality_performance"), default="smoke")
+    parser.add_argument("--quality-text", help="UTF8 WikiText-2 raw test text (rows joined with two newlines)")
+    parser.add_argument("--quality-context", type=int, default=512)
+    parser.add_argument("--quality-tokens", type=int, default=32768)
+    parser.add_argument("--logit-block", type=int, default=32)
+    parser.add_argument("--hidden-out", help="Save compact hidden states for a later candidate comparison")
+    parser.add_argument("--reference-hidden", help="BF16 hidden states from the exact same head/corpus/protocol")
+    parser.add_argument("--warmup-rounds", type=int, default=2)
+    parser.add_argument("--decode-tokens", type=int, default=64, help="Number of decode forwards after prefill")
     args = parser.parse_args()
-    if args.rounds < 1:
-        parser.error("--rounds must be positive")
+    for name in ("rounds", "warmup_rounds", "decode_tokens", "logit_block"):
+        if getattr(args, name) < 1:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
+    if args.quality_context < 2 or args.quality_tokens < 2:
+        parser.error("Quality context and token limit must be >=2")
+    if "quality" in args.suite and not args.quality_text:
+        parser.error("Quality evaluation requires --quality-text")
+    if args.suite != "smoke" and (args.quality_context > 2048 or args.decode_tokens > 1023):
+        parser.error("Suite limits: quality context <=2048 and decode forwards <=1023")
+    if "performance" in args.suite and args.mode == "piecewise_graph":
+        parser.error("Controlled performance uses --mode eager or decode_graph")
     output = Path(args.json_out)
     output.parent.mkdir(parents=True, exist_ok=True)
     engine = LLMEngine(
         args.model, enforce_eager=args.mode == "eager",
         use_prefill_cudagraph=args.mode == "piecewise_graph",
-        tensor_parallel_size=1, max_num_seqs=4,
-        max_model_len=1024, max_num_batched_tokens=512, gpu_memory_utilization=0.65,
+        tensor_parallel_size=1, max_num_seqs=8 if args.suite != "smoke" else 4,
+        max_model_len=2048 if args.suite != "smoke" else 1024,
+        max_num_batched_tokens=512, gpu_memory_utilization=0.65,
     )
     runner = engine.model_runner
     print(f"MODEL_READY mode={args.mode} quantization={engine.config.quantization}", flush=True)
@@ -110,6 +363,41 @@ def main():
               "generation": [], "timings": []}
     saved_logits = []
     try:
+        if args.suite != "smoke":
+            report.update(suite=args.suite, cuda=torch.version.cuda,
+                          config={"max_num_seqs": engine.config.max_num_seqs,
+                                  "max_model_len": engine.config.max_model_len,
+                                  "gpu_memory_utilization": engine.config.gpu_memory_utilization,
+                                  "prefix_cache": engine.config.enable_prefix_cache,
+                                  "queue_depth": engine.max_concurrent_batches,
+                                  "async_output": runner.async_output})
+            if "quality" in args.suite:
+                report["quality"] = evaluate_quality(engine, args)
+                production_sampler = runner.sampler
+                runner.sampler = GreedySampler()
+                try:
+                    questions = [*QUESTIONS, "Write a Python function that returns the factorial of a non-negative integer."]
+                    for question in questions:
+                        prompt = engine.tokenizer.encode(engine.tokenizer.apply_chat_template(
+                            [{"role": "user", "content": question}], tokenize=False,
+                            add_generation_prompt=True, enable_thinking=False,
+                        ))
+                        result = batch(engine, [prompt], 256, ignore_eos=False)
+                        ids = result["outputs"][0]
+                        report["generation"].append({"question": question, "ids": result["outputs"][0],
+                                                     "text": engine.tokenizer.decode(ids, skip_special_tokens=True),
+                                                     "stopped_at_eos": ids[-1] == engine.config.eos,
+                                                     "max_tokens": 256, "ignore_eos": False})
+                finally:
+                    runner.sampler = production_sampler
+                # Keep completed quality results if a later timing workload fails.
+                output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            if "performance" in args.suite:
+                report["performance"] = evaluate_performance(engine, args)
+            report["status"] = "evaluation_completed"
+            output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"REPORT {output}", flush=True)
+            return
         # Same tokens in all model variants. Disable paged KV writes for this
         # standalone full-sequence prefill; the GDN state is reset per text.
         attentions = [m for m in runner.model.modules() if isinstance(m, Attention)]

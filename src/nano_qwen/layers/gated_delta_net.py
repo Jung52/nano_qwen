@@ -45,6 +45,7 @@ from torch import nn
 from nano_qwen.layers.layernorm import RMSNormGated
 from nano_qwen.layers.linear import ReplicatedLinear
 from nano_qwen.quantization import QuantizationConfig
+from nano_qwen.quantization.fp8 import stable_gate_projection
 from nano_qwen.utils.context import get_context
 
 
@@ -63,6 +64,7 @@ def chunk_gated_delta_rule(
     initial_state_indices: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
+    round_state_each_chunk: bool = False,
 ) -> torch.Tensor:
     """Chunked delta rule prefill via the SGLang Triton chunk kernel.
 
@@ -100,6 +102,7 @@ def chunk_gated_delta_rule(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         use_qk_l2norm_in_kernel=True,
+        round_state_each_chunk=round_state_each_chunk,
     )
     return o
 
@@ -132,17 +135,21 @@ def decode_gated_delta_rule(
     B, S, H, K = query.shape
     _, _, HV, V = value.shape
     assert S == 1, f"FlashInfer decode requires S=1, got S={S}"
+    # FlashInfer caches compiled input strides and a default output buffer.
+    # Mixed-batch slices must have a consistent layout, and each invocation
+    # must own its output until the caller merges the per-request results.
+    output = torch.empty((B, 1, HV, V), device=query.device, dtype=query.dtype)
     out, new_state = gated_delta_rule_decode_pretranspose(
-        q=query.view(B, 1, H, K),
-        k=key.view(B, 1, H, K),
-        v=value.view(B, 1, HV, V),
+        q=query.reshape(B, 1, H, K).contiguous(),
+        k=key.reshape(B, 1, H, K).contiguous(),
+        v=value.reshape(B, 1, HV, V).contiguous(),
         state=initial_state.contiguous(),
         A_log=A_log.detach().to(torch.float32),
-        a=a.view(B, 1, HV),
+        a=a.reshape(B, 1, HV).clone(memory_format=torch.contiguous_format),
         dt_bias=dt_bias.detach(),
-        b=b.view(B, 1, HV),
+        b=b.reshape(B, 1, HV).clone(memory_format=torch.contiguous_format),
         scale=None,
-        output=None,
+        output=output,
         use_qk_l2norm=True,
     )
     return out.view(B, S, HV, V), new_state
@@ -170,6 +177,7 @@ class GatedDeltaNet(nn.Module):
         self.conv_kernel_size = config.linear_conv_kernel_dim
         self.conv_dim = self.key_dim * 2 + self.value_dim
         self.layer_idx = layer_idx
+        self._stable_gates = quant_config is not None
         self.gqa_ratio = self.num_v_heads // self.num_k_heads
 
         self.in_proj_qkv = ReplicatedLinear(
@@ -345,8 +353,8 @@ class GatedDeltaNet(nn.Module):
         z = self.in_proj_z(hidden_states).reshape(
             1, total_tokens, -1, self.head_v_dim
         )
-        b = self.in_proj_b(hidden_states)  # (1, total_tokens, Hv)
-        a = self.in_proj_a(hidden_states)
+        b = self._project_gate(hidden_states, self.in_proj_b)  # (1, total_tokens, Hv)
+        a = self._project_gate(hidden_states, self.in_proj_a)
         beta = torch.sigmoid(b)
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias.float())
         if self.gqa_ratio > 1:
@@ -359,17 +367,7 @@ class GatedDeltaNet(nn.Module):
                 "GDN prefill requires the allocated recurrent state pool "
                 "and Context.state_indices"
             )
-        out = chunk_gated_delta_rule(
-            query,
-            key,
-            value,
-            g,
-            beta,
-            initial_state=self.recurrent_states,
-            initial_state_indices=ctx.state_indices,
-            cu_seqlens=ctx.cu_seqlens_q,
-            chunk_indices=ctx.prefill_chunk_indices,
-        )
+        out = self._prefill_core(query, key, value, a, b, g, beta)
         out = out.reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
         out = self.norm(out, z)
@@ -403,9 +401,49 @@ class GatedDeltaNet(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         raw_qkv = self.in_proj_qkv(hidden_states)
         z = self.in_proj_z(hidden_states)
-        b = self.in_proj_b(hidden_states)
-        a = self.in_proj_a(hidden_states)
+        b = self._project_gate(hidden_states, self.in_proj_b)
+        a = self._project_gate(hidden_states, self.in_proj_a)
         return raw_qkv, z, b, a
+
+    def _project_gate(self, hidden_states: torch.Tensor, projection: nn.Linear):
+        if self._stable_gates:
+            return stable_gate_projection(hidden_states, projection.weight)
+        return projection(hidden_states)
+
+    def _prefill_core(self, query, key, value, a, b, g, beta):
+        context = get_context()
+        if not self._stable_gates or not context.prefill_decode_rows:
+            return chunk_gated_delta_rule(
+                query, key, value, g, beta, initial_state=self.recurrent_states,
+                initial_state_indices=context.state_indices,
+                cu_seqlens=context.cu_seqlens_q,
+                chunk_indices=context.prefill_chunk_indices,
+                round_state_each_chunk=self._stable_gates,
+            )
+
+        # Mixed dispatch must keep actual decode rows on the decode kernel.
+        # A one-token prefill tail remains on chunk prefill: these kernels
+        # have different BF16 state-update rounding.
+        decode_rows = set(context.prefill_decode_rows)
+        outputs = []
+        for row, (start, end) in enumerate(context.prefill_slices):
+            slots = context.state_indices[row:row + 1]
+            if row in decode_rows:
+                out, state = decode_gated_delta_rule(
+                    query[:, start:end], key[:, start:end], value[:, start:end],
+                    a[:, start:end], b[:, start:end], self.A_log, self.dt_bias,
+                    self.recurrent_states.index_select(0, slots),
+                )
+                self.recurrent_states.index_copy_(0, slots, state)
+            else:
+                out = chunk_gated_delta_rule(
+                    query[:, start:end], key[:, start:end], value[:, start:end],
+                    g[:, start:end], beta[:, start:end],
+                    initial_state=self.recurrent_states, initial_state_indices=slots,
+                    round_state_each_chunk=True,
+                )
+            outputs.append(out)
+        return torch.cat(outputs, dim=1)
 
     def forward_core_from_dense(
         self,
@@ -459,17 +497,7 @@ class GatedDeltaNet(nn.Module):
             query = query.repeat_interleave(self.gqa_ratio, dim=2)
             key = key.repeat_interleave(self.gqa_ratio, dim=2)
 
-        out = chunk_gated_delta_rule(
-            query,
-            key,
-            value,
-            g,
-            beta,
-            initial_state=self.recurrent_states,
-            initial_state_indices=context.state_indices,
-            cu_seqlens=context.cu_seqlens_q,
-            chunk_indices=context.prefill_chunk_indices,
-        )
+        out = self._prefill_core(query, key, value, a, b, g, beta)
         out = out.reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
         out = self.norm(out, z)
@@ -518,8 +546,8 @@ class GatedDeltaNet(nn.Module):
         value = value.reshape(B, 1, -1, self.head_v_dim)
 
         z = self.in_proj_z(hidden_states).reshape(B, 1, -1, self.head_v_dim)
-        b = self.in_proj_b(hidden_states)  # (B, 1, Hv)
-        a = self.in_proj_a(hidden_states)
+        b = self._project_gate(hidden_states, self.in_proj_b)  # (B, 1, Hv)
+        a = self._project_gate(hidden_states, self.in_proj_a)
         if self.gqa_ratio > 1:
             query = query.repeat_interleave(self.gqa_ratio, dim=2)
             key = key.repeat_interleave(self.gqa_ratio, dim=2)

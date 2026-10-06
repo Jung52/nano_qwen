@@ -406,6 +406,7 @@ class ModelRunner:
             block_tables=block_tables,
             state_indices=state_indices,
             prefill_slices=prefill_slices,
+            prefill_decode_rows=[row for row, seq in enumerate(seqs) if not seq.is_prefill],
             prefill_chunk_indices=torch.tensor(
                 prefill_chunk_indices,
                 dtype=torch.int32,

@@ -121,6 +121,9 @@ class Qwen3_5Attention(nn.Module):
             head_dim=self.head_dim,
             scale=self.scaling,
             num_kv_heads=self.num_kv_heads,
+            # Automatic KV splitting depends on batch size and changes the
+            # reduction rounding, which FP8 activation quantization amplifies.
+            decode_num_splits=1 if quant_config is not None else 0,
         )
 
     def forward(

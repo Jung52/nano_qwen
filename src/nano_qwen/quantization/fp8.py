@@ -7,6 +7,28 @@ from .base import LinearMethodBase, QuantizationConfig
 
 
 @triton.jit
+def _gate_projection(X, W, Y, K: tl.constexpr, N: tl.constexpr, BLOCK: tl.constexpr):
+    row, column = tl.program_id(0), tl.program_id(1)
+    offsets = tl.arange(0, BLOCK)
+    x = tl.load(X + row * K + offsets, offsets < K, 0).to(tl.float32)
+    w = tl.load(W + column * K + offsets, offsets < K, 0).to(tl.float32)
+    tl.store(Y + row * N + column, tl.sum(x * w, axis=0))
+
+
+def stable_gate_projection(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Small unquantized GDN gates with row-independent FP32 accumulation."""
+    shape = x.shape[:-1] + (weight.shape[0],)
+    x = x.reshape(-1, x.shape[-1]).contiguous()
+    output = torch.empty((x.shape[0], weight.shape[0]), device=x.device, dtype=x.dtype)
+    if x.shape[0]:
+        _gate_projection[(x.shape[0], weight.shape[0])](
+            x, weight, output, x.shape[1], weight.shape[0],
+            triton.next_power_of_2(x.shape[1]), num_warps=4,
+        )
+    return output.reshape(shape)
+
+
+@triton.jit
 def _quantize_rows(X, Q, S, K: tl.constexpr, BLOCK: tl.constexpr):
     row = tl.program_id(0)
     offsets = tl.arange(0, BLOCK)

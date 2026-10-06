@@ -78,6 +78,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     IS_VARLEN: tl.constexpr,
     NT_BUCKET: tl.constexpr,
     USE_EXP2: tl.constexpr,
+    ROUND_STATE_EACH_CHUNK: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
@@ -292,6 +293,17 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_h4 += tl.trans(tl.dot(b_k, b_v))
 
+        if ROUND_STATE_EACH_CHUNK:
+            # Match an external prefill boundary: the persisted state is
+            # rounded to the pool dtype before the next chunk reads it.
+            b_h1 = b_h1.to(initial_state.dtype.element_ty).to(tl.float32)
+            if K > 64:
+                b_h2 = b_h2.to(initial_state.dtype.element_ty).to(tl.float32)
+            if K > 128:
+                b_h3 = b_h3.to(initial_state.dtype.element_ty).to(tl.float32)
+            if K > 192:
+                b_h4 = b_h4.to(initial_state.dtype.element_ty).to(tl.float32)
+
     # epilogue
     if INPLACE_UPDATE and valid_state:
         p_ht = tl.make_block_ptr(ht, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
@@ -325,6 +337,7 @@ def chunk_gated_delta_rule_fwd_h(
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_indices: Optional[torch.LongTensor] = None,
     use_exp2: bool = False,
+    round_state_each_chunk: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert not (
         use_exp2 and g is not None
@@ -388,5 +401,6 @@ def chunk_gated_delta_rule_fwd_h(
         IS_VARLEN=cu_seqlens is not None,
         NT_BUCKET=(0 if NT <= 32 else (1 if NT <= 128 else 2)),
         USE_EXP2=use_exp2,
+        ROUND_STATE_EACH_CHUNK=round_state_each_chunk,
     )
     return h, v_new
