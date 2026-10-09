@@ -277,6 +277,103 @@ def test_offline_conversion_roundtrip(tmp_path, bf16_default):
         convert_checkpoint(source, output)
 
 
+@pytest.mark.parametrize("source_layout", ["text", "multimodal"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_offline_block_conversion_roundtrip(tmp_path, bf16_default, source_layout, device):
+    from nano_qwen.quantization.convert import convert_checkpoint
+    from nano_qwen.quantization.fp8_block import Fp8BlockConfig
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    source, output = tmp_path / "bf16", tmp_path / "block_fp8"
+    source.mkdir()
+    config = text_config()
+    config.hidden_size = 256
+    config.head_dim = 128
+    config.dtype = torch.bfloat16
+    source_config = (AutoConfig.for_model("qwen3_5", text_config=config.to_dict())
+                     if source_layout == "multimodal" else config)
+    source_config.save_pretrained(source)
+    original = Qwen3_5ForCausalLM(config)
+    raw = {name: torch.randn(shape, dtype=dtype)
+           for name, (_, _, shape, dtype) in checkpoint_spec(original).items()
+           if name != "lm_head.weight"}
+    weight_name = "model.layers.0.mlp.gate_proj.weight"
+    # Four independently scaled blocks, including a zero block and negatives.
+    raw[weight_name][:128, :128] = 0
+    raw[weight_name][:128, 128:] = 448
+    raw[weight_name][128:, :128] = 896
+    raw[weight_name][128:, 128:] = -1344
+    raw["model.visual.unused"] = torch.ones(1)
+    source_tensors = ({key.replace("model.", "model.language_model.", 1): value
+                       for key, value in raw.items()}
+                      if source_layout == "multimodal" else raw)
+    save_file(source_tensors, str(source / "model.safetensors"))
+    (source / "chat_template.jinja").write_text("test template")
+
+    metadata = convert_checkpoint(source, output, device=device, shard_mib=1,
+                                  scheme="block_wise")
+    detected = Config(str(output))
+    assert isinstance(detected.quant_config, Fp8BlockConfig)
+    assert metadata["quantized_projections"] == 13
+    assert not (output / METADATA_FILE).exists()
+    assert (output / "chat_template.jinja").read_text() == "test template"
+    assert (output / "model.safetensors.index.json").is_file()
+    quantized = Qwen3_5ForCausalLM(config, quant_config=detected.quant_config)
+    load_model(quantized, str(output))
+    layer = quantized.model.layers[0].mlp.gate_up_proj
+    # CUDA constant division may differ from the CPU scale by one FP32 ULP.
+    torch.testing.assert_close(layer.weight_scale_inv[:2],
+                               torch.tensor([[1., 1.], [2., 3.]], dtype=torch.float32),
+                               rtol=1e-6, atol=0)
+    assert layer.weight_scale_inv[0, 0].item() == 1.0
+    assert layer.weight_scale_inv.dtype == torch.float32
+    expected = torch.zeros(256, 256, dtype=torch.float32)
+    expected[:128, 128:] = 448
+    expected[128:, :128] = 448
+    expected[128:, 128:] = -448
+    torch.testing.assert_close(layer.weight[:256].float(), expected, rtol=0, atol=0)
+    restored = (layer.weight.float()
+                * layer.weight_scale_inv.repeat_interleave(128, 0).repeat_interleave(128, 1))
+    reference = torch.cat([raw[weight_name], raw[weight_name.replace("gate_proj", "up_proj")]])
+    assert ((restored - reference.float()).norm() / reference.float().norm()).item() < 0.04
+    torch.testing.assert_close(restored[:256], raw[weight_name].float(), rtol=1e-6, atol=0)
+    torch.testing.assert_close(quantized.model.layers[0].linear_attn.in_proj_a.weight,
+                               raw["model.layers.0.linear_attn.in_proj_a.weight"], rtol=0, atol=0)
+    with pytest.raises(ValueError, match="empty"):
+        convert_checkpoint(source, output, scheme="block_wise")
+
+
+@pytest.mark.parametrize("scheme", ["per_channel", "block_wise"])
+@pytest.mark.parametrize("source_layout", ["text", "multimodal"])
+def test_offline_conversion_rejects_quantized_hf_source(tmp_path, bf16_default,
+                                                       scheme, source_layout):
+    from nano_qwen.quantization.convert import convert_checkpoint
+
+    source, output = tmp_path / "hf_fp8", tmp_path / "converted"
+    source.mkdir()
+    config = text_config()
+    config.dtype = torch.bfloat16
+    config.quantization_config = {"quant_method": "fp8", "activation_scheme": "dynamic",
+                                  "weight_block_size": [128, 128]}
+    source_config = (AutoConfig.for_model("qwen3_5", text_config=config.to_dict())
+                     if source_layout == "multimodal" else config)
+    source_config.save_pretrained(source)
+    save_file({"placeholder": torch.zeros(1)}, str(source / "model.safetensors"))
+    with pytest.raises(ValueError, match="already.*quantized"):
+        convert_checkpoint(source, output, scheme=scheme)
+    assert not output.exists()
+
+
+def test_offline_conversion_rejects_unknown_scheme_before_writing(tmp_path):
+    from nano_qwen.quantization.convert import convert_checkpoint
+
+    output = tmp_path / "converted"
+    with pytest.raises(ValueError, match="scheme"):
+        convert_checkpoint(tmp_path / "missing", output, scheme="unknown")
+    assert not output.exists()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("quantized", [False, True])
 def test_gdn_state_uses_compute_dtype(quantized, monkeypatch):
