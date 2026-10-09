@@ -6,7 +6,7 @@ from safetensors import safe_open
 
 from nano_qwen.quantization import UnquantizedLinearMethod
 from nano_qwen.quantization.checkpoint import (
-    checkpoint_spec, normalize_weight_name, read_quantization_metadata,
+    checkpoint_spec, normalize_weight_name, read_quantization_metadata, read_hf_fp8_config,
     tied_head, validate_tensor,
 )
 
@@ -22,6 +22,11 @@ def load_model(model: nn.Module, path: str):
         if method is not None and not isinstance(method, UnquantizedLinearMethod):
             quantized = True
     metadata = read_quantization_metadata(path)
+    hf_quant = read_hf_fp8_config(path) if metadata is None else None
+    if hf_quant is not None:
+        if not quantized or not any(hasattr(m, "weight_scale_inv") for m in model.modules()):
+            raise ValueError("HF block FP8 checkpoint requires a block FP8 model")
+        return _load_fp8_model(model, path, hf_block=True)
     if quantized or metadata is not None:
         if not quantized or metadata is None:
             raise ValueError("FP8 model and converted checkpoint metadata must match")
@@ -56,7 +61,7 @@ def load_model(model: nn.Module, path: str):
                     weight_loader(param, f.get_tensor(checkpoint_name))
 
 
-def _load_fp8_model(model: nn.Module, path: str):
+def _load_fp8_model(model: nn.Module, path: str, hf_block=False):
     spec = checkpoint_spec(model)
     params = dict(model.named_parameters())
     entries = {}
@@ -64,11 +69,17 @@ def _load_fp8_model(model: nn.Module, path: str):
     for file in sorted(glob(os.path.join(path, "*.safetensors"))):
         with safe_open(file, "pt", "cpu") as checkpoint:
             for raw_name in checkpoint.keys():
+                if hf_block and raw_name.startswith(("model.visual.", "visual.", "model.mtp.", "mtp.")):
+                    continue
                 name = normalize_weight_name(raw_name)
                 if name not in spec or name in entries:
                     raise ValueError(f"Unexpected or duplicate FP8 tensor: {raw_name}")
                 _, _, shape, dtype = spec[name]
                 tensor = checkpoint.get_tensor(raw_name)
+                if hf_block and name.endswith(".weight_scale_inv"):
+                    if tensor.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+                        raise ValueError(f"Invalid block FP8 scale dtype: {raw_name}")
+                    tensor = tensor.float()
                 validate_tensor(name, tensor, shape, dtype)
                 entries[name] = (file, raw_name)
     missing = set(spec) - entries.keys()

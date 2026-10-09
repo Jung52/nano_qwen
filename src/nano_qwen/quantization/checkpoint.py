@@ -28,6 +28,22 @@ def read_quantization_metadata(path):
     return metadata
 
 
+def read_hf_fp8_config(path):
+    file = Path(path) / "config.json"
+    if not file.exists():
+        return None
+    config = json.loads(file.read_text(encoding="utf-8"))
+    quant = config.get("quantization_config") or config.get("text_config", {}).get("quantization_config")
+    if quant is None:
+        return None
+    if (quant.get("quant_method") != "fp8"
+            or quant.get("weight_block_size") != [128, 128]
+            or quant.get("activation_scheme") != "dynamic"
+            or quant.get("fmt", "e4m3") != "e4m3"):
+        raise ValueError("Only HF dynamic E4M3 FP8 with weight_block_size=[128,128] is supported")
+    return quant
+
+
 def normalize_weight_name(name):
     if name.startswith("model.language_model."):
         return "model." + name[len("model.language_model."):]
@@ -46,7 +62,10 @@ def checkpoint_spec(model):
                    if target == leaf]
         if sources:
             for source, shard in sources:
-                shape = (modules[module_name].output_sizes[shard], *param.shape[1:])
+                rows = modules[module_name].output_sizes[shard]
+                if field == "weight_scale_inv":
+                    rows //= 128
+                shape = (rows, *param.shape[1:])
                 key = f"{parent}.{source}.{field}"
                 spec[key] = (name, shard, shape, param.dtype)
         else:
@@ -70,5 +89,5 @@ def validate_tensor(name, tensor, shape, dtype):
     values = tensor.float()
     if not torch.isfinite(values).all():
         raise ValueError(f"Non-finite tensor: {name}")
-    if name.endswith(".weight_scale") and not (values > 0).all():
+    if name.endswith((".weight_scale", ".weight_scale_inv")) and not (values > 0).all():
         raise ValueError(f"Weight scales must be positive: {name}")
