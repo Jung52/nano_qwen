@@ -1,9 +1,15 @@
+import os
+
 import torch
 from torch import nn
 import triton
 import triton.language as tl
 
 from .base import LinearMethodBase, QuantizationConfig
+
+
+# Read once before compilation/capture; use a fresh process for an A/B run.
+_SHARE_FP8_INPUT = os.environ.get("NANO_QWEN_FP8_SHARE_INPUT", "1") != "0"
 
 
 @triton.jit
@@ -91,8 +97,12 @@ class Fp8LinearMethod(LinearMethodBase):
             raise ValueError("FP8 linear input has the wrong feature dimension")
         shape = x.shape[:-1] + (layer.output_size,)
         q, scales = quantize_fp8_per_token(x.reshape(-1, x.shape[-1]))
+        return self.apply_quantized(layer, q, scales, shape, bias)
+
+    def apply_quantized(self, layer, q, scales, output_shape, bias=None):
+        """Consume call-local quantized activations shared by sibling projections."""
         if q.shape[0] == 0:
-            return torch.empty(shape, device=x.device, dtype=layer.compute_dtype)
+            return torch.empty(output_shape, device=q.device, dtype=layer.compute_dtype)
         output = torch._scaled_mm(
             q, layer.weight.t(), scales,
             layer.weight_scale.t().contiguous(),
@@ -100,7 +110,33 @@ class Fp8LinearMethod(LinearMethodBase):
         )
         if bias is not None:
             output.add_(bias)
-        return output.reshape(shape)
+        return output.reshape(output_shape)
+
+
+def project_shared_fp8_input(x: torch.Tensor, *layers) -> tuple[torch.Tensor, ...]:
+    """Project one input through sibling replicated/column-parallel layers.
+
+    Quantize once, keeping separate GEMMs and their existing accumulation.
+    No tensors are cached across calls or CUDA Graph replays. Other backends
+    and row-parallel layers retain their normal forward/communication path.
+    """
+    if not layers:
+        return ()
+    if not _SHARE_FP8_INPUT or not all(
+        isinstance(layer.quant_method, Fp8LinearMethod)
+        and layer.tp_size == 1 and layer.tp_dim in (None, 0)
+        for layer in layers
+    ):
+        return tuple(layer(x) for layer in layers)
+    if x.ndim == 0 or any(x.shape[-1] != layer.input_size for layer in layers):
+        raise ValueError("FP8 linear input has the wrong feature dimension")
+    q, scales = quantize_fp8_per_token(x.reshape(-1, x.shape[-1]))
+    return tuple(
+        layer.quant_method.apply_quantized(
+            layer, q, scales, x.shape[:-1] + (layer.output_size,), layer.bias,
+        )
+        for layer in layers
+    )
 
 
 class Fp8Config(QuantizationConfig):

@@ -45,7 +45,7 @@ from torch import nn
 from nano_qwen.layers.layernorm import RMSNormGated
 from nano_qwen.layers.linear import ReplicatedLinear
 from nano_qwen.quantization import QuantizationConfig
-from nano_qwen.quantization.fp8 import stable_gate_projection
+from nano_qwen.quantization.fp8 import project_shared_fp8_input, stable_gate_projection
 from nano_qwen.utils.context import get_context
 
 
@@ -312,7 +312,9 @@ class GatedDeltaNet(nn.Module):
             )
 
         _, total_tokens, _ = hidden_states.shape
-        raw_qkv_packed = self.in_proj_qkv(hidden_states)
+        raw_qkv_packed, z = project_shared_fp8_input(
+            hidden_states, self.in_proj_qkv, self.in_proj_z,
+        )
         raw_qkv = raw_qkv_packed.transpose(1, 2)  # (1, C, total_tokens)
 
         # Depthwise causal convolution has no cu_seqlens argument. Run it on
@@ -350,9 +352,7 @@ class GatedDeltaNet(nn.Module):
         value = qkv[..., self.key_dim * 2:].reshape(
             1, total_tokens, -1, self.head_v_dim
         )
-        z = self.in_proj_z(hidden_states).reshape(
-            1, total_tokens, -1, self.head_v_dim
-        )
+        z = z.reshape(1, total_tokens, -1, self.head_v_dim)
         b = self._project_gate(hidden_states, self.in_proj_b)  # (1, total_tokens, Hv)
         a = self._project_gate(hidden_states, self.in_proj_a)
         beta = torch.sigmoid(b)
@@ -399,8 +399,9 @@ class GatedDeltaNet(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        raw_qkv = self.in_proj_qkv(hidden_states)
-        z = self.in_proj_z(hidden_states)
+        raw_qkv, z = project_shared_fp8_input(
+            hidden_states, self.in_proj_qkv, self.in_proj_z,
+        )
         b = self._project_gate(hidden_states, self.in_proj_b)
         a = self._project_gate(hidden_states, self.in_proj_a)
         return raw_qkv, z, b, a
@@ -528,7 +529,10 @@ class GatedDeltaNet(nn.Module):
             )
         conv_state, rec_state = self._read_state(idx)  # (B,C,k-1), (B,Hv,V,K)
 
-        qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)  # (B, C, 1)
+        qkv, z = project_shared_fp8_input(
+            hidden_states, self.in_proj_qkv, self.in_proj_z,
+        )
+        qkv = qkv.transpose(1, 2)  # (B, C, 1)
         # causal conv with cached left-context (kernel-1 values)
         x = torch.cat([conv_state, qkv], dim=-1)  # (B, C, kernel)
         out = F.silu(
@@ -545,7 +549,7 @@ class GatedDeltaNet(nn.Module):
         key = key.reshape(B, 1, -1, self.head_k_dim)
         value = value.reshape(B, 1, -1, self.head_v_dim)
 
-        z = self.in_proj_z(hidden_states).reshape(B, 1, -1, self.head_v_dim)
+        z = z.reshape(B, 1, -1, self.head_v_dim)
         b = self._project_gate(hidden_states, self.in_proj_b)  # (B, 1, Hv)
         a = self._project_gate(hidden_states, self.in_proj_a)
         if self.gqa_ratio > 1:

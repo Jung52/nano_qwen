@@ -25,6 +25,7 @@ from nano_qwen.layers.linear import (
 )
 from nano_qwen.layers.rotary_embedding import InterleavedMRoPE
 from nano_qwen.quantization import QuantizationConfig
+from nano_qwen.quantization.fp8 import project_shared_fp8_input
 from nano_qwen.utils.context import get_context
 
 
@@ -131,17 +132,15 @@ class Qwen3_5Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        q_gate = self.q_proj(hidden_states)
+        q_gate, key, value = project_shared_fp8_input(
+            hidden_states, self.q_proj, self.k_proj, self.v_proj,
+        )
         #把1维拼接拆成[token数，头数，2x头维度]，在使用dim=-1拆成query和gate两个部分
         q_gate = q_gate.view(-1, self.num_heads, 2 * self.head_dim)
         query, gate = q_gate.chunk(2, dim=-1)
 
-        key = self.k_proj(hidden_states).view(
-            -1, self.num_kv_heads, self.head_dim
-        )
-        value = self.v_proj(hidden_states).view(
-            -1, self.num_kv_heads, self.head_dim
-        )
+        key = key.view(-1, self.num_kv_heads, self.head_dim)
+        value = value.view(-1, self.num_kv_heads, self.head_dim)
 
         # Keep the compiled RMSNorm entry point rank-stable across prefill
         # and decode. The attention projections are 3-D, while the decoder
@@ -161,10 +160,9 @@ class Qwen3_5Attention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        q_gate = self.q_proj(hidden_states)
-        key = self.k_proj(hidden_states)
-        value = self.v_proj(hidden_states)
-        return q_gate, key, value
+        return project_shared_fp8_input(
+            hidden_states, self.q_proj, self.k_proj, self.v_proj,
+        )
 
     def forward_core_from_dense(
         self,
