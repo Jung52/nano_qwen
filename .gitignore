@@ -11,3 +11,12 @@ wheels/
 
 # Benchmark traces and logs
 logs/
+benchmarks/reports/
+
+# Local model checkpoints (large; not tracked)
+9b/
+fp8/
+block_fp8/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
