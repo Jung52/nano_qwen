@@ -1,6 +1,6 @@
 """Complete-model FP8 smoke checks and BF16/FP8 quality/performance evaluation.
 
-Run each mode separately to fit a 12GB GPU. Saved common-input logits allow
+Run each model/mode separately. Saved common-input logits allow
 BF16/FP8 comparison without keeping two complete models in GPU memory.
 
 Use --suite quality_performance --quality-text <UTF8 corpus> --hidden-out
@@ -36,6 +36,52 @@ TEXTS = [
     "def add(a, b):\n    return a + b\n\nassert add(2, 3) == 5\n# Adding two integers returns their sum.\n",
 ]
 QUESTIONS = ["Explain briefly why the sky appears blue.", "什么是模型量化？用两句话说明。"]
+
+PERFORMANCE_PROFILES = {
+    "legacy": [(128, 1), (128, 4), (128, 8), (512, 1), (1024, 1), (512, 4)],
+    "batch": [(128, b) for b in (1, 4, 8, 16, 32, 64)],
+    "context": [(512, 1), (512, 4), (512, 8), (1024, 1), (1024, 4),
+                (1024, 8), (2048, 1), (2048, 4), (4096, 1)],
+}
+
+
+def parse_perf_case(value):
+    try:
+        length, size = map(int, value.split(":"))
+        if length < 1 or size < 1:
+            raise ValueError
+        return length, size
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Use positive PROMPT:BATCH, e.g. 128:32") from exc
+
+
+def resolve_perf_cases(args):
+    cases = args.perf_cases or PERFORMANCE_PROFILES[args.perf_profile]
+    return list(dict.fromkeys(cases))
+
+
+def capacity_check(engine, length, size, completion_tokens):
+    block = engine.config.kvcache_block_size
+    needed = size * math.ceil((length + completion_tokens) / block)
+    available = engine.config.num_kvcache_blocks
+    info = {"required_kv_blocks": needed, "available_kv_blocks": available,
+            "kv_block_size": block}
+    reasons = []
+    if size > engine.config.max_num_seqs:
+        reasons.append("batch exceeds max_num_seqs")
+    if length + completion_tokens > engine.config.max_model_len:
+        reasons.append("prompt plus completion exceeds max_model_len")
+    if needed > available:
+        reasons.append("insufficient KV capacity without prefix sharing")
+    return info, "; ".join(reasons)
+
+
+def save_report(path, report):
+    # Checkpoints retain completed cases if a subsequent case fails.
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
 
 # Supplemental fixtures are smoke inputs, not Chinese/code benchmark datasets.
 QUALITY_TEXTS = {
@@ -203,10 +249,9 @@ def fixed_batch(engine, prompt, size, tokens):
         raise AssertionError("Previous fixed batch did not drain")
     seqs = [Sequence(prompt, SamplingParams(temperature=1.0, max_tokens=tokens, ignore_eos=True))
             for _ in range(size)]
-    block = engine.config.kvcache_block_size
-    needed = size * math.ceil((len(prompt) + tokens) / block)
-    if needed > engine.config.num_kvcache_blocks:
-        raise ValueError("Insufficient KV capacity for fixed batch")
+    _, reason = capacity_check(engine, len(prompt), size, tokens)
+    if reason:
+        raise ValueError(reason)
     # Startup warmup stays small on 12GB; timing workload gets a whole-prefill
     # budget. Decode-graph mode has no static prefill buffers to resize.
     previous = engine.scheduler.max_num_batched_tokens
@@ -215,8 +260,13 @@ def fixed_batch(engine, prompt, size, tokens):
         for seq in seqs:
             engine.scheduler.add(seq)
         torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
         start = time.perf_counter()
         engine.step()
+        prefill_submit_end = time.perf_counter()
+        # A single boundary sync prevents pending prefill GPU work from being
+        # charged to decode. This is device-ready latency, NOT streaming TTFT.
+        torch.cuda.synchronize()
         prefill_end = time.perf_counter()
         if any(seq.num_completion_tokens != 1 for seq in seqs):
             raise AssertionError("Prefill was chunked or the fixed batch was split")
@@ -228,37 +278,86 @@ def fixed_batch(engine, prompt, size, tokens):
             raise AssertionError("Fixed batch did not finish in the expected step count")
         if engine.model_runner.input_batch.seq_id_to_slot:
             raise AssertionError("Finished batch leaked input slots")
-        return {"ttft_ms": (prefill_end - start) * 1000,
+        return {"prefill_submit_ms": (prefill_submit_end - start) * 1000,
+                "prefill_ready_ms": (prefill_end - start) * 1000,
                 "decode_ms": (end - prefill_end) * 1000,
                 "decode_step_ms": (end - prefill_end) * 1000 / (tokens - 1),
                 "decode_tokens_per_s": size * (tokens - 1) / (end - prefill_end),
-                "e2e_ms": (end - start) * 1000}
+                "per_request_decode_tokens_per_s": (tokens - 1) / (end - prefill_end),
+                "e2e_ms": (end - start) * 1000,
+                "e2e_completion_tokens_per_s": size * tokens / (end - start),
+                "prefill_input_tokens_per_s": size * len(prompt) / (prefill_end - start),
+                "torch_peak_allocated_mib": torch.cuda.max_memory_allocated() / 2**20,
+                "torch_peak_reserved_mib": torch.cuda.max_memory_reserved() / 2**20}
     finally:
         engine.scheduler.max_num_batched_tokens = previous
 
 
-def evaluate_performance(engine, args):
-    cases = [(128, 1), (128, 4), (128, 8), (512, 1), (1024, 1), (512, 4)]
+def evaluate_performance(engine, args, report):
+    cases = resolve_perf_cases(args)
     if args.mode == "piecewise_graph":
         raise ValueError("Controlled performance suite currently uses eager or decode_graph; use smoke for piecewise checks")
+    if engine.config.enable_prefix_cache:
+        raise ValueError("Controlled performance requires prefix_cache=False")
     reports = []
+    performance = {
+        "profile": args.perf_profile, "warmup_rounds": args.warmup_rounds,
+        "rounds": args.rounds, "requested_cases": [list(c) for c in cases],
+        "timing_version": 2,
+        "protocol": "real engine.step, actual queue/output configuration recorded in config; "
+                    "production sampler; no profiler; one CUDA sync after prefill, "
+                    "none between decode steps, one at end; prefill emits token1",
+        "prefill_latency_definition": "prefill_ready_ms measures device-ready boundary; "
+                                      "not client-visible first-token delivery",
+        "workloads": reports,
+    }
+    report["performance"] = performance
+    base = engine.tokenizer.encode(TEXTS[0], add_special_tokens=False)
+    if not base:
+        raise ValueError("Empty performance prompt tokenization")
     for length, size in cases:
-        base = engine.tokenizer.encode(TEXTS[0], add_special_tokens=False)
+        capacity, reason = capacity_check(engine, length, size, args.decode_tokens + 1)
+        case = {"prompt_tokens": length, "batch": size,
+                "decode_forwards": args.decode_tokens,
+                "completion_tokens": args.decode_tokens + 1,
+                "prefill_total_tokens": length * size,
+                "prompt_sha256": None, "runs": [], **capacity}
+        reports.append(case)
+        report["status"] = "evaluation_in_progress"
+        if reason:
+            case.update(status="skipped_capacity", reason=reason)
+            print(f"SKIP prompt={length} bs={size}: {reason}", flush=True)
+            save_report(args.json_out, report)
+            continue
         prompt = (base * math.ceil(length / len(base)))[:length]
-        runs = []
-        for index in range(args.warmup_rounds + args.rounds):
-            torch.manual_seed(20261006 + index)
-            result = fixed_batch(engine, prompt, size, args.decode_tokens + 1)
-            if index >= args.warmup_rounds:
-                runs.append(result)
+        case["prompt_sha256"] = hashlib.sha256(json.dumps(prompt).encode()).hexdigest()
+        runs = case["runs"]
+        case["status"] = "running"
+        save_report(args.json_out, report)
+        try:
+            for index in range(args.warmup_rounds + args.rounds):
+                torch.manual_seed(20261006 + index)
+                result = fixed_batch(engine, prompt, size, args.decode_tokens + 1)
+                if index >= args.warmup_rounds:
+                    runs.append(result)
+                    save_report(args.json_out, report)
+        except Exception as exc:
+            case.update(status="failed_oom" if isinstance(exc, torch.OutOfMemoryError)
+                        else "failed", error_type=type(exc).__name__, error=str(exc))
+            report["status"] = "evaluation_failed"
+            save_report(args.json_out, report)
+            # Do not reuse an engine whose queue/state may be partially mutated.
+            raise
         medians = {key: statistics.median(run[key] for run in runs) for key in runs[0]}
-        reports.append({"prompt_tokens": length, "batch": size, "decode_forwards": args.decode_tokens,
-                        "completion_tokens": args.decode_tokens + 1, "runs": runs, **medians})
-        print(f"PERF prompt={length} bs={size} ttft={medians['ttft_ms']:.2f}ms "
+        case.update(status="completed", **medians)
+        case["decode_step_cv_percent"] = (
+            statistics.stdev(r["decode_step_ms"] for r in runs)
+            / statistics.mean(r["decode_step_ms"] for r in runs) * 100
+            if len(runs) > 1 else None)
+        save_report(args.json_out, report)
+        print(f"PERF prompt={length} bs={size} prefill_ready={medians['prefill_ready_ms']:.2f}ms "
               f"decode={medians['decode_tokens_per_s']:.2f}t/s", flush=True)
-    return {"warmup_rounds": args.warmup_rounds, "rounds": args.rounds,
-            "protocol": "real engine.step, queue=2, async output, production sampler, no profiler; prefill emits token1 then fixed decode steps",
-            "workloads": reports}
+    return performance
 
 
 def storage_bytes(tensors):
@@ -321,7 +420,7 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--mode", choices=("eager", "decode_graph", "piecewise_graph"), default="eager")
     parser.add_argument("--json-out", required=True)
-    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--rounds", type=int, default=10)
     parser.add_argument("--suite", choices=("smoke", "quality", "performance", "quality_performance"), default="smoke")
     parser.add_argument("--quality-text", help="UTF8 WikiText-2 raw test text (rows joined with two newlines)")
     parser.add_argument("--quality-context", type=int, default=512)
@@ -329,8 +428,14 @@ def main():
     parser.add_argument("--logit-block", type=int, default=32)
     parser.add_argument("--hidden-out", help="Save compact hidden states for a later candidate comparison")
     parser.add_argument("--reference-hidden", help="BF16 hidden states from the exact same head/corpus/protocol")
-    parser.add_argument("--warmup-rounds", type=int, default=2)
-    parser.add_argument("--decode-tokens", type=int, default=64, help="Number of decode forwards after prefill")
+    parser.add_argument("--warmup-rounds", type=int, default=5)
+    parser.add_argument("--decode-tokens", type=int, default=256, help="Number of decode forwards after prefill")
+    parser.add_argument("--perf-profile", choices=tuple(PERFORMANCE_PROFILES), default="batch")
+    parser.add_argument("--perf-cases", nargs="+", type=parse_perf_case,
+                        help="Override profile with PROMPT:BATCH cases, e.g. 128:16 512:8")
+    parser.add_argument("--max-num-seqs", type=int, help="Default: largest requested performance batch")
+    parser.add_argument("--max-model-len", type=int, help="Default: fit prompt + completion, at least 2048")
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.65)
     args = parser.parse_args()
     for name in ("rounds", "warmup_rounds", "decode_tokens", "logit_block"):
         if getattr(args, name) < 1:
@@ -339,19 +444,41 @@ def main():
         parser.error("Quality context and token limit must be >=2")
     if "quality" in args.suite and not args.quality_text:
         parser.error("Quality evaluation requires --quality-text")
-    if args.suite != "smoke" and (args.quality_context > 2048 or args.decode_tokens > 1023):
-        parser.error("Suite limits: quality context <=2048 and decode forwards <=1023")
+    if args.quality_context > 2048:
+        parser.error("Quality context limit: <=2048")
+    if not 0 < args.gpu_memory_utilization < 1:
+        parser.error("--gpu-memory-utilization must be between 0 and 1")
+    if args.max_num_seqs is not None and args.max_num_seqs < 1:
+        parser.error("--max-num-seqs must be positive")
+    if args.max_model_len is not None and args.max_model_len < 2:
+        parser.error("--max-model-len must be >=2")
     if "performance" in args.suite and args.mode == "piecewise_graph":
         parser.error("Controlled performance uses --mode eager or decode_graph")
     output = Path(args.json_out)
     output.parent.mkdir(parents=True, exist_ok=True)
-    engine = LLMEngine(
-        args.model, enforce_eager=args.mode == "eager",
-        use_prefill_cudagraph=args.mode == "piecewise_graph",
-        tensor_parallel_size=1, max_num_seqs=8 if args.suite != "smoke" else 4,
-        max_model_len=2048 if args.suite != "smoke" else 1024,
-        max_num_batched_tokens=512, gpu_memory_utilization=0.65,
-    )
+    perf_cases = resolve_perf_cases(args) if "performance" in args.suite else []
+    max_seqs = args.max_num_seqs or (max(b for _, b in perf_cases) if perf_cases
+                                  else 8 if args.suite != "smoke" else 4)
+    max_length = args.max_model_len or (max(2048, max(p for p, _ in perf_cases)
+                                          + args.decode_tokens + 1) if perf_cases
+                                      else 2048 if args.suite != "smoke" else 1024)
+    print(f"ENGINE_CONFIG max_num_seqs={max_seqs} max_model_len={max_length} "
+          f"gpu_memory_utilization={args.gpu_memory_utilization}", flush=True)
+    try:
+        engine = LLMEngine(
+            args.model, enforce_eager=args.mode == "eager",
+            use_prefill_cudagraph=args.mode == "piecewise_graph",
+            tensor_parallel_size=1, max_num_seqs=max_seqs,
+            max_model_len=max_length, max_num_batched_tokens=512,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+        )
+    except Exception as exc:
+        save_report(output, {"model": args.model, "mode": args.mode, "suite": args.suite,
+                             "status": "initialization_failed", "error_type": type(exc).__name__,
+                             "error": str(exc), "requested_config": {
+                                 "max_num_seqs": max_seqs, "max_model_len": max_length,
+                                 "gpu_memory_utilization": args.gpu_memory_utilization}})
+        raise
     runner = engine.model_runner
     print(f"MODEL_READY mode={args.mode} quantization={engine.config.quantization}", flush=True)
     report = {"model": args.model, "mode": args.mode, "gpu": torch.cuda.get_device_name(),
@@ -369,6 +496,9 @@ def main():
                                   "max_model_len": engine.config.max_model_len,
                                   "gpu_memory_utilization": engine.config.gpu_memory_utilization,
                                   "prefix_cache": engine.config.enable_prefix_cache,
+                                  "kv_dtype": str(runner.kv_cache.dtype),
+                                  "num_kvcache_blocks": engine.config.num_kvcache_blocks,
+                                  "kvcache_block_size": engine.config.kvcache_block_size,
                                   "queue_depth": engine.max_concurrent_batches,
                                   "async_output": runner.async_output})
             if "quality" in args.suite:
@@ -393,9 +523,11 @@ def main():
                 # Keep completed quality results if a later timing workload fails.
                 output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             if "performance" in args.suite:
-                report["performance"] = evaluate_performance(engine, args)
-            report["status"] = "evaluation_completed"
-            output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+                report["performance"] = evaluate_performance(engine, args, report)
+            skipped = sum(w["status"] == "skipped_capacity"
+                          for w in report.get("performance", {}).get("workloads", []))
+            report["status"] = "evaluation_completed_with_skips" if skipped else "evaluation_completed"
+            save_report(output, report)
             print(f"REPORT {output}", flush=True)
             return
         # Same tokens in all model variants. Disable paged KV writes for this
@@ -473,6 +605,11 @@ def main():
         report["status"] = "runtime_checks_passed"
         output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+    except Exception as exc:
+        if report.get("status") != "evaluation_failed":
+            report.update(status="evaluation_failed", error_type=type(exc).__name__, error=str(exc))
+            save_report(output, report)
+        raise
     finally:
         engine.exit()
 

@@ -1,0 +1,635 @@
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+The sky appears blue because sunlight scatters in Earth's atmosphere. Shorter wavelengths scatter more strongly, so blue light reaches our eyes from many directions.
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+春天的清晨，河边的柳树长出了新叶。小林骑车去图书馆，借了一本关于天文学的书。晚上，他把书里的星座画在笔记本上。
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
+
+推理系统先读取输入文本，再把文本转换成词元。预填充阶段处理已有上下文，解码阶段逐个生成新的词元。不同阶段的计算特点不同。
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+Attention layers weigh relevant history while feed-forward layers transform representations. KV caches avoid recomputing past tokens during autoregressive decoding.
+
+def factorial(n):
+    if n < 0:
+        raise ValueError('negative input')
+    result = 1
+    for value in range(2, n + 1):
+        result *= value
+    return result
+
+
+量化通过减少模型权重和激活使用的位数，降低显存占用。缩放系数用于在低精度数值与原始数值之间转换。评估量化需要同时检查准确率和推理速度。
