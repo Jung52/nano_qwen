@@ -1,0 +1,619 @@
+{
+  "model": "/home/wei/code/models/4b",
+  "seed": 23,
+  "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER",
+  "sm_count": 66,
+  "l2_bytes": 50331648,
+  "torch": "2.12.1+cu130",
+  "triton": "3.7.1",
+  "cuda": "13.0",
+  "protocol": {
+    "measured_rounds": 2,
+    "replays_per_sample": 1,
+    "warmup_calls_per_case": 3,
+    "cache_policy": "evicted",
+    "eviction_bytes": 100663296,
+    "timer": "CUDA timing event nodes inside graph",
+    "autotune": {
+      "candidates_per_kernel_shape": 6,
+      "warmup_calls_per_valid_candidate": 1,
+      "measured_replays_per_valid_candidate": 2,
+      "cache_key": "M,N,K,device,tensor dtypes",
+      "cold_capture": "fixed BM16/BN64; no search"
+    },
+    "unique_measured_cases": 32
+  },
+  "activations": "shared synthetic Gaussian BF16, first row zero",
+  "dram_bytes": null,
+  "counter_status": "unavailable: ERR_NVGPUCTRPERM",
+  "results": [
+    {
+      "experiment": "native",
+      "projection": "gate_up",
+      "M": 8,
+      "N": 18432,
+      "K": 2560,
+      "variant": "per_channel",
+      "activation": "token",
+      "weight_block": false,
+      "backend": "triton_autotuned",
+      "selected_config": {
+        "BM": 16,
+        "BN": 32,
+        "BK": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "activation_scale_bytes": 32,
+      "weight_scale_bytes": 73728,
+      "linear_logical_bytes": 47636544,
+      "quant_programs": 8,
+      "kernel_relative_l2": 0.0019327503396198153,
+      "bf16_reference_relative_l2": 0.03772076964378357,
+      "quant": {
+        "samples_us": [
+          7.168000098317862,
+          4.095999989658594
+        ],
+        "mean_us": 5.632000043988228,
+        "spread_pct": 54.54545604875156,
+        "measurement_id": "gate_up/8/token/quant"
+      },
+      "gemm": {
+        "samples_us": [
+          110.59200018644333,
+          107.51999914646149
+        ],
+        "mean_us": 109.05599966645241,
+        "spread_pct": 2.816902370688043,
+        "measurement_id": "gate_up/8/per_channel/gemm"
+      },
+      "linear": {
+        "samples_us": [
+          111.61600053310394,
+          111.61600053310394
+        ],
+        "mean_us": 111.61600053310394,
+        "spread_pct": 0.0,
+        "measurement_id": "gate_up/8/per_channel/linear"
+      }
+    },
+    {
+      "experiment": "native",
+      "projection": "gate_up",
+      "M": 8,
+      "N": 18432,
+      "K": 2560,
+      "variant": "block_wise",
+      "activation": "group",
+      "weight_block": true,
+      "backend": "triton_autotuned",
+      "selected_config": {
+        "BM": 16,
+        "BN": 32,
+        "BK": 128,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "activation_scale_bytes": 640,
+      "weight_scale_bytes": 11520,
+      "linear_logical_bytes": 47575552,
+      "quant_programs": 160,
+      "kernel_relative_l2": 0.0016628117300570011,
+      "bf16_reference_relative_l2": 0.037224624305963516,
+      "quant": {
+        "samples_us": [
+          7.168000098317862,
+          4.6720001846551895
+        ],
+        "mean_us": 5.9200001414865255,
+        "spread_pct": 42.16215969609623,
+        "measurement_id": "gate_up/8/group/quant"
+      },
+      "gemm": {
+        "samples_us": [
+          100.35199671983719,
+          102.11200267076492
+        ],
+        "mean_us": 101.23199969530106,
+        "spread_pct": 1.7385865696866498,
+        "measurement_id": "gate_up/8/block_wise/gemm"
+      },
+      "linear": {
+        "samples_us": [
+          101.31199657917023,
+          106.49599879980087
+        ],
+        "mean_us": 103.90399768948555,
+        "spread_pct": 4.98922306735772,
+        "measurement_id": "gate_up/8/block_wise/linear"
+      }
+    },
+    {
+      "experiment": "native",
+      "projection": "gate_up",
+      "M": 8,
+      "N": 18432,
+      "K": 2560,
+      "variant": "torch_reference",
+      "activation": "token",
+      "weight_block": false,
+      "backend": "torch",
+      "selected_config": null,
+      "activation_scale_bytes": 32,
+      "weight_scale_bytes": 73728,
+      "linear_logical_bytes": 47636544,
+      "quant_programs": 8,
+      "kernel_relative_l2": 0.0016632454935461283,
+      "bf16_reference_relative_l2": 0.037702322006225586,
+      "quant": {
+        "samples_us": [
+          7.168000098317862,
+          4.095999989658594
+        ],
+        "mean_us": 5.632000043988228,
+        "spread_pct": 54.54545604875156,
+        "measurement_id": "gate_up/8/token/quant"
+      },
+      "gemm": {
+        "samples_us": [
+          122.43200093507767,
+          123.90399724245071
+        ],
+        "mean_us": 123.16799908876419,
+        "spread_pct": 1.1951126252462825,
+        "measurement_id": "gate_up/8/torch_reference/gemm"
+      },
+      "linear": {
+        "samples_us": [
+          121.8239963054657,
+          122.91199713945389
+        ],
+        "mean_us": 122.3679967224598,
+        "spread_pct": 0.8891220442677188,
+        "measurement_id": "gate_up/8/torch_reference/linear"
+      }
+    },
+    {
+      "experiment": "native",
+      "projection": "gate_up",
+      "M": 512,
+      "N": 18432,
+      "K": 2560,
+      "variant": "per_channel",
+      "activation": "token",
+      "weight_block": false,
+      "backend": "triton_autotuned",
+      "selected_config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "activation_scale_bytes": 2048,
+      "weight_scale_bytes": 73728,
+      "linear_logical_bytes": 71380992,
+      "quant_programs": 512,
+      "kernel_relative_l2": 0.0019289529882371426,
+      "bf16_reference_relative_l2": 0.03746588155627251,
+      "quant": {
+        "samples_us": [
+          10.239999741315842,
+          11.264000087976456
+        ],
+        "mean_us": 10.751999914646149,
+        "spread_pct": 9.523812823563569,
+        "measurement_id": "gate_up/512/token/quant"
+      },
+      "gemm": {
+        "samples_us": [
+          310.2720081806183,
+          311.2959861755371
+        ],
+        "mean_us": 310.7839971780777,
+        "spread_pct": 0.3294822140832718,
+        "measurement_id": "gate_up/512/per_channel/gemm"
+      },
+      "linear": {
+        "samples_us": [
+          325.24800300598145,
+          316.99201464653015
+        ],
+        "mean_us": 321.1200088262558,
+        "spread_pct": 2.5709977991182273,
+        "measurement_id": "gate_up/512/per_channel/linear"
+      }
+    },
+    {
+      "experiment": "native",
+      "projection": "gate_up",
+      "M": 512,
+      "N": 18432,
+      "K": 2560,
+      "variant": "block_wise",
+      "activation": "group",
+      "weight_block": true,
+      "backend": "triton_autotuned",
+      "selected_config": {
+        "BM": 64,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "activation_scale_bytes": 40960,
+      "weight_scale_bytes": 11520,
+      "linear_logical_bytes": 71396608,
+      "quant_programs": 10240,
+      "kernel_relative_l2": 0.0016637040534988046,
+      "bf16_reference_relative_l2": 0.03695691004395485,
+      "quant": {
+        "samples_us": [
+          17.40800030529499,
+          20.191999152302742
+        ],
+        "mean_us": 18.799999728798866,
+        "spread_pct": 14.80850471898183,
+        "measurement_id": "gate_up/512/group/quant"
+      },
+      "gemm": {
+        "samples_us": [
+          337.92001008987427,
+          339.6480083465576
+        ],
+        "mean_us": 338.78400921821594,
+        "spread_pct": 0.5100589784833438,
+        "measurement_id": "gate_up/512/block_wise/gemm"
+      },
+      "linear": {
+        "samples_us": [
+          349.1840064525604,
+          351.23199224472046
+        ],
+        "mean_us": 350.20799934864044,
+        "spread_pct": 0.5847912657532461,
+        "measurement_id": "gate_up/512/block_wise/linear"
+      }
+    },
+    {
+      "experiment": "native",
+      "projection": "gate_up",
+      "M": 512,
+      "N": 18432,
+      "K": 2560,
+      "variant": "torch_reference",
+      "activation": "token",
+      "weight_block": false,
+      "backend": "torch",
+      "selected_config": null,
+      "activation_scale_bytes": 2048,
+      "weight_scale_bytes": 73728,
+      "linear_logical_bytes": 71380992,
+      "quant_programs": 512,
+      "kernel_relative_l2": 0.0016606805147603154,
+      "bf16_reference_relative_l2": 0.03745267540216446,
+      "quant": {
+        "samples_us": [
+          10.239999741315842,
+          11.264000087976456
+        ],
+        "mean_us": 10.751999914646149,
+        "spread_pct": 9.523812823563569,
+        "measurement_id": "gate_up/512/token/quant"
+      },
+      "gemm": {
+        "samples_us": [
+          939.6160244941711,
+          942.8799748420715
+        ],
+        "mean_us": 941.2479996681213,
+        "spread_pct": 0.34676837019055984,
+        "measurement_id": "gate_up/512/torch_reference/gemm"
+      },
+      "linear": {
+        "samples_us": [
+          962.5599980354309,
+          949.2480158805847
+        ],
+        "mean_us": 955.9040069580078,
+        "spread_pct": 1.392606585802394,
+        "measurement_id": "gate_up/512/torch_reference/linear"
+      }
+    },
+    {
+      "experiment": "native",
+      "projection": "down",
+      "M": 8,
+      "N": 2560,
+      "K": 9216,
+      "variant": "per_channel",
+      "activation": "token",
+      "weight_block": false,
+      "backend": "triton_autotuned",
+      "selected_config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "activation_scale_bytes": 32,
+      "weight_scale_bytes": 10240,
+      "linear_logical_bytes": 23939136,
+      "quant_programs": 8,
+      "kernel_relative_l2": 0.0027221229393035173,
+      "bf16_reference_relative_l2": 0.038061320781707764,
+      "quant": {
+        "samples_us": [
+          5.119999870657921,
+          5.727999843657017
+        ],
+        "mean_us": 5.423999857157469,
+        "spread_pct": 11.209439325422986,
+        "measurement_id": "down/8/token/quant"
+      },
+      "gemm": {
+        "samples_us": [
+          60.416001826524734,
+          60.416001826524734
+        ],
+        "mean_us": 60.416001826524734,
+        "spread_pct": 0.0,
+        "measurement_id": "down/8/per_channel/gemm"
+      },
+      "linear": {
+        "samples_us": [
+          64.51199948787689,
+          62.463998794555664
+        ],
+        "mean_us": 63.48799914121628,
+        "spread_pct": 3.2258075872982905,
+        "measurement_id": "down/8/per_channel/linear"
+      }
+    },
+    {
+      "experiment": "native",
+      "projection": "down",
+      "M": 8,
+      "N": 2560,
+      "K": 9216,
+      "variant": "block_wise",
+      "activation": "group",
+      "weight_block": true,
+      "backend": "triton_autotuned",
+      "selected_config": {
+        "BM": 32,
+        "BN": 64,
+        "BK": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "activation_scale_bytes": 2304,
+      "weight_scale_bytes": 5760,
+      "linear_logical_bytes": 23939200,
+      "quant_programs": 576,
+      "kernel_relative_l2": 0.0016665535513311625,
+      "bf16_reference_relative_l2": 0.03698791190981865,
+      "quant": {
+        "samples_us": [
+          7.007999811321497,
+          4.1600000113248825
+        ],
+        "mean_us": 5.58399991132319,
+        "spread_pct": 51.00286255774223,
+        "measurement_id": "down/8/group/quant"
+      },
+      "gemm": {
+        "samples_us": [
+          62.463998794555664,
+          62.463998794555664
+        ],
+        "mean_us": 62.463998794555664,
+        "spread_pct": 0.0,
+        "measurement_id": "down/8/block_wise/gemm"
+      },
+      "linear": {
+        "samples_us": [
+          55.296000093221664,
+          60.416001826524734
+        ],
+        "mean_us": 57.8560009598732,
+        "spread_pct": 8.849560371194883,
+        "measurement_id": "down/8/block_wise/linear"
+      }
+    },
+    {
+      "experiment": "native",
+      "projection": "down",
+      "M": 8,
+      "N": 2560,
+      "K": 9216,
+      "variant": "torch_reference",
+      "activation": "token",
+      "weight_block": false,
+      "backend": "torch",
+      "selected_config": null,
+      "activation_scale_bytes": 32,
+      "weight_scale_bytes": 10240,
+      "linear_logical_bytes": 23939136,
+      "quant_programs": 8,
+      "kernel_relative_l2": 0.0016578923678025603,
+      "bf16_reference_relative_l2": 0.0380355603992939,
+      "quant": {
+        "samples_us": [
+          5.119999870657921,
+          5.727999843657017
+        ],
+        "mean_us": 5.423999857157469,
+        "spread_pct": 11.209439325422986,
+        "measurement_id": "down/8/token/quant"
+      },
+      "gemm": {
+        "samples_us": [
+          68.4799998998642,
+          62.07999959588051
+        ],
+        "mean_us": 65.27999974787235,
+        "spread_pct": 9.80392207215393,
+        "measurement_id": "down/8/torch_reference/gemm"
+      },
+      "linear": {
+        "samples_us": [
+          91.13600105047226,
+          159.743994474411
+        ],
+        "mean_us": 125.43999776244164,
+        "spread_pct": 54.69387328423636,
+        "measurement_id": "down/8/torch_reference/linear"
+      }
+    },
+    {
+      "experiment": "native",
+      "projection": "down",
+      "M": 512,
+      "N": 2560,
+      "K": 9216,
+      "variant": "per_channel",
+      "activation": "token",
+      "weight_block": false,
+      "backend": "triton_autotuned",
+      "selected_config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "activation_scale_bytes": 2048,
+      "weight_scale_bytes": 10240,
+      "linear_logical_bytes": 45103104,
+      "quant_programs": 512,
+      "kernel_relative_l2": 0.0027492200024425983,
+      "bf16_reference_relative_l2": 0.03756110742688179,
+      "quant": {
+        "samples_us": [
+          26.623999699950218,
+          25.599999353289604
+        ],
+        "mean_us": 26.11199952661991,
+        "spread_pct": 3.9215700261356687,
+        "measurement_id": "down/512/token/quant"
+      },
+      "gemm": {
+        "samples_us": [
+          183.9359998703003,
+          185.34399569034576
+        ],
+        "mean_us": 184.63999778032303,
+        "spread_pct": 0.762562736661558,
+        "measurement_id": "down/512/per_channel/gemm"
+      },
+      "linear": {
+        "samples_us": [
+          209.9200040102005,
+          209.9200040102005
+        ],
+        "mean_us": 209.9200040102005,
+        "spread_pct": 0.0,
+        "measurement_id": "down/512/per_channel/linear"
+      }
+    },
+    {
+      "experiment": "native",
+      "projection": "down",
+      "M": 512,
+      "N": 2560,
+      "K": 9216,
+      "variant": "block_wise",
+      "activation": "group",
+      "weight_block": true,
+      "backend": "triton_autotuned",
+      "selected_config": {
+        "BM": 32,
+        "BN": 128,
+        "BK": 128,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "activation_scale_bytes": 147456,
+      "weight_scale_bytes": 5760,
+      "linear_logical_bytes": 45389440,
+      "quant_programs": 36864,
+      "kernel_relative_l2": 0.0016611797036603093,
+      "bf16_reference_relative_l2": 0.036944229155778885,
+      "quant": {
+        "samples_us": [
+          49.15200173854828,
+          69.63200122117996
+        ],
+        "mean_us": 59.39200147986412,
+        "spread_pct": 34.48275689037873,
+        "measurement_id": "down/512/group/quant"
+      },
+      "gemm": {
+        "samples_us": [
+          198.65599274635315,
+          223.4880030155182
+        ],
+        "mean_us": 211.07199788093567,
+        "spread_pct": 11.76471086570783,
+        "measurement_id": "down/512/block_wise/gemm"
+      },
+      "linear": {
+        "samples_us": [
+          238.5919988155365,
+          231.4240038394928
+        ],
+        "mean_us": 235.00800132751465,
+        "spread_pct": 3.0501067774514428,
+        "measurement_id": "down/512/block_wise/linear"
+      }
+    },
+    {
+      "experiment": "native",
+      "projection": "down",
+      "M": 512,
+      "N": 2560,
+      "K": 9216,
+      "variant": "torch_reference",
+      "activation": "token",
+      "weight_block": false,
+      "backend": "torch",
+      "selected_config": null,
+      "activation_scale_bytes": 2048,
+      "weight_scale_bytes": 10240,
+      "linear_logical_bytes": 45103104,
+      "quant_programs": 512,
+      "kernel_relative_l2": 0.0016541100339964032,
+      "bf16_reference_relative_l2": 0.03750233352184296,
+      "quant": {
+        "samples_us": [
+          26.623999699950218,
+          25.599999353289604
+        ],
+        "mean_us": 26.11199952661991,
+        "spread_pct": 3.9215700261356687,
+        "measurement_id": "down/512/token/quant"
+      },
+      "gemm": {
+        "samples_us": [
+          495.4879879951477,
+          489.47200179100037
+        ],
+        "mean_us": 492.47999489307404,
+        "spread_pct": 1.2215696610079592,
+        "measurement_id": "down/512/torch_reference/gemm"
+      },
+      "linear": {
+        "samples_us": [
+          506.879985332489,
+          508.92800092697144
+        ],
+        "mean_us": 507.9039931297302,
+        "spread_pct": 0.4032288822662026,
+        "measurement_id": "down/512/torch_reference/linear"
+      }
+    }
+  ]
+}

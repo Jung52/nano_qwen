@@ -298,13 +298,21 @@ class CudaGraphManager:
         outputs: tuple[torch.Tensor, ...],
     ) -> list[torch.Tensor]:
         if layer_idx not in self.piecewise_buffers["pre_out"]:
-            self.piecewise_buffers["pre_out"][layer_idx] = [
-                output.new_zeros(
-                    (max(self.prefill_graph_sizes), *output.shape[1:]),
-                    device=output.device,
-                )
-                for output in outputs
-            ]
+            # Each layer consumes its projections before the next layer runs
+            # on the same stream. Reuse compatible storage rather than retain
+            # a full M-sized QKV/z copy for every layer in every captured graph.
+            signature = tuple((tuple(output.shape[1:]), output.dtype, output.device)
+                              for output in outputs)
+            shared = self.piecewise_buffers.setdefault("pre_out_pool", {})
+            if signature not in shared:
+                shared[signature] = [
+                    output.new_zeros(
+                        (max(self.prefill_graph_sizes), *output.shape[1:]),
+                        device=output.device,
+                    )
+                    for output in outputs
+                ]
+            self.piecewise_buffers["pre_out"][layer_idx] = shared[signature]
         return self.piecewise_buffers["pre_out"][layer_idx]
 
     def _copy_pre_outputs(self, layer_idx: int, outputs, residual):

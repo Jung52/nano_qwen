@@ -47,3 +47,10 @@ trying to keep the implementation small and easy to understand.
 The final goal is to provide a small but relatively modern inference engine:
 
 **simple enough to learn, modern enough to experiment with.**
+
+## FP8 implementation and measurements
+
+See [optimization summary](docs/fp8-performance-2026-10-14.md),
+[benchmark entry points](benchmarks/README.md), and
+[retained measurement reports](benchmarks/reports/README.md).
+Production regression tests live in `tests/`.

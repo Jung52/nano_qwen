@@ -6,6 +6,11 @@ BF16/FP8 comparison without keeping two complete models in GPU memory.
 Use --suite quality_performance --quality-text <UTF8 corpus> --hidden-out
 <reference.pt> for BF16, then --reference-hidden <reference.pt> for FP8.
 Reports retain token counts, protocol, full-vocabulary metrics and raw timings.
+
+For larger workloads use --suite performance --workloads 2048:8 4096:16
+--chunked-prefill --gpu-memory-utilization 0.85. Each pair is PROMPT_TOKENS:BATCH.
+Chunked runs retain production scheduling; their decode window can include
+later requests' prefill and does not assume a constant active decode batch.
 """
 
 import argparse
@@ -45,16 +50,6 @@ PERFORMANCE_PROFILES = {
 }
 
 
-def parse_perf_case(value):
-    try:
-        length, size = map(int, value.split(":"))
-        if length < 1 or size < 1:
-            raise ValueError
-        return length, size
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("Use positive PROMPT:BATCH, e.g. 128:32") from exc
-
-
 def resolve_perf_cases(args):
     cases = args.perf_cases or PERFORMANCE_PROFILES[args.perf_profile]
     return list(dict.fromkeys(cases))
@@ -72,7 +67,7 @@ def capacity_check(engine, length, size, completion_tokens):
     if length + completion_tokens > engine.config.max_model_len:
         reasons.append("prompt plus completion exceeds max_model_len")
     if needed > available:
-        reasons.append("insufficient KV capacity without prefix sharing")
+        reasons.append(f"insufficient KV capacity without prefix sharing: need {needed} blocks, have {available}")
     return info, "; ".join(reasons)
 
 
@@ -311,6 +306,14 @@ def evaluate_performance(engine, args, report):
                                       "not client-visible first-token delivery",
         "workloads": reports,
     }
+    performance['prefill_mode'] = 'chunked' if args.chunked_prefill else 'whole_batch'
+    if args.chunked_prefill:
+        performance['protocol'] = (
+            'real engine.step, production scheduling/output/sampler; '
+            'TTFT is request median; decode throughput counts all post-first-token outputs '
+            'over last completion minus earliest first token; later prefill may share this '
+            'window and active decode batch may vary')
+        performance['prefill_latency_definition'] = 'ttft_ms measures request first-token latency'
     report["performance"] = performance
     base = engine.tokenizer.encode(TEXTS[0], add_special_tokens=False)
     if not base:
@@ -337,7 +340,14 @@ def evaluate_performance(engine, args, report):
         try:
             for index in range(args.warmup_rounds + args.rounds):
                 torch.manual_seed(20261006 + index)
-                result = fixed_batch(engine, prompt, size, args.decode_tokens + 1)
+                if args.chunked_prefill:
+                    torch.cuda.reset_peak_memory_stats()
+                    result = batch(engine, [prompt] * size, args.decode_tokens + 1)
+                    result.pop('outputs')
+                    result['torch_peak_allocated_mib'] = torch.cuda.max_memory_allocated() / 2**20
+                    result['torch_peak_reserved_mib'] = torch.cuda.max_memory_reserved() / 2**20
+                else:
+                    result = fixed_batch(engine, prompt, size, args.decode_tokens + 1)
                 if index >= args.warmup_rounds:
                     runs.append(result)
                     save_report(args.json_out, report)
@@ -353,9 +363,10 @@ def evaluate_performance(engine, args, report):
         case["decode_step_cv_percent"] = (
             statistics.stdev(r["decode_step_ms"] for r in runs)
             / statistics.mean(r["decode_step_ms"] for r in runs) * 100
-            if len(runs) > 1 else None)
+            if len(runs) > 1 and not args.chunked_prefill else None)
         save_report(args.json_out, report)
-        print(f"PERF prompt={length} bs={size} prefill_ready={medians['prefill_ready_ms']:.2f}ms "
+        latency_key = 'ttft_ms' if args.chunked_prefill else 'prefill_ready_ms'
+        print(f"PERF prompt={length} bs={size} {latency_key}={medians[latency_key]:.2f}ms "
               f"decode={medians['decode_tokens_per_s']:.2f}t/s", flush=True)
     return performance
 
@@ -411,11 +422,21 @@ def batch(engine, prompts, tokens, *, ignore_eos=True):
     window = max(result.e2e_s.values()) - min(result.ttft_s.values())
     decode_tokens = sum(len(s.completion_token_ids) - 1 for s in seqs)
     return {"outputs": result.outputs, "ttft_ms": statistics.median(result.ttft_s.values()) * 1000,
-            "decode_tokens_per_s": decode_tokens / window if decode_tokens and window > 0 else None}
+            "decode_tokens_per_s": decode_tokens / window if decode_tokens and window > 0 else None,
+            "e2e_ms": max(result.e2e_s.values()) * 1000}
 
 
-@torch.inference_mode()
-def main():
+def performance_workload(value):
+    try:
+        length, size = map(int, value.split(":"))
+    except ValueError:
+        raise argparse.ArgumentTypeError("Workload must be PROMPT_TOKENS:BATCH, e.g. 4096:16") from None
+    if length < 1 or size < 1:
+        raise argparse.ArgumentTypeError("Workload prompt length and batch must be positive")
+    return length, size
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
     parser.add_argument("--mode", choices=("eager", "decode_graph", "piecewise_graph"), default="eager")
@@ -430,14 +451,17 @@ def main():
     parser.add_argument("--reference-hidden", help="BF16 hidden states from the exact same head/corpus/protocol")
     parser.add_argument("--warmup-rounds", type=int, default=5)
     parser.add_argument("--decode-tokens", type=int, default=256, help="Number of decode forwards after prefill")
-    parser.add_argument("--perf-profile", choices=tuple(PERFORMANCE_PROFILES), default="batch")
-    parser.add_argument("--perf-cases", nargs="+", type=parse_perf_case,
+    parser.add_argument("--perf-profile", choices=tuple(PERFORMANCE_PROFILES), default="legacy")
+    parser.add_argument("--perf-cases", "--workloads", dest="workloads", nargs="+", type=performance_workload,
                         help="Override profile with PROMPT:BATCH cases, e.g. 128:16 512:8")
     parser.add_argument("--max-num-seqs", type=int, help="Default: largest requested performance batch")
     parser.add_argument("--max-model-len", type=int, help="Default: fit prompt + completion, at least 2048")
+    parser.add_argument("--max-num-batched-tokens", type=int, default=512)
+    parser.add_argument("--chunked-prefill", action="store_true")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.65)
-    args = parser.parse_args()
-    for name in ("rounds", "warmup_rounds", "decode_tokens", "logit_block"):
+    args = parser.parse_args(argv)
+    args.perf_cases = args.workloads
+    for name in ("rounds", "warmup_rounds", "decode_tokens", "logit_block", "max_num_batched_tokens"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.quality_context < 2 or args.quality_tokens < 2:
@@ -454,6 +478,26 @@ def main():
         parser.error("--max-model-len must be >=2")
     if "performance" in args.suite and args.mode == "piecewise_graph":
         parser.error("Controlled performance uses --mode eager or decode_graph")
+    if (args.workloads is not None or args.chunked_prefill) and "performance" not in args.suite:
+        parser.error("--workloads and --chunked-prefill require a performance suite")
+    args.workloads = resolve_perf_cases(args)
+    performance = "performance" in args.suite
+    required_seqs = max(size for _, size in args.workloads) if performance else 1
+    required_context = max(length for length, _ in args.workloads) + args.decode_tokens + 1 if performance else 1
+    if args.max_num_seqs is None:
+        args.max_num_seqs = max(required_seqs, 4 if args.suite == "smoke" else 8)
+    if args.max_model_len is None:
+        args.max_model_len = max(required_context, 1024 if args.suite == "smoke" else 2048)
+    if required_seqs > args.max_num_seqs:
+        parser.error("Workload batch exceeds --max-num-seqs")
+    if required_context > args.max_model_len:
+        parser.error("Workload prompt + decode tokens + 1 exceeds --max-model-len")
+    return args
+
+
+@torch.inference_mode()
+def main():
+    args = parse_args()
     output = Path(args.json_out)
     output.parent.mkdir(parents=True, exist_ok=True)
     perf_cases = resolve_perf_cases(args) if "performance" in args.suite else []
@@ -469,7 +513,7 @@ def main():
             args.model, enforce_eager=args.mode == "eager",
             use_prefill_cudagraph=args.mode == "piecewise_graph",
             tensor_parallel_size=1, max_num_seqs=max_seqs,
-            max_model_len=max_length, max_num_batched_tokens=512,
+            max_model_len=max_length, max_num_batched_tokens=args.max_num_batched_tokens,
             gpu_memory_utilization=args.gpu_memory_utilization,
         )
     except Exception as exc:
@@ -494,10 +538,11 @@ def main():
             report.update(suite=args.suite, cuda=torch.version.cuda,
                           config={"max_num_seqs": engine.config.max_num_seqs,
                                   "max_model_len": engine.config.max_model_len,
+                                  "max_num_batched_tokens": engine.config.max_num_batched_tokens,
+                                  "num_kvcache_blocks": engine.config.num_kvcache_blocks,
                                   "gpu_memory_utilization": engine.config.gpu_memory_utilization,
                                   "prefix_cache": engine.config.enable_prefix_cache,
                                   "kv_dtype": str(runner.kv_cache.dtype),
-                                  "num_kvcache_blocks": engine.config.num_kvcache_blocks,
                                   "kvcache_block_size": engine.config.kvcache_block_size,
                                   "queue_depth": engine.max_concurrent_batches,
                                   "async_output": runner.async_output})

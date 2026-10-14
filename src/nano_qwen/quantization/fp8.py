@@ -6,6 +6,7 @@ import triton
 import triton.language as tl
 
 from .base import LinearMethodBase, QuantizationConfig
+from .triton_gemm import autotune_gemm, launch_gemm
 
 
 # Read once before compilation/capture; use a fresh process for an A/B run.
@@ -64,6 +65,37 @@ def quantize_fp8_per_token(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]
     return q, scales
 
 
+@triton.jit
+def _per_channel_mm(A, W, AS, WS, Y, M: tl.constexpr, N: tl.constexpr,
+                    K: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr,
+                    DEVICE: tl.constexpr = 0):
+    rows = tl.program_id(0) * BM + tl.arange(0, BM)
+    cols = tl.program_id(1) * BN + tl.arange(0, BN)
+    kk = tl.arange(0, 128)
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for group in range(tl.cdiv(K, 128)):
+        offsets = group * 128 + kk
+        a = tl.load(A + rows[:, None] * K + offsets[None, :],
+                    (rows[:, None] < M) & (offsets[None, :] < K), 0.0)
+        w = tl.load(W + cols[None, :] * K + offsets[:, None],
+                    (cols[None, :] < N) & (offsets[:, None] < K), 0.0)
+        acc = tl.dot(a, w, acc, out_dtype=tl.float32, max_num_imprecise_acc=0)
+    sa = tl.load(AS + rows, rows < M, 0)
+    sw = tl.load(WS + cols, cols < N, 0)
+    tl.store(Y + rows[:, None] * N + cols[None, :], acc * sa[:, None] * sw[None, :],
+             (rows[:, None] < M) & (cols[None, :] < N))
+
+
+_per_channel_mm_tuned = autotune_gemm(_per_channel_mm)
+
+
+def fp8_per_channel_mm(q, weight, scales, weight_scale, out_dtype=torch.bfloat16):
+    output = torch.empty((q.shape[0], weight.shape[0]), device=q.device, dtype=out_dtype)
+    if q.shape[0]:
+        launch_gemm(_per_channel_mm_tuned, q, weight, scales, weight_scale, output)
+    return output
+
+
 class Fp8LinearMethod(LinearMethodBase):
     """E4M3 weights per output channel and dynamic per-token inputs.
 
@@ -89,7 +121,7 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.weight_scale.weight_loader = layer.weight_loader
 
     def process_weights_after_loading(self, layer):
-        # Contiguous rowwise scales for _scaled_mm; prepare before graph capture.
+        # Prepare contiguous FP32 scales before GEMM/graph capture.
         layer.weight_scale.data = layer.weight_scale.data.contiguous()
 
     def apply(self, layer, x, bias=None):
@@ -103,10 +135,8 @@ class Fp8LinearMethod(LinearMethodBase):
         """Consume call-local quantized activations shared by sibling projections."""
         if q.shape[0] == 0:
             return torch.empty(output_shape, device=q.device, dtype=layer.compute_dtype)
-        output = torch._scaled_mm(
-            q, layer.weight.t(), scales,
-            layer.weight_scale.t().contiguous(),
-            out_dtype=layer.compute_dtype, use_fast_accum=False,
+        output = fp8_per_channel_mm(
+            q, layer.weight, scales, layer.weight_scale, layer.compute_dtype,
         )
         if bias is not None:
             output.add_(bias)

@@ -11,9 +11,10 @@ import triton.language as tl
 from .base import LinearMethodBase, QuantizationConfig
 from .checkpoint import normalize_weight_name
 from .unquantized import UnquantizedLinearMethod
+from .triton_gemm import autotune_gemm, launch_gemm
 
 
-# Read once before graph capture. No device queries or online autotuning.
+# Read mode once; tuning is completed before graph capture and cached thereafter.
 _BLOCK_MODE = os.environ.get("NANO_QWEN_FP8_BLOCK_MODE", "auto")
 if _BLOCK_MODE not in ("auto", "legacy"):
     raise ValueError("NANO_QWEN_FP8_BLOCK_MODE must be auto or legacy")
@@ -101,7 +102,8 @@ def quantize_fp8_per_group(x, *, mode=None):
 
 @triton.jit
 def _block_mm(A, W, AS, WS, Y, M: tl.constexpr, N: tl.constexpr,
-              K: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr):
+              K: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr,
+              DEVICE: tl.constexpr = 0):
     rows = tl.program_id(0) * BM + tl.arange(0, BM)
     cols = tl.program_id(1) * BN + tl.arange(0, BN)
     kk = tl.arange(0, 128)
@@ -124,7 +126,8 @@ def _block_mm(A, W, AS, WS, Y, M: tl.constexpr, N: tl.constexpr,
 @triton.jit
 def _block_mm_prefill(A, W, AS, WS, Y, M: tl.constexpr, N: tl.constexpr,
                       K: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr,
-                      STAGES: tl.constexpr, GROUP_M: tl.constexpr):
+                      STAGES: tl.constexpr = 3, GROUP_M: tl.constexpr = 8,
+                      DEVICE: tl.constexpr = 0):
     pid = tl.program_id(0)
     num_m, num_n = tl.cdiv(M, BM), tl.cdiv(N, BN)
     group_id = pid // (GROUP_M * num_n)
@@ -151,11 +154,20 @@ def _block_mm_prefill(A, W, AS, WS, Y, M: tl.constexpr, N: tl.constexpr,
 
 
 def select_block_fp8_config(m, n, k, *, mode=None):
-    """None selects the unchanged decode/reference kernel; no timing side effects."""
+    """Starting tile for explicit sweeps; production uses cached autotuning."""
     if _resolve_mode(mode) == "legacy" or m < _PREFILL_MIN_ROWS:
         return None
     # Conservative starting point. Benchmark 128-row tiles separately on the target GPU.
     return PREFILL_CONFIGS[0] if m < 512 else PREFILL_CONFIGS[1]
+
+
+_block_mm_tuned = autotune_gemm(_block_mm)
+_block_mm_prefill_tuned = autotune_gemm(_block_mm_prefill)
+
+
+def fp8_block_mm(q, weight, scales, weight_scale, out_dtype=torch.bfloat16, *, mode=None):
+    output = torch.empty((q.shape[0], weight.shape[0]), device=q.device, dtype=out_dtype)
+    return block_fp8_matmul(q, weight, scales, weight_scale, output, mode=mode)
 
 
 def block_fp8_matmul(q, weight, scales, weight_scales, output, *, mode=None, config=None):
@@ -164,15 +176,14 @@ def block_fp8_matmul(q, weight, scales, weight_scales, output, *, mode=None, con
     n = weight.shape[0]
     if not m:
         return output
-    selected = select_block_fp8_config(m, n, k, mode=mode) if config is None else config
-    if selected is None:
-        _block_mm[(triton.cdiv(m, 16), triton.cdiv(n, 64))](
-            q, weight, scales, weight_scales, output, m, n, k, 16, 64, num_warps=4,
-        )
+    if config is None:
+        prefill = _resolve_mode(mode) == 'auto' and m >= _PREFILL_MIN_ROWS
+        tuned = _block_mm_prefill_tuned if prefill else _block_mm_tuned
+        launch_gemm(tuned, q, weight, scales, weight_scales, output)
     else:
-        if selected not in PREFILL_CONFIGS:
-            raise ValueError(f"Unsupported block FP8 prefill config: {selected}")
-        bm, bn, warps, stages = selected
+        if config not in PREFILL_CONFIGS:
+            raise ValueError(f"Unsupported block FP8 prefill config: {config}")
+        bm, bn, warps, stages = config
         _block_mm_prefill[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](
             q, weight, scales, weight_scales, output, m, n, k, bm, bn, stages, 8,
             num_warps=warps, num_stages=stages,
