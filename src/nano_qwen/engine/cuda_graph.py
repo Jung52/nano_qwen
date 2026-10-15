@@ -26,6 +26,8 @@ class CudaGraphManager:
         self.verify_graph_vars: dict[str, torch.Tensor] | None = None
         self.mtp_decode_graph: torch.cuda.CUDAGraph | None = None
         self.mtp_decode_graph_vars: dict[str, torch.Tensor] | None = None
+        self.mtp_cache_graph: torch.cuda.CUDAGraph | None = None
+        self.mtp_cache_graph_vars: dict[str, torch.Tensor] | None = None
 
         self.prefill_graph_sizes: list[int] = []
         self.prefill_graphs: dict[int, dict[int, dict]] = {}
@@ -46,6 +48,7 @@ class CudaGraphManager:
         if self.runner.mtp is not None:
             self._capture_verify()
             self._capture_mtp_decode()
+            self._capture_mtp_decode(cache_only=True)
         if self.runner.use_prefill_cudagraph:
             self.capture_prefill()
 
@@ -124,7 +127,7 @@ class CudaGraphManager:
         self.runner._target_hidden = hidden
         return self.runner.compute_verify_logits(hidden)
 
-    def _capture_mtp_decode(self) -> None:
+    def _capture_mtp_decode(self, cache_only: bool = False) -> None:
         max_blocks = (
             self.config.max_model_len + self.runner.block_size - 1
         ) // self.runner.block_size
@@ -147,6 +150,10 @@ class CudaGraphManager:
         )
         try:
             def forward():
+                if cache_only:
+                    self.runner.mtp.cache_only(input_ids, positions, target_hidden,
+                                               self.model.model.embed_tokens)
+                    return
                 hidden = self.runner.mtp(
                     input_ids, positions, target_hidden,
                     self.model.model.embed_tokens,
@@ -162,19 +169,36 @@ class CudaGraphManager:
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 forward()
-            self.mtp_decode_graph = graph
-            self.mtp_decode_graph_vars = {
+            buffers = {
                 "input_ids": input_ids, "positions": positions,
                 "target_hidden": target_hidden, "slot_mapping": slot_mapping,
                 "context_lens": context_lens, "block_tables": block_tables,
                 "drafts": drafts,
             }
+            if cache_only:
+                self.mtp_cache_graph, self.mtp_cache_graph_vars = graph, buffers
+            else:
+                self.mtp_decode_graph, self.mtp_decode_graph_vars = graph, buffers
         finally:
             reset_context()
 
     def run_mtp_decode(self, input_ids, positions, target_hidden, slot_mapping,
                        context_lens, block_tables):
         buffers = self.mtp_decode_graph_vars
+        self._update_mtp_buffers(buffers, input_ids, positions, target_hidden,
+                                 slot_mapping, context_lens, block_tables)
+        self.mtp_decode_graph.replay()
+        return buffers["drafts"]
+
+    def run_mtp_cache_only(self, input_ids, positions, target_hidden, slot_mapping,
+                           context_lens, block_tables):
+        self._update_mtp_buffers(self.mtp_cache_graph_vars, input_ids, positions,
+                                 target_hidden, slot_mapping, context_lens, block_tables)
+        self.mtp_cache_graph.replay()
+
+    @staticmethod
+    def _update_mtp_buffers(buffers, input_ids, positions, target_hidden,
+                            slot_mapping, context_lens, block_tables):
         buffers["input_ids"].copy_(input_ids)
         buffers["positions"].copy_(positions)
         buffers["target_hidden"].copy_(target_hidden)
@@ -182,8 +206,6 @@ class CudaGraphManager:
         buffers["context_lens"].copy_(context_lens)
         buffers["block_tables"].fill_(-1)
         buffers["block_tables"][:, :block_tables.size(1)].copy_(block_tables)
-        self.mtp_decode_graph.replay()
-        return buffers["drafts"]
 
     def _capture_decode(self) -> None:
         config = self.config
@@ -395,6 +417,8 @@ class CudaGraphManager:
         self.verify_graph_vars = None
         self.mtp_decode_graph = None
         self.mtp_decode_graph_vars = None
+        self.mtp_cache_graph = None
+        self.mtp_cache_graph_vars = None
 
     def _allocate_piecewise_buffers(
         self,

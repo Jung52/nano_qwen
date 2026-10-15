@@ -100,6 +100,14 @@ class InterleavedMRoPE(nn.Module):
         cache = torch.cat((cos, sin), dim=-1).unsqueeze_(1)
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
+    def forward_key(self, positions: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
+        """Rotate only K when appending an MTP row without evaluating Q."""
+        cos, sin = self.cos_sin_cache[positions].chunk(2, dim=-1)
+        if self.is_partial:
+            rotated = apply_rotary_emb(key[..., :self.rotary_dim], cos, sin)
+            return torch.cat((rotated, key[..., self.rotary_dim:]), dim=-1)
+        return apply_rotary_emb(key, cos, sin)
+
     def forward(
         self,
         positions: torch.Tensor,

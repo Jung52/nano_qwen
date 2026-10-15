@@ -749,8 +749,9 @@ class ModelRunner:
         target_hidden: torch.Tensor,
         input_tokens: torch.Tensor,
         positions: list[int],
-    ) -> torch.Tensor:
-        """Run the one-layer MTP head as a batched decode step."""
+        cache_only: bool = False,
+    ) -> torch.Tensor | None:
+        """Append one MTP row, optionally omitting all work after K/V store."""
         slots = self.input_batch.slots_for(seqs)
         for slot, position in zip(slots, positions):
             if position != self._mtp_cache_lens.get(slot, 0) + 1:
@@ -777,8 +778,10 @@ class ModelRunner:
             positions, dtype=torch.long, device=input_tokens.device,
         )
         context_lens = positions_gpu.to(torch.int32)
-        if self.cuda_graphs.mtp_decode_graph is not None:
-            result = self.cuda_graphs.run_mtp_decode(
+        graph = self.cuda_graphs.mtp_cache_graph if cache_only else self.cuda_graphs.mtp_decode_graph
+        if graph is not None:
+            run = self.cuda_graphs.run_mtp_cache_only if cache_only else self.cuda_graphs.run_mtp_decode
+            result = run(
                 input_tokens, positions_gpu, target_hidden, slot_mapping,
                 context_lens, block_tables,
             )
@@ -794,6 +797,11 @@ class ModelRunner:
             state_indices=None,
         )
         try:
+            if cache_only:
+                self.mtp.cache_only(input_tokens, positions_gpu, target_hidden,
+                                    self.model.model.embed_tokens)
+                self._mtp_cache_lens.update(zip(slots, positions))
+                return None
             mtp_hidden = self.mtp(
                 input_tokens,
                 positions_gpu,
@@ -964,6 +972,7 @@ class ModelRunner:
                 self._run_mtp_decode(
                     accepted_seqs, torch.stack(accepted_hidden),
                     torch.stack(accepted_inputs), accepted_positions,
+                    cache_only=True,
                 )
             self.mtp_stats["draft_tokens"] += len(mtp_seqs)
             next_drafts = self._run_mtp_decode(

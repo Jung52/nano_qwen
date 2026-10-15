@@ -29,6 +29,9 @@ class RecordedMTP:
             max_k=c.max_seqlen_k))
         return torch.zeros(len(ids), 4)
 
+    def cache_only(self, ids, positions, hidden, embedding):
+        self(ids, positions, hidden, embedding)
+
 
 @pytest.fixture
 def runner(monkeypatch):
@@ -47,7 +50,7 @@ def runner(monkeypatch):
                               compute_logits=lambda hidden: torch.zeros(len(hidden), 16))
     r._mtp_last_hidden = {}
     r._mtp_cache_lens = {}
-    r.cuda_graphs = SimpleNamespace(mtp_decode_graph=None)
+    r.cuda_graphs = SimpleNamespace(mtp_decode_graph=None, mtp_cache_graph=None)
     r.input_batch = InputBatch(1)
     r.rank = 0
     r.batch_slots_gpu = torch.tensor([0])

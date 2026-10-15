@@ -6,6 +6,7 @@ attention, GDN, scheduler, sampling, rollback and graph replay are real.
 """
 
 from types import SimpleNamespace
+from contextlib import ExitStack
 from unittest.mock import patch
 
 import pytest
@@ -162,11 +163,12 @@ def run_case(engine, length, chunk, pattern=None, max_tokens=9, eos_at=None):
             result.proposals.append((runner._mtp_cache_lens[0], engine._mtp_test_observed.latest[-1:].clone()))
         return value
 
-    def decode(*args):
-        value = original_decode(*args)
-        observed = engine._mtp_test_observed
-        hidden = observed.captured if runner.cuda_graphs.mtp_decode_graph is not None else observed.latest
-        result.proposals.append((runner._mtp_cache_lens[0], hidden.clone()))
+    def decode(*args, **kwargs):
+        value = original_decode(*args, **kwargs)
+        if not kwargs.get("cache_only", False):
+            observed = engine._mtp_test_observed
+            hidden = observed.captured if runner.cuda_graphs.mtp_decode_graph is not None else observed.latest
+            result.proposals.append((runner._mtp_cache_lens[0], hidden.clone()))
         return value
 
     def schedule():
@@ -289,6 +291,44 @@ def test_real_one_token_prefill_chunks_keep_hidden_and_cache(engine):
     baseline = run_case(engine, 129, 1, max_tokens=4)
     actual = run_case(engine, 129, 1, [True], max_tokens=4)
     compare_reference(engine, baseline, actual, 129)
+
+
+@pytest.mark.parametrize("position", [1, 128, 129, 256, 257, 512, 513])
+@torch.inference_mode()
+def test_cache_only_matches_full_kv_and_next_prediction_without_unused_work(engine, position):
+    runner = engine.model_runner
+    seq = Sequence([2] * (position + 1))
+    seq.block_table = [6, 2, 5]
+    runner.input_batch.update([seq])
+    torch.manual_seed(position)
+    runner.mtp_kv_cache.normal_(std=.02)
+    initial = runner.mtp_kv_cache.clone()
+    hidden = torch.randn(2, 128, dtype=torch.bfloat16, device="cuda")
+    tokens = torch.tensor([2, 3], device="cuda")
+    runner._mtp_cache_lens[0] = position - 1
+    runner._run_mtp_decode([seq], hidden[:1], tokens[:1], [position])
+    expected_cache = runner.mtp_kv_cache.clone()
+    expected_draft = runner._run_mtp_decode([seq], hidden[1:], tokens[1:], [position + 1]).clone()
+    runner.mtp_kv_cache.copy_(initial)
+    runner._mtp_cache_lens[0] = position - 1
+    layer = runner.mtp.layers[0]
+    forbidden = [layer.self_attn.q_proj, layer.self_attn.q_norm,
+                 layer.self_attn.attn, layer.self_attn.o_proj, layer.mlp, runner.mtp.norm]
+    try:
+        with ExitStack() as stack:
+            for module in forbidden:
+                stack.enter_context(patch.object(module, "forward", side_effect=AssertionError("unused MTP work")))
+            stack.enter_context(patch.object(runner.model, "compute_logits", side_effect=AssertionError("unused LM head")))
+            stack.enter_context(patch.object(runner.cuda_graphs, "run_mtp_decode", side_effect=AssertionError("full MTP graph")))
+            result = runner._run_mtp_decode([seq], hidden[:1], tokens[:1], [position], cache_only=True)
+        assert result is None
+        assert runner._mtp_cache_lens[0] == position
+        torch.testing.assert_close(runner.mtp_kv_cache, expected_cache, rtol=0, atol=0)
+        actual = runner._run_mtp_decode([seq], hidden[1:], tokens[1:], [position + 1])
+        torch.testing.assert_close(actual, expected_draft, rtol=0, atol=0)
+    finally:
+        runner.remove_request(seq.seq_id)
+        reset_context()
 
 
 @torch.inference_mode()

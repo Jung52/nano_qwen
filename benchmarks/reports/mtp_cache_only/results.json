@@ -1,0 +1,239 @@
+{
+  "base_commit": "0ba199fe6c1b7c170bd7526e6b3128bdde4a07da",
+  "production_source_sha256": "c117f1747d96a848184c363b93fea5edd0780e82193351d78048ef505b71eb27",
+  "gpu": "RTX4070TiSUPER16GiB",
+  "input_tokens": 64,
+  "output_tokens": 128,
+  "batch": 1,
+  "timing": "production run_mode actual127 committed decode tokens, profiler disabled",
+  "control": "same MTP engine, full catch-up vs cache-only ABBA; off engine separately reused twice; stats reset, slot lifecycle real",
+  "tests": 275,
+  "eager_gates": [
+    {
+      "quantization": "per_channel",
+      "mode": "eager",
+      "tokens": 16,
+      "exact_match": true
+    },
+    {
+      "quantization": "block_wise",
+      "mode": "eager",
+      "tokens": 16,
+      "exact_match": true
+    }
+  ],
+  "timings": [
+    {
+      "quantization": "per_channel",
+      "repeat": 1,
+      "mode": "off",
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.6127831070007232,
+        "tokens_per_s": 78.74586449270332,
+        "stop_reason": "max_tokens",
+        "windows": []
+      }
+    },
+    {
+      "quantization": "per_channel",
+      "repeat": 2,
+      "mode": "off",
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.5731871919997502,
+        "tokens_per_s": 80.7278375045531,
+        "stop_reason": "max_tokens",
+        "windows": []
+      }
+    },
+    {
+      "quantization": "per_channel",
+      "repeat": 1,
+      "mode": "full_catchup",
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 2.0475271700015583,
+        "tokens_per_s": 62.02603895112334,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 67,
+        "accepted_tokens": 60,
+        "rejected_tokens": 6,
+        "verify_steps": 66
+      }
+    },
+    {
+      "quantization": "per_channel",
+      "repeat": 1,
+      "mode": "cache_only",
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.855236026996863,
+        "tokens_per_s": 68.45490177634133,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 67,
+        "accepted_tokens": 60,
+        "rejected_tokens": 6,
+        "verify_steps": 66
+      }
+    },
+    {
+      "quantization": "per_channel",
+      "repeat": 2,
+      "mode": "cache_only",
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.8372159789978468,
+        "tokens_per_s": 69.12633106384976,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 67,
+        "accepted_tokens": 60,
+        "rejected_tokens": 6,
+        "verify_steps": 66
+      }
+    },
+    {
+      "quantization": "per_channel",
+      "repeat": 2,
+      "mode": "full_catchup",
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.9789626780002436,
+        "tokens_per_s": 64.17503544247455,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 67,
+        "accepted_tokens": 60,
+        "rejected_tokens": 6,
+        "verify_steps": 66
+      }
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 1,
+      "mode": "off",
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.5307745819991396,
+        "tokens_per_s": 82.96453409498237,
+        "stop_reason": "max_tokens",
+        "windows": []
+      }
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 2,
+      "mode": "off",
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.5342027740007325,
+        "tokens_per_s": 82.77914898356153,
+        "stop_reason": "max_tokens",
+        "windows": []
+      }
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 1,
+      "mode": "full_catchup",
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 2.0542788849998033,
+        "tokens_per_s": 61.822180487442516,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 70,
+        "accepted_tokens": 57,
+        "rejected_tokens": 13,
+        "verify_steps": 70
+      }
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 1,
+      "mode": "cache_only",
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.8837475859982078,
+        "tokens_per_s": 67.41879907052517,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 70,
+        "accepted_tokens": 57,
+        "rejected_tokens": 13,
+        "verify_steps": 70
+      }
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 2,
+      "mode": "cache_only",
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.8851226000006136,
+        "tokens_per_s": 67.36962359899492,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 70,
+        "accepted_tokens": 57,
+        "rejected_tokens": 13,
+        "verify_steps": 70
+      }
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 2,
+      "mode": "full_catchup",
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 2.095714881001186,
+        "tokens_per_s": 60.599846453983425,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 70,
+        "accepted_tokens": 57,
+        "rejected_tokens": 13,
+        "verify_steps": 70
+      }
+    }
+  ]
+}

@@ -24,7 +24,9 @@ from torch import nn
 from safetensors import safe_open
 
 from nano_qwen.layers.layernorm import GemmaRMSNorm
+from nano_qwen.layers.attention import store_kvcache
 from nano_qwen.models.qwen3_5 import Qwen3_5DecoderLayer
+from nano_qwen.utils.context import get_context
 from nano_qwen.utils.loader import default_weight_loader
 
 
@@ -61,16 +63,32 @@ class Qwen3_5MTP(nn.Module):
         Input row i uses the target's hidden state at position i and the
         *actual next token* at position i+1. Caller supplies causal Context.
         """
+        hidden = self._prepare_input(input_ids, positions, target_hidden, shared_embedding)
+        hidden, residual = self.layers[0](positions, hidden, None)
+        hidden, _ = self.norm(hidden, residual)
+        return hidden
+
+    def _prepare_input(self, input_ids, positions, target_hidden, shared_embedding):
         if input_ids.ndim != 1 or positions.shape != input_ids.shape:
             raise ValueError("input_ids and positions must be packed 1-D tensors")
         if target_hidden.shape != (input_ids.numel(), self.fc.out_features):
             raise ValueError("target_hidden must have one row per MTP input")
         embeddings = self.pre_fc_norm_embedding(shared_embedding(input_ids))
         hidden = self.pre_fc_norm_hidden(target_hidden)
-        hidden = self.fc(torch.cat((embeddings, hidden), dim=-1))
-        hidden, residual = self.layers[0](positions, hidden, None)
-        hidden, _ = self.norm(hidden, residual)
-        return hidden
+        return self.fc(torch.cat((embeddings, hidden), dim=-1))
+
+    def cache_only(self, input_ids, positions, target_hidden, shared_embedding):
+        """Append exact single-layer K/V; no query, attention, MLP or head."""
+        hidden = self._prepare_input(input_ids, positions, target_hidden, shared_embedding)
+        layer = self.layers[0]
+        hidden = layer.input_layernorm(hidden)
+        attention = layer.self_attn
+        key = attention.k_proj(hidden).view(-1, attention.num_kv_heads, attention.head_dim)
+        value = attention.v_proj(hidden).view_as(key)
+        key = attention.k_norm(key.reshape(-1, attention.head_dim)).reshape_as(key)
+        key = attention.rotary_emb.forward_key(positions, key)
+        store_kvcache(key, value, attention.attn.k_cache, attention.attn.v_cache,
+                      get_context().slot_mapping)
 
 
 def load_mtp_weights(module: Qwen3_5MTP, model_path: str | Path) -> None:
