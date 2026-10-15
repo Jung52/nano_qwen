@@ -58,30 +58,39 @@ engine = LLMEngine(
 ```
 
 The path loads `mtp.*` weights, allocates a separate MTP KV cache, drafts one
-token, verifies a two-token target batch, and rolls back both full-attention
+token, verifies two target tokens, and rolls back both full-attention
 KV bookkeeping and GDN recurrent state after rejection. It currently supports
 greedy sampling only (`temperature <= 1e-6`); stochastic rejection sampling,
 tensor parallelism, and multi-request batching are not implemented.
 
-For hybrid GDN checkpoints, verify uses a two-row CUDA Graph. The GDN layers
-process the two rows recurrently and keep the state after the first row for
-rejection rollback. Full-attention layers use two-query paged attention, and
-the one-layer MTP decode has its own CUDA Graph. Run the production comparison
-with:
+Verify captures two sequential B1 target forwards in one CUDA Graph and keeps
+the GDN state after the first row for rejection rollback. The LM head also
+processes each row separately to preserve ordinary greedy decode arithmetic.
+The one-layer MTP decode has its own CUDA Graph. This correctness path retains
+two target forwards; acceleration must be measured rather than assumed.
+
+MTP RoPE positions start at 1, while its cache rows start at 0. Accepted draft
+and bonus pairs are appended in order. Chunked prefill preserves the preceding
+hidden state and cumulative cache length; preemption replay resets recurrent
+and MTP state before rebuilding the prefix.
+
+Converted FP8 targets can use `mtp_model="/path/to/original/checkpoint"` to
+load the original BF16 MTP weights independently. The source must use the same
+model architecture and effective RoPE configuration. Run a strict comparison:
 
 ```bash
 python benchmarks/bench_qwen3_5_mtp_production.py \
-  --model /path/to/qwen3.5 \
-  --prompt-tokens 129 \
-  --max-tokens 10240 \
-  --duration 120 \
-  --allow-numerical-drift
+  --model /path/to/fp8-target \
+  --mtp-model /path/to/original/checkpoint \
+  --prompt-tokens 64 \
+  --max-tokens 128 \
+  --duration 60
 ```
 
-The benchmark fails on greedy token mismatch by default. Long runs may use
-`--allow-numerical-drift` because a two-query verification kernel and a
-one-query decode kernel can select a different top-1 token after a close
-logit comparison; the benchmark reports the matching prefix and divergence.
+The benchmark counts actual committed decode tokens, excluding the first
+token produced by prefill. Any greedy token mismatch fails, including with
+the legacy `--allow-numerical-drift` flag. A speedup is reported only after the
+compared prefix matches; duration-limited runs may compare different lengths.
 
 For a production-path long-decode stress test, run:
 
@@ -93,8 +102,7 @@ python benchmarks/bench_qwen3_5_mtp_production.py \
 
 This runs baseline and MTP for 120 seconds each, allows up to 32768 completion
 tokens so the token cap does not end the test early, and prints throughput and
-acceptance in 30-second windows. A numerical divergence is reported without
-ending the throughput test.
+acceptance in 30-second windows. Token divergence makes the comparison fail.
 
 ## Project Goal
 

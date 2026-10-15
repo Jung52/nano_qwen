@@ -97,9 +97,9 @@ class Scheduler:
             ):
                 seq.append_token(seq.draft_token)
                 seq.is_speculative = True
-                # Two rows are verified by the target and the accepted-row
-                # sampler immediately writes one MTP KV row beyond them.
-                if self.block_manager.ensure_capacity(seq, 3):
+                # Target verify and shifted MTP catch-up both fit within the
+                # same two-row extent; RoPE positions do not add a cache row.
+                if self.block_manager.ensure_capacity(seq, 2):
                     seq.num_scheduled_tokens = 2
                     seq.is_prefill = True
                     self.in_flight.add(seq.seq_id)

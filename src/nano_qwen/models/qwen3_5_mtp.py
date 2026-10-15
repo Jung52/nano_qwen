@@ -110,6 +110,11 @@ def load_mtp_weights(module: Qwen3_5MTP, model_path: str | Path) -> None:
                     shard = 1
                 param = parameters[name]
                 weight = checkpoint.get_tensor(key)
+                if weight.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+                    raise ValueError(
+                        f"MTP weights must be unquantized BF16/FP16/FP32: {key}; "
+                        "use mtp_model to select the original checkpoint"
+                    )
                 loader = getattr(param, "weight_loader", default_weight_loader)
                 if shard is None:
                     if param.shape != weight.shape:

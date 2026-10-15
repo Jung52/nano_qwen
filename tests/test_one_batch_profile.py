@@ -1,8 +1,27 @@
 """Prevent double counting GPU annotations and mixing profile with latency."""
 
+from types import SimpleNamespace
+
 import pytest
 
 import bench_one_batch as bench
+
+
+@pytest.mark.parametrize("extra,kwargs", [((), {}), ((False,), {}), ((), {"is_verify": False})])
+def test_path_audit_forwards_runner_optional_verify_argument(extra, kwargs):
+    import torch
+    from bench_fp8_pressure import path_audit
+    calls = []
+    def original(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 17
+    runner = SimpleNamespace(enforce_eager=True, run_model=original)
+    ids, positions = torch.tensor([2]), torch.tensor([3])
+    with path_audit(runner) as counts:
+        assert runner.run_model(ids, positions, False, *extra, **kwargs) == 17
+    assert calls == [((ids, positions, False, *extra), kwargs)]
+    assert counts == {"eager/rows1": 1}
+    assert runner.run_model is original
 
 
 def event(name, category, start, duration):

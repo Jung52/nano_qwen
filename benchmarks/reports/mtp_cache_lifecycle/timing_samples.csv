@@ -1,0 +1,17 @@
+experiment,version,quantization,enable_mtp,repeat,decode_tokens,decode_elapsed_s,decode_tokens_per_s,prefill_engine_step_ms,accepted_tokens,verify_steps
+mtp_production,fixed,per_channel,False,1,127,1.5285469919999741,83.0854403984213,,,
+mtp_production,fixed,per_channel,True,1,127,1.979647352000029,64.15284008623681,,60,66
+mtp_production,fixed,block_wise,False,1,127,1.527006103999156,83.16928116226455,,,
+mtp_production,fixed,block_wise,True,1,127,2.0775159940003505,61.13069664289601,,57,70
+mtp_production,fixed,per_channel,False,2,127,1.5269059370002651,83.17473717438165,,,
+mtp_production,fixed,per_channel,True,2,127,2.0613920030009467,61.60885450953293,,60,66
+mtp_production,fixed,block_wise,False,2,127,1.5603944109989243,81.38967885606426,,,
+mtp_production,fixed,block_wise,True,2,127,2.1216184370005067,59.8599624631607,,57,70
+mtp_off_regression,base8322,per_channel,False,1,127,1.541759171999729,82.37343568728406,32.80798699961451,,
+mtp_off_regression,base8322,per_channel,False,2,127,1.5489239479993557,81.99240522043554,33.94826700059639,,
+mtp_off_regression,base8322,block_wise,False,1,127,1.4901859540004807,85.22426322638593,33.69271299925458,,
+mtp_off_regression,base8322,block_wise,False,2,127,1.4901802329986822,85.22459041376393,34.52699700028461,,
+mtp_off_regression,fixed,per_channel,False,1,127,1.5257057609996991,83.24016546728177,63.29628999992565,,
+mtp_off_regression,fixed,per_channel,False,2,127,1.5207436090004194,83.5117762444366,33.35651399902417,,
+mtp_off_regression,fixed,block_wise,False,1,127,1.5259213449990057,83.22840519678473,38.17202400023234,,
+mtp_off_regression,fixed,block_wise,False,2,127,1.5287430130010762,83.07478688042292,50.254768999366206,,

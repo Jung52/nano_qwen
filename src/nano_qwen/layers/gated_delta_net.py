@@ -294,6 +294,15 @@ class GatedDeltaNet(nn.Module):
         # The next verification overwrites the snapshot on the GPU.
         pass
 
+    def save_speculative_state(self, state_indices: torch.Tensor):
+        """Save the authoritative prefix before evaluating the draft row."""
+        if self._speculative_conv_state is None:
+            raise RuntimeError("MTP state snapshots have not been allocated")
+        self._speculative_conv_state.index_copy_(
+            0, state_indices, self.conv_states.index_select(0, state_indices))
+        self._speculative_recurrent_state.index_copy_(
+            0, state_indices, self.recurrent_states.index_select(0, state_indices))
+
     def rollback_speculative_state(self, slot: int):
         if self._speculative_conv_state is None:
             return
@@ -336,14 +345,7 @@ class GatedDeltaNet(nn.Module):
                     state_index,
                 )
                 if self._speculative_conv_state is not None:
-                    self._speculative_conv_state.index_copy_(
-                        0, state_index,
-                        self.conv_states.index_select(0, state_index),
-                    )
-                    self._speculative_recurrent_state.index_copy_(
-                        0, state_index,
-                        self.recurrent_states.index_select(0, state_index),
-                    )
+                    self.save_speculative_state(state_index)
                 for position in range(start + 1, end):
                     outputs.append(self._forward_decode(
                         hidden_states[0, position:position + 1].unsqueeze(0),

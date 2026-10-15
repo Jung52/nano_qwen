@@ -1,0 +1,1161 @@
+{
+  "environment": {
+    "gpu": "RTX 4070 Ti SUPER 16 GiB",
+    "torch": "2.12.1+cu130",
+    "triton": "3.7.1"
+  },
+  "sources": {
+    "base_commit": "8322fe2395f398b25bce11677265d3491cfc8d6c",
+    "baseline_src_sha256": "66b40276a3a6c2b2a6354e2583dac417895705b9870cf0be2967d1476fe300ad",
+    "fixed_src_sha256": "4c46b20275f2598b96d7efa42729238987b5f2facfb1fcfc7c8380ed09ff901a",
+    "benchmark_sha256": {
+      "bench_one_batch.py": "58b6078c19b196c104cdfcbf028de1fbb16aa8224520fb5b124ca8916a421173",
+      "bench_fp8_pressure.py": "2a2c2a8c774fa98e7b3dd16cb9de5205db657e13e7eef2dee3018bd9ecd0ec1a",
+      "bench_qwen3_5_mtp_production.py": "8096d971aa936a32b4358d13e67d22df59616df0400a12376e441c91e293c5cc"
+    },
+    "note": "Hashes refer to measured source bytes. Archived8322 production src is unchanged; both off controls use the same path_audit argument-forwarding harness fix."
+  },
+  "formal_mtp": [
+    {
+      "quantization": "per_channel",
+      "repeat": 1,
+      "batch_size": 1,
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "decode_tokens": 127,
+      "mode": "graph",
+      "correctness": "exact completion match",
+      "baseline": {
+        "tokens": 127,
+        "elapsed_s": 1.5285469919999741,
+        "tokens_per_s": 83.0854403984213,
+        "stop_reason": "max_tokens",
+        "windows": []
+      },
+      "mtp": {
+        "tokens": 127,
+        "elapsed_s": 1.979647352000029,
+        "tokens_per_s": 64.15284008623681,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 67,
+        "accepted_tokens": 60,
+        "rejected_tokens": 6,
+        "verify_steps": 66
+      },
+      "speedup": 0.7721309507249813
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 1,
+      "batch_size": 1,
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "decode_tokens": 127,
+      "mode": "graph",
+      "correctness": "exact completion match",
+      "baseline": {
+        "tokens": 127,
+        "elapsed_s": 1.527006103999156,
+        "tokens_per_s": 83.16928116226455,
+        "stop_reason": "max_tokens",
+        "windows": []
+      },
+      "mtp": {
+        "tokens": 127,
+        "elapsed_s": 2.0775159940003505,
+        "tokens_per_s": 61.13069664289601,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 70,
+        "accepted_tokens": 57,
+        "rejected_tokens": 13,
+        "verify_steps": 70
+      },
+      "speedup": 0.7350153300427003
+    },
+    {
+      "quantization": "per_channel",
+      "repeat": 2,
+      "batch_size": 1,
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "decode_tokens": 127,
+      "mode": "graph",
+      "correctness": "exact completion match",
+      "baseline": {
+        "tokens": 127,
+        "elapsed_s": 1.5269059370002651,
+        "tokens_per_s": 83.17473717438165,
+        "stop_reason": "max_tokens",
+        "windows": []
+      },
+      "mtp": {
+        "tokens": 127,
+        "elapsed_s": 2.0613920030009467,
+        "tokens_per_s": 61.60885450953293,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 67,
+        "accepted_tokens": 60,
+        "rejected_tokens": 6,
+        "verify_steps": 66
+      },
+      "speedup": 0.740715950570011
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 2,
+      "batch_size": 1,
+      "input_tokens": 64,
+      "output_tokens": 128,
+      "decode_tokens": 127,
+      "mode": "graph",
+      "correctness": "exact completion match",
+      "baseline": {
+        "tokens": 127,
+        "elapsed_s": 1.5603944109989243,
+        "tokens_per_s": 81.38967885606426,
+        "stop_reason": "max_tokens",
+        "windows": []
+      },
+      "mtp": {
+        "tokens": 127,
+        "elapsed_s": 2.1216184370005067,
+        "tokens_per_s": 59.8599624631607,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 70,
+        "accepted_tokens": 57,
+        "rejected_tokens": 13,
+        "verify_steps": 70
+      },
+      "speedup": 0.7354736288985934
+    }
+  ],
+  "mtp_off_controls": [
+    {
+      "version": "base8322",
+      "quantization": "per_channel",
+      "summary": {
+        "args": {
+          "model": "/home/wei/code/models/4b-channel-fp8",
+          "batch_size": 1,
+          "input_len": 64,
+          "decode_steps": 127,
+          "warmup_rounds": 1,
+          "timing_rounds": 2,
+          "profile_rounds": 0,
+          "profile_decode_steps": 127,
+          "profile_skip_decode": 0,
+          "workload_memory": true,
+          "max_model_len": 256,
+          "gpu_memory_utilization": 0.9,
+          "enforce_eager": false,
+          "disable_prefill_cudagraph": false,
+          "queue_depth": 2,
+          "sync_output": false,
+          "trace_stage": "all",
+          "record_shapes": false,
+          "with_stack": false,
+          "profile_memory": false,
+          "seed": 42,
+          "output_dir": "/home/wei/code/nano_qwen/logs/mtp-cache-lifecycle/off-base8322-per_channel"
+        },
+        "source": {
+          "commit": "8322fe2395f398b25bce11677265d3491cfc8d6c",
+          "status": "M ../../../src/nano_qwen/layers/linear.py\n?? ../../../craft.py",
+          "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "source_sha256": "645329c20c64acf4ef7713d38f56ccdd6ea7a8dcf2d7c10fa3314255ad220a17",
+          "benchmark_sha256": "2a2c2a8c774fa98e7b3dd16cb9de5205db657e13e7eef2dee3018bd9ecd0ec1a"
+        },
+        "entrypoint_sha256": "58b6078c19b196c104cdfcbf028de1fbb16aa8224520fb5b124ca8916a421173",
+        "telemetry_before": {
+          "fields": [
+            "name",
+            "uuid",
+            "driver_version",
+            "memory.total",
+            "memory.used",
+            "utilization.gpu",
+            "temperature.gpu",
+            "power.draw",
+            "clocks.sm",
+            "clocks.mem"
+          ],
+          "rows": [
+            [
+              "NVIDIA GeForce RTX 4070 Ti SUPER",
+              " GPU-f6f19ed1-e546-6940-df24-d4636df44846",
+              " 616.92",
+              " 16376",
+              " 1012",
+              " 4",
+              " 36",
+              " 37.35",
+              " 210",
+              " 10501"
+            ]
+          ],
+          "error": null
+        },
+        "torch": "2.12.1+cu130",
+        "cuda": "13.0",
+        "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER",
+        "tensor_parallel_size": 1,
+        "timing_samples": [
+          {
+            "wall_ms": 1574.5671589993435,
+            "prefill_engine_step_ms": 32.80798699961451,
+            "decode_wall_ms": 1541.759171999729,
+            "decode_mean_step_ms": 12.139835999997866,
+            "decode_tokens_per_s": 82.37343568728406,
+            "round": 1,
+            "seed": 43,
+            "paths": {
+              "prefill_piecewise/rows64": 1,
+              "decode_graph/rows1": 127
+            },
+            "memory": {
+              "allocated_bytes": 5578906112,
+              "reserved_bytes": 5765070848,
+              "peak_allocated_bytes": 5613506048,
+              "peak_reserved_bytes": 5765070848,
+              "device_used_bytes": 7271350272,
+              "device_total_bytes": 17170956288,
+              "allocator_retries": 0,
+              "allocator_ooms": 0
+            }
+          },
+          {
+            "wall_ms": 1582.8722149999521,
+            "prefill_engine_step_ms": 33.94826700059639,
+            "decode_wall_ms": 1548.9239479993557,
+            "decode_mean_step_ms": 12.196251559050046,
+            "decode_tokens_per_s": 81.99240522043554,
+            "round": 2,
+            "seed": 44,
+            "paths": {
+              "prefill_piecewise/rows64": 1,
+              "decode_graph/rows1": 127
+            },
+            "memory": {
+              "allocated_bytes": 5578907648,
+              "reserved_bytes": 5765070848,
+              "peak_allocated_bytes": 5613507584,
+              "peak_reserved_bytes": 5765070848,
+              "device_used_bytes": 7271350272,
+              "device_total_bytes": 17170956288,
+              "allocator_retries": 0,
+              "allocator_ooms": 0
+            }
+          }
+        ],
+        "profiles": [],
+        "notes": [
+          "Formal timing has profiler disabled and a synchronized prefill/decode boundary.",
+          "TPOT = decode wall time / decode steps, without division by batch.",
+          "Profile device sums and gaps are diagnostic; not unprofiled end-to-end latency.",
+          "Synthetic fixed-length workload; no model-quality assessment."
+        ],
+        "engine": {
+          "kv_blocks": 2,
+          "prefill_graph_sizes": [
+            64
+          ],
+          "decode_graph_sizes": [
+            1,
+            2,
+            4,
+            8
+          ],
+          "inference_mode_initialization": true,
+          "quantization_methods": {
+            "Fp8LinearMethod": 168
+          }
+        },
+        "last_warmup_pass": {
+          "wall_ms": 1757.532010000432,
+          "prefill_engine_step_ms": 119.02791200009233,
+          "decode_wall_ms": 1638.5040980003396,
+          "decode_mean_step_ms": 12.901607070868815,
+          "decode_tokens_per_s": 77.50972375045819
+        },
+        "memory_after": {
+          "allocated_bytes": 5578907648,
+          "reserved_bytes": 5765070848,
+          "peak_allocated_bytes": 5613507584,
+          "peak_reserved_bytes": 5765070848,
+          "device_used_bytes": 7271350272,
+          "device_total_bytes": 17170956288,
+          "allocator_retries": 0,
+          "allocator_ooms": 0
+        },
+        "telemetry_after": {
+          "fields": [
+            "name",
+            "uuid",
+            "driver_version",
+            "memory.total",
+            "memory.used",
+            "utilization.gpu",
+            "temperature.gpu",
+            "power.draw",
+            "clocks.sm",
+            "clocks.mem"
+          ],
+          "rows": [
+            [
+              "NVIDIA GeForce RTX 4070 Ti SUPER",
+              " GPU-f6f19ed1-e546-6940-df24-d4636df44846",
+              " 616.92",
+              " 16376",
+              " 6859",
+              " 94",
+              " 44",
+              " 160.80",
+              " 2805",
+              " 10501"
+            ]
+          ],
+          "error": null
+        },
+        "status": "ok"
+      }
+    },
+    {
+      "version": "base8322",
+      "quantization": "block_wise",
+      "summary": {
+        "args": {
+          "model": "/home/wei/code/models/4b_block_fp8",
+          "batch_size": 1,
+          "input_len": 64,
+          "decode_steps": 127,
+          "warmup_rounds": 1,
+          "timing_rounds": 2,
+          "profile_rounds": 0,
+          "profile_decode_steps": 127,
+          "profile_skip_decode": 0,
+          "workload_memory": true,
+          "max_model_len": 256,
+          "gpu_memory_utilization": 0.9,
+          "enforce_eager": false,
+          "disable_prefill_cudagraph": false,
+          "queue_depth": 2,
+          "sync_output": false,
+          "trace_stage": "all",
+          "record_shapes": false,
+          "with_stack": false,
+          "profile_memory": false,
+          "seed": 42,
+          "output_dir": "/home/wei/code/nano_qwen/logs/mtp-cache-lifecycle/off-base8322-block_wise"
+        },
+        "source": {
+          "commit": "8322fe2395f398b25bce11677265d3491cfc8d6c",
+          "status": "M ../../../src/nano_qwen/layers/linear.py\n?? ../../../craft.py",
+          "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "source_sha256": "645329c20c64acf4ef7713d38f56ccdd6ea7a8dcf2d7c10fa3314255ad220a17",
+          "benchmark_sha256": "2a2c2a8c774fa98e7b3dd16cb9de5205db657e13e7eef2dee3018bd9ecd0ec1a"
+        },
+        "entrypoint_sha256": "58b6078c19b196c104cdfcbf028de1fbb16aa8224520fb5b124ca8916a421173",
+        "telemetry_before": {
+          "fields": [
+            "name",
+            "uuid",
+            "driver_version",
+            "memory.total",
+            "memory.used",
+            "utilization.gpu",
+            "temperature.gpu",
+            "power.draw",
+            "clocks.sm",
+            "clocks.mem"
+          ],
+          "rows": [
+            [
+              "NVIDIA GeForce RTX 4070 Ti SUPER",
+              " GPU-f6f19ed1-e546-6940-df24-d4636df44846",
+              " 616.92",
+              " 16376",
+              " 1005",
+              " 3",
+              " 37",
+              " 38.44",
+              " 360",
+              " 10501"
+            ]
+          ],
+          "error": null
+        },
+        "torch": "2.12.1+cu130",
+        "cuda": "13.0",
+        "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER",
+        "tensor_parallel_size": 1,
+        "timing_samples": [
+          {
+            "wall_ms": 1523.8786669997353,
+            "prefill_engine_step_ms": 33.69271299925458,
+            "decode_wall_ms": 1490.1859540004807,
+            "decode_mean_step_ms": 11.733747669295123,
+            "decode_tokens_per_s": 85.22426322638593,
+            "round": 1,
+            "seed": 43,
+            "paths": {
+              "prefill_piecewise/rows64": 1,
+              "decode_graph/rows1": 127
+            },
+            "memory": {
+              "allocated_bytes": 5575281152,
+              "reserved_bytes": 5760876544,
+              "peak_allocated_bytes": 5609881088,
+              "peak_reserved_bytes": 5760876544,
+              "device_used_bytes": 7267155968,
+              "device_total_bytes": 17170956288,
+              "allocator_retries": 0,
+              "allocator_ooms": 0
+            }
+          },
+          {
+            "wall_ms": 1524.7072299989668,
+            "prefill_engine_step_ms": 34.52699700028461,
+            "decode_wall_ms": 1490.1802329986822,
+            "decode_mean_step_ms": 11.733702622036867,
+            "decode_tokens_per_s": 85.22459041376393,
+            "round": 2,
+            "seed": 44,
+            "paths": {
+              "prefill_piecewise/rows64": 1,
+              "decode_graph/rows1": 127
+            },
+            "memory": {
+              "allocated_bytes": 5575282688,
+              "reserved_bytes": 5760876544,
+              "peak_allocated_bytes": 5609882624,
+              "peak_reserved_bytes": 5760876544,
+              "device_used_bytes": 7267155968,
+              "device_total_bytes": 17170956288,
+              "allocator_retries": 0,
+              "allocator_ooms": 0
+            }
+          }
+        ],
+        "profiles": [],
+        "notes": [
+          "Formal timing has profiler disabled and a synchronized prefill/decode boundary.",
+          "TPOT = decode wall time / decode steps, without division by batch.",
+          "Profile device sums and gaps are diagnostic; not unprofiled end-to-end latency.",
+          "Synthetic fixed-length workload; no model-quality assessment."
+        ],
+        "engine": {
+          "kv_blocks": 2,
+          "prefill_graph_sizes": [
+            64
+          ],
+          "decode_graph_sizes": [
+            1,
+            2,
+            4,
+            8
+          ],
+          "inference_mode_initialization": true,
+          "quantization_methods": {
+            "Fp8BlockLinearMethod": 168
+          }
+        },
+        "last_warmup_pass": {
+          "wall_ms": 1645.7973500000662,
+          "prefill_engine_step_ms": 107.46581800049171,
+          "decode_wall_ms": 1538.3315319995745,
+          "decode_mean_step_ms": 12.112846708658067,
+          "decode_tokens_per_s": 82.55697641126889
+        },
+        "memory_after": {
+          "allocated_bytes": 5575282688,
+          "reserved_bytes": 5760876544,
+          "peak_allocated_bytes": 5609882624,
+          "peak_reserved_bytes": 5760876544,
+          "device_used_bytes": 7267155968,
+          "device_total_bytes": 17170956288,
+          "allocator_retries": 0,
+          "allocator_ooms": 0
+        },
+        "telemetry_after": {
+          "fields": [
+            "name",
+            "uuid",
+            "driver_version",
+            "memory.total",
+            "memory.used",
+            "utilization.gpu",
+            "temperature.gpu",
+            "power.draw",
+            "clocks.sm",
+            "clocks.mem"
+          ],
+          "rows": [
+            [
+              "NVIDIA GeForce RTX 4070 Ti SUPER",
+              " GPU-f6f19ed1-e546-6940-df24-d4636df44846",
+              " 616.92",
+              " 16376",
+              " 6837",
+              " 96",
+              " 45",
+              " 169.85",
+              " 2805",
+              " 10501"
+            ]
+          ],
+          "error": null
+        },
+        "status": "ok"
+      }
+    },
+    {
+      "version": "fixed",
+      "quantization": "per_channel",
+      "summary": {
+        "args": {
+          "model": "/home/wei/code/models/4b-channel-fp8",
+          "batch_size": 1,
+          "input_len": 64,
+          "decode_steps": 127,
+          "warmup_rounds": 1,
+          "timing_rounds": 2,
+          "profile_rounds": 0,
+          "profile_decode_steps": 127,
+          "profile_skip_decode": 0,
+          "workload_memory": true,
+          "max_model_len": 256,
+          "gpu_memory_utilization": 0.9,
+          "enforce_eager": false,
+          "disable_prefill_cudagraph": false,
+          "queue_depth": 2,
+          "sync_output": false,
+          "trace_stage": "all",
+          "record_shapes": false,
+          "with_stack": false,
+          "profile_memory": false,
+          "seed": 42,
+          "output_dir": "/home/wei/code/nano_qwen/logs/mtp-cache-lifecycle/off-fixed-per_channel"
+        },
+        "source": {
+          "commit": "8322fe2395f398b25bce11677265d3491cfc8d6c",
+          "status": "M README.md\n M benchmarks/bench_fp8_pressure.py\n M benchmarks/bench_qwen3_5_mtp_production.py\n M src/nano_qwen/config/config.py\n M src/nano_qwen/engine/cuda_graph.py\n M src/nano_qwen/engine/model_runner.py\n M src/nano_qwen/layers/gated_delta_net.py\n M src/nano_qwen/models/qwen3_5.py\n M src/nano_qwen/models/qwen3_5_mtp.py\n M src/nano_qwen/scheduler/scheduler.py\n M tests/test_one_batch_profile.py\n?? docs/superpowers/plans/2026-10-15-mtp-cache-lifecycle.md\n?? src/nano_qwen/utils/rope.py\n?? tests/test_mtp_cache_integration.py\n?? tests/test_mtp_cache_lifecycle.py\n?? tests/test_mtp_weights.py",
+          "diff_sha256": "bfb64c938b16b38faf91b1df1d6404627a3422c49885921e20c7d19c8bbd0297",
+          "source_sha256": "1aad5a0b476c1c88086588a05bcd712b410f3553be6c1c04f37f3c4f286828cd",
+          "benchmark_sha256": "2a2c2a8c774fa98e7b3dd16cb9de5205db657e13e7eef2dee3018bd9ecd0ec1a"
+        },
+        "entrypoint_sha256": "58b6078c19b196c104cdfcbf028de1fbb16aa8224520fb5b124ca8916a421173",
+        "telemetry_before": {
+          "fields": [
+            "name",
+            "uuid",
+            "driver_version",
+            "memory.total",
+            "memory.used",
+            "utilization.gpu",
+            "temperature.gpu",
+            "power.draw",
+            "clocks.sm",
+            "clocks.mem"
+          ],
+          "rows": [
+            [
+              "NVIDIA GeForce RTX 4070 Ti SUPER",
+              " GPU-f6f19ed1-e546-6940-df24-d4636df44846",
+              " 616.92",
+              " 16376",
+              " 1006",
+              " 4",
+              " 38",
+              " 38.31",
+              " 315",
+              " 10501"
+            ]
+          ],
+          "error": null
+        },
+        "torch": "2.12.1+cu130",
+        "cuda": "13.0",
+        "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER",
+        "tensor_parallel_size": 1,
+        "timing_samples": [
+          {
+            "wall_ms": 1589.0020509996248,
+            "prefill_engine_step_ms": 63.29628999992565,
+            "decode_wall_ms": 1525.7057609996991,
+            "decode_mean_step_ms": 12.013431188974009,
+            "decode_tokens_per_s": 83.24016546728177,
+            "round": 1,
+            "seed": 43,
+            "paths": {
+              "prefill_piecewise/rows64": 1,
+              "decode_graph/rows1": 127
+            },
+            "memory": {
+              "allocated_bytes": 5578906112,
+              "reserved_bytes": 5765070848,
+              "peak_allocated_bytes": 5613506048,
+              "peak_reserved_bytes": 5765070848,
+              "device_used_bytes": 7271350272,
+              "device_total_bytes": 17170956288,
+              "allocator_retries": 0,
+              "allocator_ooms": 0
+            }
+          },
+          {
+            "wall_ms": 1554.1001229994436,
+            "prefill_engine_step_ms": 33.35651399902417,
+            "decode_wall_ms": 1520.7436090004194,
+            "decode_mean_step_ms": 11.974359125987554,
+            "decode_tokens_per_s": 83.5117762444366,
+            "round": 2,
+            "seed": 44,
+            "paths": {
+              "prefill_piecewise/rows64": 1,
+              "decode_graph/rows1": 127
+            },
+            "memory": {
+              "allocated_bytes": 5578907648,
+              "reserved_bytes": 5765070848,
+              "peak_allocated_bytes": 5613507584,
+              "peak_reserved_bytes": 5765070848,
+              "device_used_bytes": 7271350272,
+              "device_total_bytes": 17170956288,
+              "allocator_retries": 0,
+              "allocator_ooms": 0
+            }
+          }
+        ],
+        "profiles": [],
+        "notes": [
+          "Formal timing has profiler disabled and a synchronized prefill/decode boundary.",
+          "TPOT = decode wall time / decode steps, without division by batch.",
+          "Profile device sums and gaps are diagnostic; not unprofiled end-to-end latency.",
+          "Synthetic fixed-length workload; no model-quality assessment."
+        ],
+        "engine": {
+          "kv_blocks": 2,
+          "prefill_graph_sizes": [
+            64
+          ],
+          "decode_graph_sizes": [
+            1,
+            2,
+            4,
+            8
+          ],
+          "inference_mode_initialization": true,
+          "quantization_methods": {
+            "Fp8LinearMethod": 168
+          }
+        },
+        "last_warmup_pass": {
+          "wall_ms": 1662.756306999654,
+          "prefill_engine_step_ms": 134.56263700027193,
+          "decode_wall_ms": 1528.193669999382,
+          "decode_mean_step_ms": 12.033021023617183,
+          "decode_tokens_per_s": 83.10464994927727
+        },
+        "memory_after": {
+          "allocated_bytes": 5578907648,
+          "reserved_bytes": 5765070848,
+          "peak_allocated_bytes": 5613507584,
+          "peak_reserved_bytes": 5765070848,
+          "device_used_bytes": 7271350272,
+          "device_total_bytes": 17170956288,
+          "allocator_retries": 0,
+          "allocator_ooms": 0
+        },
+        "telemetry_after": {
+          "fields": [
+            "name",
+            "uuid",
+            "driver_version",
+            "memory.total",
+            "memory.used",
+            "utilization.gpu",
+            "temperature.gpu",
+            "power.draw",
+            "clocks.sm",
+            "clocks.mem"
+          ],
+          "rows": [
+            [
+              "NVIDIA GeForce RTX 4070 Ti SUPER",
+              " GPU-f6f19ed1-e546-6940-df24-d4636df44846",
+              " 616.92",
+              " 16376",
+              " 6825",
+              " 95",
+              " 45",
+              " 163.70",
+              " 2805",
+              " 10501"
+            ]
+          ],
+          "error": null
+        },
+        "status": "ok"
+      }
+    },
+    {
+      "version": "fixed",
+      "quantization": "block_wise",
+      "summary": {
+        "args": {
+          "model": "/home/wei/code/models/4b_block_fp8",
+          "batch_size": 1,
+          "input_len": 64,
+          "decode_steps": 127,
+          "warmup_rounds": 1,
+          "timing_rounds": 2,
+          "profile_rounds": 0,
+          "profile_decode_steps": 127,
+          "profile_skip_decode": 0,
+          "workload_memory": true,
+          "max_model_len": 256,
+          "gpu_memory_utilization": 0.9,
+          "enforce_eager": false,
+          "disable_prefill_cudagraph": false,
+          "queue_depth": 2,
+          "sync_output": false,
+          "trace_stage": "all",
+          "record_shapes": false,
+          "with_stack": false,
+          "profile_memory": false,
+          "seed": 42,
+          "output_dir": "/home/wei/code/nano_qwen/logs/mtp-cache-lifecycle/off-fixed-block_wise"
+        },
+        "source": {
+          "commit": "8322fe2395f398b25bce11677265d3491cfc8d6c",
+          "status": "M README.md\n M benchmarks/bench_fp8_pressure.py\n M benchmarks/bench_qwen3_5_mtp_production.py\n M src/nano_qwen/config/config.py\n M src/nano_qwen/engine/cuda_graph.py\n M src/nano_qwen/engine/model_runner.py\n M src/nano_qwen/layers/gated_delta_net.py\n M src/nano_qwen/models/qwen3_5.py\n M src/nano_qwen/models/qwen3_5_mtp.py\n M src/nano_qwen/scheduler/scheduler.py\n M tests/test_one_batch_profile.py\n?? docs/superpowers/plans/2026-10-15-mtp-cache-lifecycle.md\n?? src/nano_qwen/utils/rope.py\n?? tests/test_mtp_cache_integration.py\n?? tests/test_mtp_cache_lifecycle.py\n?? tests/test_mtp_weights.py",
+          "diff_sha256": "bfb64c938b16b38faf91b1df1d6404627a3422c49885921e20c7d19c8bbd0297",
+          "source_sha256": "1aad5a0b476c1c88086588a05bcd712b410f3553be6c1c04f37f3c4f286828cd",
+          "benchmark_sha256": "2a2c2a8c774fa98e7b3dd16cb9de5205db657e13e7eef2dee3018bd9ecd0ec1a"
+        },
+        "entrypoint_sha256": "58b6078c19b196c104cdfcbf028de1fbb16aa8224520fb5b124ca8916a421173",
+        "telemetry_before": {
+          "fields": [
+            "name",
+            "uuid",
+            "driver_version",
+            "memory.total",
+            "memory.used",
+            "utilization.gpu",
+            "temperature.gpu",
+            "power.draw",
+            "clocks.sm",
+            "clocks.mem"
+          ],
+          "rows": [
+            [
+              "NVIDIA GeForce RTX 4070 Ti SUPER",
+              " GPU-f6f19ed1-e546-6940-df24-d4636df44846",
+              " 616.92",
+              " 16376",
+              " 1008",
+              " 4",
+              " 38",
+              " 38.36",
+              " 330",
+              " 10501"
+            ]
+          ],
+          "error": null
+        },
+        "torch": "2.12.1+cu130",
+        "cuda": "13.0",
+        "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER",
+        "tensor_parallel_size": 1,
+        "timing_samples": [
+          {
+            "wall_ms": 1564.093368999238,
+            "prefill_engine_step_ms": 38.17202400023234,
+            "decode_wall_ms": 1525.9213449990057,
+            "decode_mean_step_ms": 12.015128700779572,
+            "decode_tokens_per_s": 83.22840519678473,
+            "round": 1,
+            "seed": 43,
+            "paths": {
+              "prefill_piecewise/rows64": 1,
+              "decode_graph/rows1": 127
+            },
+            "memory": {
+              "allocated_bytes": 5575281152,
+              "reserved_bytes": 5760876544,
+              "peak_allocated_bytes": 5609881088,
+              "peak_reserved_bytes": 5760876544,
+              "device_used_bytes": 7267155968,
+              "device_total_bytes": 17170956288,
+              "allocator_retries": 0,
+              "allocator_ooms": 0
+            }
+          },
+          {
+            "wall_ms": 1578.9977820004424,
+            "prefill_engine_step_ms": 50.254768999366206,
+            "decode_wall_ms": 1528.7430130010762,
+            "decode_mean_step_ms": 12.037346559063591,
+            "decode_tokens_per_s": 83.07478688042292,
+            "round": 2,
+            "seed": 44,
+            "paths": {
+              "prefill_piecewise/rows64": 1,
+              "decode_graph/rows1": 127
+            },
+            "memory": {
+              "allocated_bytes": 5575282688,
+              "reserved_bytes": 5760876544,
+              "peak_allocated_bytes": 5609882624,
+              "peak_reserved_bytes": 5760876544,
+              "device_used_bytes": 7267155968,
+              "device_total_bytes": 17170956288,
+              "allocator_retries": 0,
+              "allocator_ooms": 0
+            }
+          }
+        ],
+        "profiles": [],
+        "notes": [
+          "Formal timing has profiler disabled and a synchronized prefill/decode boundary.",
+          "TPOT = decode wall time / decode steps, without division by batch.",
+          "Profile device sums and gaps are diagnostic; not unprofiled end-to-end latency.",
+          "Synthetic fixed-length workload; no model-quality assessment."
+        ],
+        "engine": {
+          "kv_blocks": 2,
+          "prefill_graph_sizes": [
+            64
+          ],
+          "decode_graph_sizes": [
+            1,
+            2,
+            4,
+            8
+          ],
+          "inference_mode_initialization": true,
+          "quantization_methods": {
+            "Fp8BlockLinearMethod": 168
+          }
+        },
+        "last_warmup_pass": {
+          "wall_ms": 1715.5006869998033,
+          "prefill_engine_step_ms": 119.538664999709,
+          "decode_wall_ms": 1595.9620220000943,
+          "decode_mean_step_ms": 12.566630094488932,
+          "decode_tokens_per_s": 79.57582840275913
+        },
+        "memory_after": {
+          "allocated_bytes": 5575282688,
+          "reserved_bytes": 5760876544,
+          "peak_allocated_bytes": 5609882624,
+          "peak_reserved_bytes": 5760876544,
+          "device_used_bytes": 7267155968,
+          "device_total_bytes": 17170956288,
+          "allocator_retries": 0,
+          "allocator_ooms": 0
+        },
+        "telemetry_after": {
+          "fields": [
+            "name",
+            "uuid",
+            "driver_version",
+            "memory.total",
+            "memory.used",
+            "utilization.gpu",
+            "temperature.gpu",
+            "power.draw",
+            "clocks.sm",
+            "clocks.mem"
+          ],
+          "rows": [
+            [
+              "NVIDIA GeForce RTX 4070 Ti SUPER",
+              " GPU-f6f19ed1-e546-6940-df24-d4636df44846",
+              " 616.92",
+              " 16376",
+              " 6850",
+              " 86",
+              " 45",
+              " 165.09",
+              " 2805",
+              " 10501"
+            ]
+          ],
+          "error": null
+        },
+        "status": "ok"
+      }
+    }
+  ],
+  "diagnostic_traces": [
+    {
+      "mode": "eager",
+      "profiled_steps": 8,
+      "committed_decode_tokens": 14,
+      "stats": {
+        "draft_tokens": 8,
+        "accepted_tokens": 6,
+        "rejected_tokens": 2,
+        "verify_steps": 8
+      },
+      "device_categories": {
+        "copy_memset": {
+          "calls": 1040,
+          "device_sum_ms": 1.9889570000000067
+        },
+        "other": {
+          "calls": 25892,
+          "device_sum_ms": 96.26635599999899
+        },
+        "state_index_copy": {
+          "calls": 1758,
+          "device_sum_ms": 10.968373000000074
+        },
+        "activation_quantization": {
+          "calls": 2688,
+          "device_sum_ms": 7.330943000000153
+        },
+        "fp8_gemm": {
+          "calls": 2688,
+          "device_sum_ms": 141.90792199999993
+        },
+        "convolution": {
+          "calls": 384,
+          "device_sum_ms": 2.825650000000011
+        },
+        "norm_gate_activation_rope": {
+          "calls": 2062,
+          "device_sum_ms": 6.574998999999974
+        },
+        "gdn": {
+          "calls": 384,
+          "device_sum_ms": 2.49556
+        },
+        "attention": {
+          "calls": 156,
+          "device_sum_ms": 4.835971000000003
+        },
+        "bf16_gemm": {
+          "calls": 128,
+          "device_sum_ms": 78.41670599999999
+        }
+      },
+      "cpu_ops": {
+        "cudaEventSynchronize": {
+          "calls": 16,
+          "self_cpu_ms": 0.0659540000000734,
+          "cpu_total_ms": 0.0659540000000734
+        },
+        "cudaStreamSynchronize": {
+          "calls": 106,
+          "self_cpu_ms": 73.749307,
+          "cpu_total_ms": 73.749307
+        },
+        "aten::index_select": {
+          "calls": 894,
+          "self_cpu_ms": 7.125055999998424,
+          "cpu_total_ms": 23.505095999998716
+        },
+        "aten::index_copy_": {
+          "calls": 864,
+          "self_cpu_ms": 10.24672399999698,
+          "cpu_total_ms": 23.84083799999827
+        },
+        "aten::item": {
+          "calls": 8,
+          "self_cpu_ms": 0.03332200000010198,
+          "cpu_total_ms": 36.62743600000022
+        },
+        "aten::_local_scalar_dense": {
+          "calls": 8,
+          "self_cpu_ms": 0.1154820000002219,
+          "cpu_total_ms": 36.59411400000012
+        },
+        "cudaDeviceSynchronize": {
+          "calls": 2,
+          "self_cpu_ms": 0.01726300000003539,
+          "cpu_total_ms": 0.01726300000003539
+        }
+      },
+      "gdn_state_bytes_per_request": 26345472,
+      "trace": "/home/wei/code/nano_qwen/logs/mtp-cache-lifecycle/block-eager.trace.json",
+      "diagnostic_only": true,
+      "state_scopes": {
+        "mtp/save_speculative_state": {
+          "host_calls": 192,
+          "host_scope_ms": 33.383900000000004,
+          "device_annotation_calls": 192,
+          "physical_device_event_count": 768,
+          "physical_device_sum_ms": 5.46456899999999
+        },
+        "mtp/rollback_speculative_state": {
+          "host_calls": 48,
+          "host_scope_ms": 9.069919999999998,
+          "device_annotation_calls": 48,
+          "physical_device_event_count": 240,
+          "physical_device_sum_ms": 1.3598460000000014
+        }
+      },
+      "notes": [
+        "Profiler diagnostics only, not formal throughput.",
+        "Physical GPU events exclude annotation durations.",
+        "Graph snapshots were captured before instrumentation, so their state_scopes are empty. state_index_copy includes baseline convolution-state copies, snapshots, rollback, and embedding reads.",
+        "aten::item CPU time includes waiting for preceding GPU work and overlaps device time; it is not additive removable CPU overhead."
+      ]
+    },
+    {
+      "mode": "graph",
+      "profiled_steps": 8,
+      "committed_decode_tokens": 14,
+      "stats": {
+        "draft_tokens": 8,
+        "accepted_tokens": 6,
+        "rejected_tokens": 2,
+        "verify_steps": 8
+      },
+      "device_categories": {
+        "copy_memset": {
+          "calls": 1194,
+          "device_sum_ms": 1.151896000000013
+        },
+        "other": {
+          "calls": 25914,
+          "device_sum_ms": 43.40307999999424
+        },
+        "state_index_copy": {
+          "calls": 1758,
+          "device_sum_ms": 5.5815729999999215
+        },
+        "activation_quantization": {
+          "calls": 2688,
+          "device_sum_ms": 3.5008210000001436
+        },
+        "fp8_gemm": {
+          "calls": 2688,
+          "device_sum_ms": 144.04845299999997
+        },
+        "convolution": {
+          "calls": 384,
+          "device_sum_ms": 1.1878600000000046
+        },
+        "norm_gate_activation_rope": {
+          "calls": 2062,
+          "device_sum_ms": 3.1702909999999984
+        },
+        "gdn": {
+          "calls": 384,
+          "device_sum_ms": 1.5002179999999978
+        },
+        "attention": {
+          "calls": 156,
+          "device_sum_ms": 2.371783999999999
+        },
+        "bf16_gemm": {
+          "calls": 128,
+          "device_sum_ms": 68.711357
+        }
+      },
+      "cpu_ops": {
+        "cudaEventSynchronize": {
+          "calls": 16,
+          "self_cpu_ms": 0.025839000000017678,
+          "cpu_total_ms": 0.025839000000017678
+        },
+        "cudaStreamSynchronize": {
+          "calls": 106,
+          "self_cpu_ms": 276.4044070000001,
+          "cpu_total_ms": 276.4044070000001
+        },
+        "aten::item": {
+          "calls": 8,
+          "self_cpu_ms": 0.04685200000006444,
+          "cpu_total_ms": 237.94747400000003
+        },
+        "aten::_local_scalar_dense": {
+          "calls": 8,
+          "self_cpu_ms": 0.12129399999998713,
+          "cpu_total_ms": 237.90062199999997
+        },
+        "aten::index_select": {
+          "calls": 96,
+          "self_cpu_ms": 0.8380959999999904,
+          "cpu_total_ms": 3.016505000000005
+        },
+        "aten::index_copy_": {
+          "calls": 96,
+          "self_cpu_ms": 1.057159000000218,
+          "cpu_total_ms": 2.992721999999965
+        },
+        "cudaDeviceSynchronize": {
+          "calls": 2,
+          "self_cpu_ms": 0.017914000000047964,
+          "cpu_total_ms": 0.017914000000047964
+        }
+      },
+      "gdn_state_bytes_per_request": 26345472,
+      "trace": "/home/wei/code/nano_qwen/logs/mtp-cache-lifecycle/block-graph.trace.json",
+      "diagnostic_only": true,
+      "state_scopes": {
+        "mtp/save_speculative_state": {
+          "host_calls": 0,
+          "host_scope_ms": 0.0,
+          "device_annotation_calls": 0,
+          "physical_device_event_count": 0,
+          "physical_device_sum_ms": 0.0
+        },
+        "mtp/rollback_speculative_state": {
+          "host_calls": 48,
+          "host_scope_ms": 12.978543,
+          "device_annotation_calls": 48,
+          "physical_device_event_count": 240,
+          "physical_device_sum_ms": 0.9969199999999999
+        }
+      },
+      "notes": [
+        "Profiler diagnostics only, not formal throughput.",
+        "Physical GPU events exclude annotation durations.",
+        "Graph snapshots were captured before instrumentation, so their state_scopes are empty. state_index_copy includes baseline convolution-state copies, snapshots, rollback, and embedding reads.",
+        "aten::item CPU time includes waiting for preceding GPU work and overlaps device time; it is not additive removable CPU overhead."
+      ]
+    }
+  ],
+  "validation": {
+    "full_pytest_passed": 261,
+    "cpu_lifecycle": 105,
+    "cuda_integration": 36,
+    "weights_and_benchmark_gate": 13,
+    "short_real_model_gates": {
+      "channel-eager": {
+        "compared_tokens": 16,
+        "exact_match": true,
+        "stdout": "BASELINE tokens=15 elapsed=2.236s throughput=6.71tok/s stop=max_tokens\nMTP2 tokens=15 elapsed=1.073s throughput=13.98tok/s acceptance=87.5000% verify_steps=8 stop=max_tokens\nMATCH prefix=16 divergence=none\nCORRECTNESS PASS compared_tokens=16\nRESULT speedup=2.083x\n"
+      },
+      "channel-graph": {
+        "compared_tokens": 16,
+        "exact_match": true,
+        "stdout": "BASELINE tokens=15 elapsed=0.290s throughput=51.74tok/s stop=max_tokens\nMTP2 tokens=15 elapsed=0.283s throughput=52.97tok/s acceptance=87.5000% verify_steps=8 stop=max_tokens\nMATCH prefix=16 divergence=none\nCORRECTNESS PASS compared_tokens=16\nRESULT speedup=1.024x\n"
+      },
+      "block-eager": {
+        "compared_tokens": 16,
+        "exact_match": true,
+        "stdout": "BASELINE tokens=15 elapsed=2.447s throughput=6.13tok/s stop=max_tokens\nMTP2 tokens=15 elapsed=1.706s throughput=8.79tok/s acceptance=75.0000% verify_steps=8 stop=max_tokens\nMATCH prefix=16 divergence=none\nCORRECTNESS PASS compared_tokens=16\nRESULT speedup=1.434x\n"
+      },
+      "block-graph": {
+        "compared_tokens": 16,
+        "exact_match": true,
+        "stdout": "BASELINE tokens=15 elapsed=0.237s throughput=63.19tok/s stop=max_tokens\nMTP2 tokens=15 elapsed=0.258s throughput=58.17tok/s acceptance=75.0000% verify_steps=8 stop=max_tokens\nMATCH prefix=16 divergence=none\nCORRECTNESS PASS compared_tokens=16\nRESULT speedup=0.921x\n"
+      }
+    }
+  },
+  "limitations": [
+    "Greedy TP1 B1 only; B4/8 guards preserved.",
+    "Two formal samples per configuration; no statistical guarantee of performance equivalence.",
+    "MTP prompt prefill eager in both production modes; off control uses prefill graph.",
+    "All formal pairs compare full128 completion tokens exactly; only127 actual decode tokens are timed.",
+    "Profiler diagnostics are separate; index-copy group includes baseline state copies and embeddings; aten::item waits overlap device execution."
+  ]
+}

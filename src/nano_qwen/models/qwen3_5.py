@@ -27,23 +27,7 @@ from nano_qwen.layers.rotary_embedding import InterleavedMRoPE
 from nano_qwen.quantization import QuantizationConfig
 from nano_qwen.quantization.fp8 import project_shared_fp8_input
 from nano_qwen.utils.context import get_context
-
-
-def _rope_config(config: Qwen3_5TextConfig) -> tuple[float, float, list[int]]:
-    """Read both current and early Qwen3.5 RoPE config layouts."""
-    rope = getattr(config, "rope_parameters", None)
-    if not isinstance(rope, dict):
-        rope = getattr(config, "rope_scaling", None)
-    if not isinstance(rope, dict):
-        rope = {}
-
-    base = rope.get("rope_theta", getattr(config, "rope_theta", 10_000_000.0))
-    partial = rope.get(
-        "partial_rotary_factor",
-        getattr(config, "partial_rotary_factor", 0.25),
-    )
-    section = rope.get("mrope_section", [11, 11, 10])
-    return float(base), float(partial), list(section)
+from nano_qwen.utils.rope import rope_config as _rope_config
 
 
 class Qwen3_5Attention(nn.Module):

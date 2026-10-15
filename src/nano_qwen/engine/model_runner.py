@@ -1,6 +1,7 @@
 import pickle
 import socket
 from contextlib import contextmanager
+from dataclasses import fields
 
 import torch
 import torch.distributed as dist
@@ -145,6 +146,7 @@ class ModelRunner:
         self.mtp_kv_cache = None
         self._target_hidden = None
         self._mtp_last_hidden: dict[int, torch.Tensor] = {}
+        self._mtp_cache_lens: dict[int, int] = {}
         self.mtp_stats = {
             "draft_tokens": 0,
             "accepted_tokens": 0,
@@ -174,7 +176,7 @@ class ModelRunner:
         self.input_batch.clear()
         if self.config.enable_mtp:
             self.mtp = Qwen3_5MTP(hf_config).eval()
-            load_mtp_weights(self.mtp, config.model)
+            load_mtp_weights(self.mtp, config.mtp_model or config.model)
         self.allocate_kv_cache()
         if not self.enforce_eager:
             self.capture_cudagraph()
@@ -209,6 +211,7 @@ class ModelRunner:
         self._pending = None
         self._target_hidden = None
         self._mtp_last_hidden.clear()
+        self._mtp_cache_lens.clear()
         self.cuda_graphs.clear()
         for name in ("gdn_layers", "decode_gpu", "decode_cpu",
                      "_output_pin_bufs", "_output_events"):
@@ -515,6 +518,36 @@ class ModelRunner:
         return input_ids, positions, temperatures
 
     @torch.inference_mode()
+    def forward_verify(self, input_ids: torch.Tensor, positions: torch.Tensor):
+        """Verify two rows with the ordinary B1 decode arithmetic.
+
+        Different GEMV/GEMM and attention shapes can flip greedy top-1.
+        Keep one graph boundary but execute each target row as ordinary
+        decode, taking the rollback snapshot after its authoritative row.
+        """
+        context = get_context()
+        if input_ids.numel() != 2 or context.state_indices.numel() != 1:
+            raise ValueError("MTP2 verification requires one request and two rows")
+        hidden = []
+        try:
+            for row in range(2):
+                set_context(False,
+                    slot_mapping=context.slot_mapping[row:row + 1],
+                    context_lens=context.context_lens - (1 - row),
+                    block_tables=context.block_tables, state_indices=context.state_indices)
+                hidden.append(self.model(input_ids[row:row + 1], positions[row:row + 1]))
+                if row == 0:
+                    for layer in self.gdn_layers:
+                        layer.save_speculative_state(context.state_indices)
+            return torch.cat(hidden, dim=0)
+        finally:
+            set_context(**{field.name: getattr(context, field.name) for field in fields(context)})
+
+    def compute_verify_logits(self, hidden: torch.Tensor):
+        # The vocabulary head must also keep the baseline's M=1 path.
+        return torch.cat([self.model.compute_logits(row.unsqueeze(0)) for row in hidden], dim=0)
+
+    @torch.inference_mode()
     def run_model(
         self,
         input_ids: torch.Tensor,
@@ -530,18 +563,20 @@ class ModelRunner:
             mode = "prefill" if is_prefill else "decode"
 
         if self.enforce_eager or not self.cuda_graphs.decode_graphs:
-            hidden = self.model.model(input_ids, positions)
+            hidden = (self.forward_verify(input_ids, positions) if is_verify
+                      else self.model.model(input_ids, positions))
             self._target_hidden = hidden
-            return self.model.compute_logits(hidden)
+            return self.compute_verify_logits(hidden) if is_verify else self.model.compute_logits(hidden)
         if is_verify and self.cuda_graphs.verify_graph is not None:
             return self.cuda_graphs.run_verify(input_ids, positions)
         if mode == "prefill" and self.use_prefill_cudagraph:
             return self.cuda_graphs.run_prefill(input_ids, positions)
 
         if is_prefill:
-            hidden = self.model.model(input_ids, positions)
+            hidden = (self.forward_verify(input_ids, positions) if is_verify
+                      else self.model.model(input_ids, positions))
             self._target_hidden = hidden
-            return self.model.compute_logits(hidden)
+            return self.compute_verify_logits(hidden) if is_verify else self.model.compute_logits(hidden)
 
         # Decode / spec_decode: dispatch through the graph manager.
         return self.cuda_graphs.run_decode(input_ids, positions)
@@ -556,6 +591,15 @@ class ModelRunner:
         self.input_batch.remove_finished()
         seqs, new_entries = self.input_batch.update(seqs)
         slots = self.input_batch.slots_for(seqs)
+        reset_slots = {slot for _, slot in new_entries}
+        if is_prefill:
+            # Preemption keeps the InputBatch slot but discards its KV blocks.
+            # A replay from zero must rebuild all recurrent and MTP state.
+            reset_slots.update(slot for seq, slot in zip(seqs, slots)
+                               if seq.num_cached_tokens == 0 and not seq.is_speculative)
+        for slot in reset_slots:
+            self._mtp_last_hidden.pop(slot, None)
+            self._mtp_cache_lens[slot] = 0
 
         if self.rank == 0:
             for seq, slot in new_entries:
@@ -574,9 +618,9 @@ class ModelRunner:
         )
         self.batch_slots_gpu[:len(seqs)].copy_(slots_t, non_blocking=True) #copy current batch slots to GPU for kernel access
 
-        if new_entries and self.gdn_layers:
+        if reset_slots and self.gdn_layers:
             new_slots = torch.tensor(
-                [slot for _, slot in new_entries],
+                sorted(reset_slots),
                 dtype=torch.int64,
                 device=self.batch_slots_gpu.device,
             )
@@ -621,6 +665,8 @@ class ModelRunner:
         hidden_rows: list[torch.Tensor] = []
 
         previous_hidden = self._mtp_last_hidden.get(slot)
+        if start == 0:
+            self._mtp_cache_lens[slot] = 0
         if start > 0:
             assert previous_hidden is not None
             input_ids.append(seq[start])
@@ -636,8 +682,15 @@ class ModelRunner:
             hidden_rows.append(target_hidden[-1])
 
         count = len(input_ids)
+        # A one-token first chunk emits no shifted pair, but its hidden is
+        # still the left-hand input of the first pair in the next chunk.
+        self._mtp_last_hidden[slot] = target_hidden[-1].detach().clone()
         if count == 0:
             return None
+        cached = self._mtp_cache_lens.get(slot, 0)
+        if positions != list(range(cached + 1, cached + count + 1)):
+            raise RuntimeError("MTP prefill must append contiguous cache rows")
+        cache_end = cached + count
         input_ids_gpu = torch.tensor(
             input_ids, dtype=torch.long, pin_memory=True
         ).cuda(non_blocking=True)
@@ -646,11 +699,12 @@ class ModelRunner:
         ).cuda(non_blocking=True)
         hidden = torch.stack(hidden_rows, dim=0)
         boundaries = torch.tensor([0, count], dtype=torch.int32, device=hidden.device)
+        key_boundaries = torch.tensor([0, cache_end], dtype=torch.int32, device=hidden.device)
         slot_mapping = torch.tensor(
             [
-                block_id * self.block_size + position % self.block_size
+                block_id * self.block_size + (position - 1) % self.block_size
                 for position in positions
-                for block_id in (seq.block_table[position // self.block_size],)
+                for block_id in (seq.block_table[(position - 1) // self.block_size],)
             ],
             dtype=torch.int32,
             device=hidden.device,
@@ -659,13 +713,12 @@ class ModelRunner:
             [seq.block_table], dtype=torch.int32, pin_memory=True
         ).cuda(non_blocking=True)
 
-        self._mtp_last_hidden[slot] = target_hidden[-1].detach().clone()
         set_context(
             True,
             cu_seqlens_q=boundaries,
-            cu_seqlens_k=boundaries,
+            cu_seqlens_k=key_boundaries,
             max_seqlen_q=count,
-            max_seqlen_k=count,
+            max_seqlen_k=cache_end,
             slot_mapping=slot_mapping,
             block_tables=block_table,
             state_indices=None,
@@ -684,6 +737,7 @@ class ModelRunner:
                 self.model.model.embed_tokens,
             )
             logits = self.model.compute_logits(mtp_hidden)
+            self._mtp_cache_lens[slot] = cache_end
             return logits[-1].argmax() if final_chunk else None
         finally:
             reset_context()
@@ -697,6 +751,10 @@ class ModelRunner:
         positions: list[int],
     ) -> torch.Tensor:
         """Run the one-layer MTP head as a batched decode step."""
+        slots = self.input_batch.slots_for(seqs)
+        for slot, position in zip(slots, positions):
+            if position != self._mtp_cache_lens.get(slot, 0) + 1:
+                raise RuntimeError("MTP decode must append the next cache row")
         max_blocks = max(len(seq.block_table) for seq in seqs)
         block_tables = torch.tensor(
             [
@@ -708,8 +766,8 @@ class ModelRunner:
         ).cuda(non_blocking=True)
         slot_mapping = torch.tensor(
             [
-                seq.block_table[position // self.block_size] * self.block_size
-                + position % self.block_size
+                seq.block_table[(position - 1) // self.block_size] * self.block_size
+                + (position - 1) % self.block_size
                 for seq, position in zip(seqs, positions)
             ],
             dtype=torch.int32,
@@ -720,15 +778,17 @@ class ModelRunner:
         )
         context_lens = positions_gpu.to(torch.int32)
         if self.cuda_graphs.mtp_decode_graph is not None:
-            return self.cuda_graphs.run_mtp_decode(
+            result = self.cuda_graphs.run_mtp_decode(
                 input_tokens, positions_gpu, target_hidden, slot_mapping,
                 context_lens, block_tables,
             )
+            self._mtp_cache_lens.update(zip(slots, positions))
+            return result
         set_context(
             False,
             slot_mapping=slot_mapping,
-            # MTP positions are one-based: positions 1..p contain p cached
-            # tokens after the current write, so context length is p.
+            # RoPE positions 1..p occupy cache rows 0..p-1. Both the read
+            # length and the next append therefore use p valid rows.
             context_lens=context_lens,
             block_tables=block_tables,
             state_indices=None,
@@ -741,6 +801,7 @@ class ModelRunner:
                 self.model.model.embed_tokens,
             )
             logits = self.model.compute_logits(mtp_hidden)
+            self._mtp_cache_lens.update(zip(slots, positions))
             return logits.argmax(dim=-1)
         finally:
             reset_context()
@@ -807,6 +868,10 @@ class ModelRunner:
         mtp_hidden_rows: list[torch.Tensor] = []
         mtp_inputs: list[torch.Tensor] = []
         mtp_positions: list[int] = []
+        accepted_seqs: list[Sequence] = []
+        accepted_hidden: list[torch.Tensor] = []
+        accepted_inputs: list[torch.Tensor] = []
+        accepted_positions: list[int] = []
 
         if speculative_batch:
             assert self.mtp is not None
@@ -827,7 +892,10 @@ class ModelRunner:
                     output_gpu[i, 0] = draft_token
                     self.mtp_stats["accepted_tokens"] += 1
                     for layer in self.gdn_layers:
-                        layer.commit_speculative_state()
+                        if draft_is_eos:
+                            layer.rollback_speculative_state(slot_ids[i])
+                        else:
+                            layer.commit_speculative_state()
                     if not draft_is_eos:
                         second_token = logits[start + 1].argmax()
                         output_gpu[i, 1] = second_token
@@ -854,6 +922,13 @@ class ModelRunner:
                     )
                 )
                 if not hit_eos and committed_before + produced < seq.max_tokens:
+                    if accepted:
+                        # The accepted draft is a real MTP input too. Append
+                        # its (first target hidden, draft) pair before bonus.
+                        accepted_seqs.append(seq)
+                        accepted_hidden.append(self._target_hidden[start])
+                        accepted_inputs.append(first_token)
+                        accepted_positions.append(seq.num_tokens - 1)
                     mtp_seqs.append(seq)
                     mtp_hidden_rows.append(
                         self._target_hidden[start + 1 if accepted else start]
@@ -885,6 +960,11 @@ class ModelRunner:
 
         if mtp_seqs:
             assert self.mtp is not None
+            if accepted_seqs:
+                self._run_mtp_decode(
+                    accepted_seqs, torch.stack(accepted_hidden),
+                    torch.stack(accepted_inputs), accepted_positions,
+                )
             self.mtp_stats["draft_tokens"] += len(mtp_seqs)
             next_drafts = self._run_mtp_decode(
                 mtp_seqs,
@@ -926,6 +1006,10 @@ class ModelRunner:
         return AsyncModelOutput(token_ids, output_buf, ready_event)
 
     def remove_request(self, seq_id: int):
+        slot = self.input_batch.seq_id_to_slot.get(seq_id)
+        if slot is not None:
+            self._mtp_last_hidden.pop(slot, None)
+            self._mtp_cache_lens.pop(slot, None)
         self.input_batch.remove(seq_id)
 
     def capture_cudagraph(self):

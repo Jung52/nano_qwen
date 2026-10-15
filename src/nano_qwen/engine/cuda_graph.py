@@ -50,7 +50,7 @@ class CudaGraphManager:
             self.capture_prefill()
 
     def _capture_verify(self) -> None:
-        """Capture the packed two-row target verify, including GDN rollback state."""
+        """Capture two serial B1 target forwards and the first-row rollback state."""
         max_blocks = (
             self.config.max_model_len + self.runner.block_size - 1
         ) // self.runner.block_size
@@ -86,12 +86,12 @@ class CudaGraphManager:
             warmup_stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(warmup_stream):
                 for _ in range(3):
-                    outputs.copy_(self.model.model(input_ids, positions))
+                    outputs.copy_(self.runner.forward_verify(input_ids, positions))
             torch.cuda.current_stream().wait_stream(warmup_stream)
 
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                outputs.copy_(self.model.model(input_ids, positions))
+                outputs.copy_(self.runner.forward_verify(input_ids, positions))
             self.verify_graph = graph
             self.verify_graph_vars = {
                 "input_ids": input_ids,
@@ -122,7 +122,7 @@ class CudaGraphManager:
         self.verify_graph.replay()
         hidden = buffers["outputs"]
         self.runner._target_hidden = hidden
-        return self.model.compute_logits(hidden)
+        return self.runner.compute_verify_logits(hidden)
 
     def _capture_mtp_decode(self) -> None:
         max_blocks = (
@@ -135,7 +135,8 @@ class CudaGraphManager:
             (1, self.config.hf_config.hidden_size),
             dtype=self.model.model.embed_tokens.weight.dtype, device=device,
         )
-        slot_mapping = torch.ones(1, dtype=torch.int32, device=device)
+        # RoPE position 1 is stored in MTP cache row zero.
+        slot_mapping = torch.zeros(1, dtype=torch.int32, device=device)
         context_lens = torch.ones(1, dtype=torch.int32, device=device)
         block_tables = torch.zeros((1, max_blocks), dtype=torch.int32, device=device)
         drafts = torch.empty(1, dtype=torch.int64, device=device)

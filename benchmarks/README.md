@@ -8,6 +8,7 @@
 |---|---|
 | `bench_engine_qwen35.py`、`engine_bench_utils.py` | 通用engine吞吐、请求延迟、调度与输出链路诊断 |
 | `bench_one_batch.py` | 固定batch的正式计时与独立profile，按prefill/decode聚合GPU事件并导出Perfetto trace |
+| `bench_qwen3_5_mtp_production.py` | B1 greedy MTP生产对照；独立MTP权重、实际提交token计数及严格completion比较 |
 | `bench_piecewise_prefill_paths.py` | piecewise prefill路径对比 |
 | `bench_gdn_flashqla.py` | GDN kernel对比 |
 | `validate_engine_qwen35.py` | engine运行路径与正确性校验 |
@@ -21,6 +22,8 @@
 最新两种FP8的阶段分解与batch–TPOT–吞吐曲线见 [fp8_phase_profile](reports/fp8_phase_profile/results.md)。`bench_one_batch.py --timing-rounds 2 --profile-rounds 0`只做两次正式计时；`--timing-rounds 0 --profile-rounds 2 --profile-decode-steps 8`单独做短窗口诊断。加`--workload-memory`可固定KV容量、限制allocator显存预算，并仅捕获精确prefill bucket。
 
 GDN大batch的recurrent-state复制已改为按slot原地更新；旧/新路径B8/64的对照与原始数据见 [gdn_state_pool](reports/gdn_state_pool/results.md)。
+
+MTP缓存索引、接受后补写、chunked prefill及抢占重放修复见 [mtp_cache_lifecycle](reports/mtp_cache_lifecycle/results.md)。两种FP8的B1严格一致路径尚无吞吐收益；报告保留各两次正式测量及独立短trace，不能用接受率或projected吞吐替代生产结果。
 
 当前阶段报告覆盖batch32/64/96/128/192/256、输入64/输出128，显存不足的配置保留实际完成次数与失败状态。优化前的batch1–64报告见 [归档](reports/fp8_phase_profile_before_gdn_pool_20261015/results.md)。
 

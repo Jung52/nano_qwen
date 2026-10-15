@@ -43,7 +43,8 @@ def release(engine, seq: Sequence) -> None:
 @torch.inference_mode()
 def run_mode(model_path: str, enable_mtp: bool, prompt: list[int], max_tokens: int,
              duration: float, enforce_eager: bool,
-             window_seconds: float | None = None) -> tuple[dict, list[int]]:
+             window_seconds: float | None = None,
+             mtp_model: str | None = None) -> tuple[dict, list[int]]:
     engine = LLMEngine(
         model_path,
         tensor_parallel_size=1,
@@ -54,6 +55,7 @@ def run_mode(model_path: str, enable_mtp: bool, prompt: list[int], max_tokens: i
         enforce_eager=enforce_eager,
         use_prefill_cudagraph=False,
         enable_mtp=enable_mtp,
+        mtp_model=mtp_model,
     )
     try:
         seq = Sequence(
@@ -133,6 +135,7 @@ def run_mode(model_path: str, enable_mtp: bool, prompt: list[int], max_tokens: i
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
+    parser.add_argument("--mtp-model", help="Original unquantized checkpoint containing mtp.* weights")
     parser.add_argument("--prompt-tokens", type=int, default=129)
     parser.add_argument("--max-tokens", type=int, default=10240)
     parser.add_argument("--duration", type=float, default=120.0)
@@ -145,8 +148,8 @@ def main() -> None:
         "--allow-numerical-drift",
         action="store_true",
         help=(
-            "continue after a greedy top-1 change caused by the different "
-            "verify/decode kernel path; report the matching prefix instead"
+            "legacy diagnostic flag; a greedy token mismatch still fails "
+            "correctness and cannot produce a validated speedup"
         ),
     )
     args = parser.parse_args()
@@ -170,7 +173,7 @@ def main() -> None:
     )
     mtp, mtp_tokens = run_mode(
         args.model, True, prompt, args.max_tokens, args.duration,
-        args.enforce_eager, window_seconds,
+        args.enforce_eager, window_seconds, mtp_model=args.mtp_model,
     )
 
     compare_len = min(len(baseline_tokens), len(mtp_tokens))
@@ -221,15 +224,16 @@ def main() -> None:
             "NOTE throughput after divergence compares different generated "
             "continuations; acceptance and speedup can depend on that path"
         )
-    print(f"RESULT speedup={mtp['tokens_per_s'] / baseline['tokens_per_s']:.3f}x")
-    if mismatch is not None and not (args.allow_numerical_drift or args.stress):
+    if mismatch is not None:
         raise AssertionError(
             f"MTP2 production output diverged at completion token {mismatch}: "
             f"baseline={baseline_tokens[mismatch]}, "
             f"mtp={mtp_tokens[mismatch]}; "
             f"lengths={len(baseline_tokens)}/{len(mtp_tokens)}. "
-            "Use --allow-numerical-drift only for long throughput runs."
+            "Numerical drift is not a correctness pass."
         )
+    print(f"CORRECTNESS PASS compared_tokens={compare_len}")
+    print(f"RESULT speedup={mtp['tokens_per_s'] / baseline['tokens_per_s']:.3f}x")
 
 
 if __name__ == "__main__":

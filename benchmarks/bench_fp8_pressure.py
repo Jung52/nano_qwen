@@ -456,7 +456,7 @@ def path_audit(runner):
     counts = Counter()
     original = runner.run_model
 
-    def wrapped(ids, positions, is_prefill):
+    def wrapped(ids, positions, is_prefill, *args, **kwargs):
         descriptor = get_context().batch_descriptor
         mode = descriptor.mode if descriptor else ("prefill" if is_prefill else "decode")
         rows = ids.shape[0]
@@ -472,7 +472,7 @@ def path_audit(runner):
         else:
             path = "decode_graph" if rows in runner.graphs else "decode_eager_fallback"
         counts[f"{path}/rows{rows}"] += 1
-        return original(ids, positions, is_prefill)
+        return original(ids, positions, is_prefill, *args, **kwargs)
 
     runner.run_model = wrapped
     try:

@@ -4,6 +4,7 @@ from transformers import AutoConfig
 
 from nano_qwen.quantization import QuantizationConfig, get_quantization_config
 from nano_qwen.quantization.checkpoint import read_quantization_metadata, read_hf_fp8_config
+from nano_qwen.utils.rope import rope_config
 
 
 @dataclass(slots=True)
@@ -22,6 +23,8 @@ class Config:
     # opt-in: older checkpoints may not contain ``mtp.*`` weights and the
     # stochastic rejection-sampling path is not implemented yet.
     enable_mtp: bool = False
+    # Converted FP8 targets may omit mtp.*. Load its BF16 head independently.
+    mtp_model: str | None = None
     hf_config: AutoConfig | None = None
     full_config: AutoConfig | None = None
     eos: int = -1
@@ -57,6 +60,21 @@ class Config:
 
         self.full_config = AutoConfig.from_pretrained(self.model)
         self.hf_config = getattr(self.full_config, "text_config", self.full_config)
+        if self.enable_mtp and self.mtp_model is not None:
+            if not os.path.isdir(self.mtp_model):
+                raise ValueError(f"MTP checkpoint directory does not exist: {self.mtp_model}")
+            source = AutoConfig.from_pretrained(self.mtp_model)
+            source = getattr(source, "text_config", source)
+            for name in ("hidden_size", "intermediate_size", "vocab_size",
+                         "num_hidden_layers", "num_attention_heads", "num_key_value_heads",
+                         "head_dim", "rms_norm_eps", "mtp_num_hidden_layers",
+                         "mtp_use_dedicated_embeddings", "layer_types", "hidden_act",
+                         "attention_bias", "linear_num_key_heads", "linear_num_value_heads",
+                         "linear_key_head_dim", "linear_value_head_dim", "linear_conv_kernel_dim"):
+                if getattr(source, name, None) != getattr(self.hf_config, name, None):
+                    raise ValueError(f"MTP source and target differ in {name}")
+            if rope_config(source) != rope_config(self.hf_config):
+                raise ValueError("MTP source and target differ in effective RoPE configuration")
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
 
         layer_types = getattr(self.hf_config, "layer_types", None)
