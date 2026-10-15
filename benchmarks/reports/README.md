@@ -2,6 +2,9 @@
 
 | 报告 | 内容 |
 |---|---|
+| [gdn_state_pool](gdn_state_pool/results.md) | GDN recurrent-state原地更新，B8/64两种FP8的旧/新路径各两次计时与复制消失的profile证据 |
+| [fp8_phase_profile](fp8_phase_profile/results.md) | GDN原地更新后，batch32/64/96/128/192/256、input64/output128的graph矩阵、阶段分解与容量失败记录 |
+| [fp8_phase_profile优化前归档](fp8_phase_profile_before_gdn_pool_20261015/results.md) | 优化前batch1–64的阶段分解、曲线和GDN状态复制热点 |
 | [fp8_granularity](fp8_granularity/results.md) | 粒度/shape受控对比、scale体积与逻辑流量 |
 | [triton_autotuned](fp8_granularity/triton_autotuned.md) | 两类Triton GEMM调优后的量化/GEMM/Linear计时 |
 | [prefill_breakdown](prefill_breakdown/results.md) | 投影热点、kernel累计时间与固定tile对照 |

@@ -59,7 +59,9 @@ class CudaGraphManager:
             dtype=torch.int32,
             device=device,
         )
-        state_indices = torch.zeros(max_bs, dtype=torch.int64, device=device)
+        # In-place GDN updates require distinct live slots during warmup and
+        # capture too. Replay overwrites this same buffer with request slots.
+        state_indices = torch.arange(max_bs, dtype=torch.int64, device=device)
         outputs = torch.zeros(
             max_bs,
             hf_config.hidden_size,

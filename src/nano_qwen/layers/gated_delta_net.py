@@ -116,6 +116,8 @@ def decode_gated_delta_rule(
     A_log: torch.Tensor,
     dt_bias: torch.Tensor,
     initial_state: torch.Tensor,
+    *,
+    state_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-token delta rule decode via FlashInfer (in-kernel gating).
 
@@ -126,9 +128,11 @@ def decode_gated_delta_rule(
         A_log: (Hv,) log-space decay parameter (fp32)
         dt_bias: (Hv,) time-step bias
         initial_state: (B, H, V, K) K-last (fp32 legacy path, or bf16 for
-            K=V=128 and T<=4)
+            K=V=128 and T<=4), or the full (num_slots, H, V, K) pool
+            when state_indices is supplied.
+        state_indices: (B,) persistent slots to read and update in-place.
     Returns:
-        out: (B, S, H, Dv), final_state: (B, H, V, K) K-last
+        out: (B, S, H, Dv), updated state (the full pool in indexed mode).
     """
     from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
 
@@ -139,11 +143,17 @@ def decode_gated_delta_rule(
     # Mixed-batch slices must have a consistent layout, and each invocation
     # must own its output until the caller merges the per-request results.
     output = torch.empty((B, 1, HV, V), device=query.device, dtype=query.dtype)
+    pool_args = {} if state_indices is None else {
+        "initial_state": initial_state,
+        # The small-batch BF16 backend's compiled ABI requires int32 even
+        # though the engine keeps its persistent slot mapping in int64.
+        "initial_state_indices": state_indices.to(torch.int32),
+    }
     out, new_state = gated_delta_rule_decode_pretranspose(
         q=query.reshape(B, 1, H, K).contiguous(),
         k=key.reshape(B, 1, H, K).contiguous(),
         v=value.reshape(B, 1, HV, V).contiguous(),
-        state=initial_state.contiguous(),
+        state=initial_state.contiguous() if state_indices is None else None,
         A_log=A_log.detach().to(torch.float32),
         a=a.reshape(B, 1, HV).clone(memory_format=torch.contiguous_format),
         dt_bias=dt_bias.detach(),
@@ -151,6 +161,7 @@ def decode_gated_delta_rule(
         scale=None,
         output=output,
         use_qk_l2norm=True,
+        **pool_args,
     )
     return out.view(B, S, HV, V), new_state
 
@@ -271,26 +282,6 @@ class GatedDeltaNet(nn.Module):
             return
         self.conv_states.index_fill_(0, slot_indices, 0)
         self.recurrent_states.index_fill_(0, slot_indices, 0)
-
-    def _read_state(self, idx: torch.Tensor):
-        # index_select/index_copy are graph-capturable; advanced indexing can
-        # require a host-side scalar conversion during CUDA Graph capture.
-        idx = idx.reshape(-1)
-        return (
-            self.conv_states.index_select(0, idx),       # (B, C, k-1)
-            self.recurrent_states.index_select(0, idx),  # (B, H, V, K)
-        )
-
-    def _write_state(self, idx: torch.Tensor, conv_state, rec_state):
-        idx = idx.reshape(-1)
-        # prefill writes one request at a time (2D/3D), batched decode writes
-        # many rows at once (3D/4D) — promote single rows to a batch dim.
-        if conv_state.dim() == 2:
-            conv_state = conv_state.unsqueeze(0)
-        if rec_state.dim() == 3:
-            rec_state = rec_state.unsqueeze(0)
-        self.conv_states.index_copy_(0, idx, conv_state)
-        self.recurrent_states.index_copy_(0, idx, rec_state)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         context = get_context()
@@ -518,8 +509,8 @@ class GatedDeltaNet(nn.Module):
 
     def _forward_decode(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Batched decode: all B sequences in ONE kernel launch per layer. Each
-        # row reads and writes its own persistent pool slot via
-        # context.state_indices (index_select/index_copy are graph-capturable).
+        # row updates its recurrent pool slot inside the GDN kernel, avoiding
+        # the large caller-side recurrent-state gather/scatter.
         B = hidden_states.shape[0]
         idx = get_context().state_indices
         if idx is None or idx.numel() == 0:
@@ -527,7 +518,8 @@ class GatedDeltaNet(nn.Module):
                 "GDN decode requires Context.state_indices; "
                 "ModelRunner must pass persistent request slots"
             )
-        conv_state, rec_state = self._read_state(idx)  # (B,C,k-1), (B,Hv,V,K)
+        idx = idx.reshape(-1)
+        conv_state = self.conv_states.index_select(0, idx)
 
         qkv, z = project_shared_fp8_input(
             hidden_states, self.in_proj_qkv, self.in_proj_z,
@@ -556,10 +548,11 @@ class GatedDeltaNet(nn.Module):
             query = query.repeat_interleave(self.gqa_ratio, dim=2)
             key = key.repeat_interleave(self.gqa_ratio, dim=2)
 
-        out, new_rec = decode_gated_delta_rule(
-            query, key, value, a, b, self.A_log, self.dt_bias, rec_state,
+        out, _ = decode_gated_delta_rule(
+            query, key, value, a, b, self.A_log, self.dt_bias,
+            self.recurrent_states, state_indices=idx,
         )
-        self._write_state(idx, new_conv_state, new_rec)
+        self.conv_states.index_copy_(0, idx, new_conv_state)
 
         # Per-head gated norm, then merge heads -> value_dim (matches official:
         # core_attn_out.reshape(-1, head_v_dim) -> norm -> reshape(batch, seq, -1))

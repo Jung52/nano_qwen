@@ -7,7 +7,7 @@
 | 文件 | 用途 |
 |---|---|
 | `bench_engine_qwen35.py`、`engine_bench_utils.py` | 通用engine吞吐、请求延迟、调度与输出链路诊断 |
-| `bench_one_batch.py` | 固定batch的真实engine profile，导出Perfetto trace |
+| `bench_one_batch.py` | 固定batch的正式计时与独立profile，按prefill/decode聚合GPU事件并导出Perfetto trace |
 | `bench_piecewise_prefill_paths.py` | piecewise prefill路径对比 |
 | `bench_gdn_flashqla.py` | GDN kernel对比 |
 | `validate_engine_qwen35.py` | engine运行路径与正确性校验 |
@@ -17,6 +17,12 @@
 | `bench_bf16_vs_fp8.sh`、`bench_stress.sh`、`stress_bench.py` | 远端压力测试入口及包装脚本 |
 
 模型相关命令需在已有CUDA、PyTorch、Triton和模型依赖的环境运行；各入口的 `--help` 给出参数。原始日志和trace写入Git忽略的 `logs/`。
+
+最新两种FP8的阶段分解与batch–TPOT–吞吐曲线见 [fp8_phase_profile](reports/fp8_phase_profile/results.md)。`bench_one_batch.py --timing-rounds 2 --profile-rounds 0`只做两次正式计时；`--timing-rounds 0 --profile-rounds 2 --profile-decode-steps 8`单独做短窗口诊断。加`--workload-memory`可固定KV容量、限制allocator显存预算，并仅捕获精确prefill bucket。
+
+GDN大batch的recurrent-state复制已改为按slot原地更新；旧/新路径B8/64的对照与原始数据见 [gdn_state_pool](reports/gdn_state_pool/results.md)。
+
+当前阶段报告覆盖batch32/64/96/128/192/256、输入64/输出128，显存不足的配置保留实际完成次数与失败状态。优化前的batch1–64报告见 [归档](reports/fp8_phase_profile_before_gdn_pool_20261015/results.md)。
 
 生产回归测试已移到 `tests/`：
 
