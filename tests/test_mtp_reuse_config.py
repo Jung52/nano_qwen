@@ -39,7 +39,7 @@ def test_reuse_requires_fp8_target(tmp_path):
         Config(str(source), enable_mtp=True, max_num_seqs=1, mtp_verify_mode="reuse")
 
 
-@pytest.mark.parametrize("kwargs", [{"max_num_seqs": 4}, {"tensor_parallel_size": 2}])
+@pytest.mark.parametrize("kwargs", [{"max_num_seqs": 16}, {"tensor_parallel_size": 2}])
 def test_reuse_preserves_small_batch_tp1_boundary(tmp_path, kwargs):
     target, _ = checkpoint_pair(tmp_path)
     options = dict(enable_mtp=True, max_num_seqs=1, mtp_verify_mode="reuse")

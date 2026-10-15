@@ -127,8 +127,8 @@ def test_per_channel_handles_k_and_n_tails():
 
 @pytest.mark.parametrize("block", [False, True])
 @pytest.mark.parametrize("capturing", [False, True])
-@pytest.mark.parametrize("reference_m", [1, 2])
-def test_reuse_launch_selects_m1_tile_without_overwriting_m2(monkeypatch, block, capturing, reference_m):
+@pytest.mark.parametrize("reference_m", range(1, 9))
+def test_reuse_launch_selects_reference_b_tile_without_overwriting_2b(monkeypatch, block, capturing, reference_m):
     from nano_qwen.quantization.fp8 import fp8_per_channel_mm, _per_channel_mm_tuned
     from nano_qwen.quantization.fp8_block import fp8_block_mm, _block_mm_tuned
     from nano_qwen.quantization.triton_gemm import GEMM_CONFIGS, gemm_key
@@ -196,8 +196,8 @@ def test_reuse_cold_eager_warms_m1_and_cold_capture_fails_closed(monkeypatch, bl
     assert torch.equal(actual, expected)
 
 
-@pytest.mark.parametrize("reference_m", [1, 2])
-def test_reuse_keeps_unquantized_checkpoint_exceptions_on_single_row_math(monkeypatch, reference_m):
+@pytest.mark.parametrize("reference_m", range(1, 9))
+def test_reuse_keeps_unquantized_checkpoint_exceptions_on_reference_b_math(monkeypatch, reference_m):
     from nano_qwen.quantization.unquantized import UnquantizedLinearMethod
     from nano_qwen.utils.context import set_context, reset_context
     import torch.nn.functional as functional

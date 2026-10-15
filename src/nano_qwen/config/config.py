@@ -25,7 +25,7 @@ class Config:
     enable_mtp: bool = False
     # Converted FP8 targets may omit mtp.*. Load its BF16 head independently.
     mtp_model: str | None = None
-    # Reuse is opt-in for FP8 TP1/B1-B2; serial is the reference.
+    # Reuse is opt-in for FP8 TP1/B1-B8; serial is the reference.
     mtp_verify_mode: str = "serial"
     hf_config: AutoConfig | None = None
     full_config: AutoConfig | None = None
@@ -62,11 +62,11 @@ class Config:
         assert not self.enable_mtp or self.tensor_parallel_size == 1, (
             "MTP2 production decoding currently requires tensor_parallel_size=1"
         )
-        assert not self.enable_mtp or self.max_num_seqs in (1, 2), (
-            "MTP2 production decoding currently requires max_num_seqs=1 or 2"
+        assert not self.enable_mtp or 1 <= self.max_num_seqs <= 8, (
+            "MTP2 production decoding currently requires max_num_seqs in 1..8"
         )
-        if self.enable_mtp and self.max_num_seqs == 2 and self.quant_config is None:
-            raise ValueError("B2 MTP currently requires an FP8 target")
+        if self.enable_mtp and self.max_num_seqs > 1 and self.quant_config is None:
+            raise ValueError("B2-B8 MTP currently requires an FP8 target")
 
         self.full_config = AutoConfig.from_pretrained(self.model)
         self.hf_config = getattr(self.full_config, "text_config", self.full_config)

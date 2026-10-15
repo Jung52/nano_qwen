@@ -12,6 +12,7 @@
 | `bench_mtp_verify_reuse.py` | 正式serial/reuse路径的逐层/状态严格诊断；`--timing`每模式两次实际decode计时 |
 | `bench_mtp_small_batch.py` | B1长度矩阵及中文/代码，off/reuse每配置两次，保留全部completion与严格门禁 |
 | `bench_mtp_batch2.py` | B2异长eager off/serial/reuse门禁；三类Graph工作负载off/reuse各两次实际提交token计时 |
+| `bench_mtp_batch_gates.py` | 真实4B两种FP8的B4/B8异长eager/Graph off/serial/reuse严格completion门禁；仅诊断，不作正式计时 |
 | `bench_mtp_interleaved.py` | 同resident engine交错off/reuse；可选旧完整采样/greedy fast对照，每配置2次；实际提交token与严格completion门禁 |
 | `profile_mtp_reuse.py` | 独立reuse Graph/eager短trace；captured events拆分snapshot和MTP内置head，禁止用于正式TPOT |
 | `bench_piecewise_prefill_paths.py` | piecewise prefill路径对比 |
@@ -30,7 +31,7 @@ GDN大batch的recurrent-state复制已改为按slot原地更新；旧/新路径B
 
 MTP缓存索引、接受后补写、chunked prefill及抢占重放修复见 [mtp_cache_lifecycle](reports/mtp_cache_lifecycle/results.md)。该历史报告的serial路径没有吞吐收益；报告保留各两次正式测量及独立短trace，不能用接受率或projected吞吐替代生产结果。
 
-接受draft后的第一行MTP已增加cache-only前向与独立Graph，见 [mtp_cache_only](reports/mtp_cache_only/results.md)。两行主干复用已通过 `mtp_verify_mode="reuse"` 正式接入，默认仍为serial；保留顺序GDN、单query attention、单行norm和LM head。配置和命令见 [正式接口说明](../docs/mtp-verify-reuse.md)，实测见 [生产路径报告](reports/mtp_reuse_production/results.md)。仅支持FP8、B1/TP1，不提供drift放行参数。
+接受draft后的第一行MTP已增加cache-only前向与独立Graph，见 [mtp_cache_only](reports/mtp_cache_only/results.md)。两行主干复用已通过 `mtp_verify_mode="reuse"` 正式接入，默认仍为serial；保留顺序GDN、单query attention、单行norm和LM head。配置和命令见 [正式接口说明](../docs/mtp-verify-reuse.md)，实测见 [生产路径报告](reports/mtp_reuse_production/results.md)。当前支持FP8、B1–8/TP1，每个活跃/接受子集大小都有精确Graph；不提供drift放行参数。
 
 当前阶段报告覆盖batch32/64/96/128/192/256、输入64/输出128，显存不足的配置保留实际完成次数与失败状态。优化前的batch1–64报告见 [归档](reports/fp8_phase_profile_before_gdn_pool_20261015/results.md)。
 

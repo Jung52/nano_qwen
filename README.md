@@ -61,15 +61,18 @@ The path loads `mtp.*` weights, allocates a separate MTP KV cache, drafts one
 token, verifies two target tokens, and rolls back both full-attention
 KV bookkeeping and GDN recurrent state after rejection. It currently supports
 greedy sampling only (`temperature <= 1e-6`, deterministic argmax including
-ties). FP8 supports B1/B2; BF16 remains B1 serial. Stochastic rejection
-sampling, tensor parallelism and B4/8 are not implemented.
+ties). Fully greedy batches go directly to argmax using CPU request metadata.
+FP8 supports every live batch size 1–8; BF16 remains B1 serial. Stochastic
+rejection sampling, tensor parallelism and B16 are not implemented.
 
 `mtp_verify_mode="serial"` captures two ordinary B-request target forwards.
 `mtp_verify_mode="reuse"` shares 2B dense rows using ordinary M=B tile choices,
 with B-row norms/head and sequential state/attention steps. Each request has
 its own first-step snapshot, acceptance and cache catch-up. Verify and MTP
-draft/cache-only use exact B1/B2 graphs without padding state writes. See
-[interfaces](docs/mtp-verify-reuse.md) and the [B1 matrix, trace and B2 report](benchmarks/reports/mtp_small_batch/results.md).
+draft/cache-only use exact graphs for every size 1..capacity without padding
+state writes. Ordinary decode also captures every exact size when capacity ≤ 8.
+See [interfaces](docs/mtp-verify-reuse.md), the [greedy fast-path comparison](benchmarks/reports/mtp_greedy_fast_path/results.md)
+and [B1/2/4/8 throughput/TPOT curves](benchmarks/reports/mtp_batch_curve/results.md).
 
 MTP RoPE positions start at 1, while its cache rows start at 0. Accepted draft
 and bonus pairs are appended in order. Chunked prefill preserves the preceding

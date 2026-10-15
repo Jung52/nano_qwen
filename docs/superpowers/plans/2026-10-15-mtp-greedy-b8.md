@@ -35,16 +35,19 @@ Files: `layers/sampler.py`, `engine/model_runner.py`, sampler consumers/tests, `
 
 Files: `config/config.py`, `models/mtp_verify.py`, `engine/{model_runner,cuda_graph}.py`, generalized test utilities and new lifecycle tests.
 
-- [ ] RED: public capacity1..8, each M=B reference, exact decode/verify/draft/cache-only banks including3/5/6/7.
-- [ ] Generalize guards only after tests exist; increase fixture KV blocks to support real B8 contexts.
-- [ ] For both FP8/eager/Graph, compare serial/reuse hidden/logits/state at every valid prefix, subset sizes0..B, arbitrary slot subsets, dynamic live counts, EOS, budgets, slot reuse/new requests and chunked prefill.
-- [ ] Confirm actual graph dispatch sizes, dense M=2B, norm/head M=B and inactive state preservation.
+- [x] RED: public capacity1..8, each M=B reference, exact decode/verify/draft/cache-only banks including3/5/6/7.
+- [x] Generalize guards only after tests exist; increase fixture KV blocks to support real B8 contexts.
+- [x] For both FP8/eager/Graph, compare serial/reuse hidden/logits/state at every valid prefix, subset sizes0..B, arbitrary slot subsets, dynamic live counts, EOS, budgets, slot reuse/new requests and chunked prefill.
+- [x] Confirm actual graph dispatch sizes, dense M=2B, norm/head M=B and inactive state preservation.
 
 ### Task 3: Fixed-workload batch curves and final integration
 
 Files: generalized interleaved benchmark, JSON/CSV/Markdown and standalone throughput/TPOT plots, API docs and local development log.
 
-- [ ] Real-model B4/B8 strict eager/Graph off/serial/reuse gates, including unequal contexts; investigate any numerical failure before accepted timings.
-- [ ] Same GPU/models, input64/output128 at B1/2/4/8; off/reuse interleaved, exactly two formal samples each. Preserve any negative result and measured acceptance.
-- [ ] Plot per-request TPOT and aggregate throughput, distinguish supported points from a proven continuous break-even threshold.
-- [ ] Full pytest/lint and fresh review, fix material findings, retain reports, commit/push existing feature branch. Keep B16 guarded and 5090 unmeasured.
+- [x] Real-model B4/B8 strict eager/Graph off/serial/reuse gates, including unequal contexts; investigate any numerical failure before accepted timings.
+- [x] Same GPU/models, input64/output128 at B1/2/4/8; off/reuse interleaved, exactly two formal samples each. Preserve any negative result and measured acceptance.
+- [x] Plot per-request TPOT and aggregate throughput, distinguish supported points from a proven continuous break-even threshold.
+- [x] Full pytest/lint and fresh review, fix material findings and retain reports. Final combined suite:619 passed,32 skipped; B16 guarded and5090 unmeasured.
+- Integration target: two separate commits, fast-forward and push existing `feat/qwen35-mtp2`; record remote hash in local execution ledger.
+
+Evidence: first greedy commit `4c83dac`; real4B gates24/24 strict and curve samples32/32 strict. Per-channel B1/2 +10.7/+10.4%, B4/8 −3.3/−6.2%; block-wise +0.8/+3.9/−1.1/+1.3%, no stable monotonic threshold. B16 deferred; new B2/B4 trace still needed before the next kernel change.

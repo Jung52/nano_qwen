@@ -30,11 +30,11 @@ def forward_verify_reuse(model, ids, positions, observe=None):
     batch = 0 if original.state_indices is None else original.state_indices.numel()
     if (
         ids.ndim != 1
-        or batch not in (1, 2)
+        or not 1 <= batch <= 8
         or ids.numel() != 2 * batch
         or positions.shape != ids.shape
     ):
-        raise ValueError("MTP reuse requires B1/B2 with two token rows per request")
+        raise ValueError("MTP reuse requires B1-B8 with two token rows per request")
     policy = {f.name: getattr(original, f.name) for f in fields(original)}
     policy["gemm_reference_m"] = batch
     time_ids = ids.reshape(batch, 2).T.contiguous().flatten()

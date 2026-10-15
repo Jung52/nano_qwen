@@ -28,7 +28,7 @@ def test_b2_reuse_config_is_supported_while_larger_batches_remain_guarded(tmp_pa
     )
     assert config.max_num_seqs == 2
     with pytest.raises((AssertionError, ValueError), match="max_num_seqs"):
-        Config(str(target), enable_mtp=True, max_num_seqs=4, mtp_verify_mode="reuse")
+        Config(str(target), enable_mtp=True, max_num_seqs=16, mtp_verify_mode="reuse")
 
 
 @pytest.fixture(scope="module", params=[True, False], ids=["eager", "graph"])
@@ -65,7 +65,7 @@ def batch_case(
         )
         for i, (n, b, e) in enumerate(zip(lengths, budgets, eos))
     ]
-    snapshots, hidden, decisions, batch_sizes = {}, {}, [[] for _ in seqs], []
+    snapshots, hidden, actual_logits, decisions, batch_sizes = {}, {}, {}, [[] for _ in seqs], []
 
     def token(i, position):
         return 1 if position - lengths[i] == eos[i] else 2 + i * 20 + position % 10
@@ -84,7 +84,7 @@ def batch_case(
             if prefill
             else [1] * len(slots)
         )
-        inactive = [j for j in range(2) if j not in slots]
+        inactive = [j for j in range(engine.config.max_num_seqs) if j not in slots]
         untouched = [
             (m, j, m.conv_states[j].clone(), m.recurrent_states[j].clone())
             for m in runner.gdn_layers
@@ -103,6 +103,7 @@ def batch_case(
             for row in range(offset, offset + size):
                 p = int(positions[row])
                 hidden[i, p] = runner._target_hidden[row].clone()
+                actual_logits[i, p] = logits[row].clone()
                 result[row, token(i, p + 1)] = 10
             offset += size
         return result
@@ -110,14 +111,16 @@ def batch_case(
     def scheduled():
         for i, seq in enumerate(seqs):
             if seq in engine.scheduler.running and seq.draft_token is not None:
-                accept = masks[len(decisions[i]) % len(masks)][i % 2]
+                mask = masks[len(decisions[i]) % len(masks)]
+                accept = mask[i % len(mask)]
                 seq.draft_token = token(i, seq.num_tokens) if accept else 200 + i
         rows, prefill = schedule()
         batch_sizes.append(len(rows))
         for seq in rows:
             if seq.is_speculative:
                 i = seqs.index(seq)
-                decisions[i].append(masks[len(decisions[i]) % len(masks)][i % 2])
+                mask = masks[len(decisions[i]) % len(masks)]
+                decisions[i].append(mask[i % len(mask)])
         assert not any(s.is_speculative for s in rows) or all(
             s.is_speculative for s in rows
         )
@@ -153,14 +156,15 @@ def batch_case(
         stack.enter_context(patch.object(runner, "run_model", run))
         stack.enter_context(patch.object(engine.scheduler, "schedule", scheduled))
         stack.enter_context(patch.object(engine.scheduler, "postprocess", post))
-        for seq in seqs if queued else seqs[:2]:
+        capacity = engine.config.max_num_seqs
+        for seq in seqs if queued else seqs[:capacity]:
             engine.scheduler.add(seq)
         admitted_late = False
         for _ in range(100):
             engine.step()
             if late and seqs[0].is_finished and not admitted_late:
                 assert not seqs[1].is_finished
-                engine.scheduler.add(seqs[2])
+                engine.scheduler.add(seqs[capacity])
                 admitted_late = True
             if all(s.is_finished for s in seqs):
                 break
@@ -171,6 +175,7 @@ def batch_case(
         decisions=decisions,
         snapshots=snapshots,
         hidden=hidden,
+        logits=actual_logits,
         batches=batch_sizes,
     )
 
@@ -245,8 +250,12 @@ def compare_modes(engine, masks, **kwargs):
                 assert torch.equal(a, b), (key, (a - b).abs().max())
         for key, h in reference["hidden"].items():
             assert torch.equal(h, actual["hidden"][key]), key
+        assert actual["logits"].keys() == reference["logits"].keys()
+        for key, logits in reference["logits"].items():
+            assert torch.equal(logits, actual["logits"][key]), key
+        return actual
     finally:
         runner.config.mtp_verify_mode = "reuse"
-        if not runner.enforce_eager:
+        if not runner.enforce_eager and runner.cuda_graphs.verify_graph_mode != "reuse":
             runner.cuda_graphs._capture_verify()
         reset_context()

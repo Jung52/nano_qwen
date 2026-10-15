@@ -2,6 +2,7 @@
 
 | 报告 | 内容 |
 |---|---|
+| [mtp_batch_curve](mtp_batch_curve/results.md) | greedy fast基线上的B1/2/4/8 off/reuse两次交错曲线；B4/B8异长真实模型eager/Graph门禁与完整生命周期 |
 | [mtp_greedy_fast_path](mtp_greedy_fast_path/results.md) | CPU全greedy直达argmax；同engine交错复测后off提高约36%～39%，B2 MTP相对收益收缩 |
 | [mtp_small_batch](mtp_small_batch/results.md) | B1长度/实际内容矩阵、greedy并列分数修复、新reuse trace、B2独立接受mask与exact Graph门禁/两次正式对照 |
 | [mtp_reuse_production](mtp_reuse_production/results.md) | 正式serial/reuse开关与core API、严格状态/边界回归、两种FP8 B1各两次吞吐/TPOT/TTFT/显存 |

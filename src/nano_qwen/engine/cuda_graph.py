@@ -12,6 +12,10 @@ if TYPE_CHECKING:
 
 
 def decode_capture_sizes(max_batch: int) -> list[int]:
+    # MTP's actual B is its ordinary-decode numerical reference. In small
+    # batches, capture all live sizes instead of rounding B3/5/6/7 upward.
+    if max_batch <= 8:
+        return list(range(1, max_batch + 1))
     # The final exact size also covers nonstandard capacities such as 3/5/17.
     candidates = [1, 2, 4, 8] + list(range(16, max_batch + 1, 16))
     return sorted({n for n in candidates if n <= max_batch} | {max_batch})

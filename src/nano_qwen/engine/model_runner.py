@@ -538,8 +538,8 @@ class ModelRunner:
         """
         context = get_context()
         batch = context.state_indices.numel()
-        if batch not in (1, 2) or input_ids.numel() != 2 * batch:
-            raise ValueError("MTP2 verification requires B1/B2 and two rows per request")
+        if not 1 <= batch <= 8 or input_ids.numel() != 2 * batch:
+            raise ValueError("MTP2 verification requires B1-B8 and two rows per request")
         ids = input_ids.reshape(batch, 2).T.contiguous()
         pos = positions.reshape(batch, 2).T.contiguous()
         slots = context.slot_mapping.reshape(batch, 2).T.contiguous()

@@ -8,6 +8,9 @@ from pathlib import Path
 import subprocess
 import sys
 
+import torch
+import triton
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -50,6 +53,11 @@ def measure(args):
     files = [*root.joinpath("src/nano_qwen").rglob("*.py"), Path(__file__).resolve()]
     report = dict(model=args.model, mtp_model=args.mtp_model, output=args.output_tokens,
                   prefill_graph=False, decode_graph=True, repeats=2,
+                  environment=dict(gpu=torch.cuda.get_device_name(), torch=torch.__version__,
+                                   cuda=torch.version.cuda, triton=triton.__version__),
+                  config=dict(max_model_len=1024, gpu_memory_utilization=.85,
+                              max_num_batched_tokens="max(1024, batch * 64)",
+                              temperature=1e-6, ignore_eos=True),
                   resident_engine=True, samples=[], cases={},
                   source=dict(commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
                               sha256={str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}))

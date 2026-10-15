@@ -78,7 +78,7 @@ def tiny_checkpoint(tmp_path_factory):
 
 @contextmanager
 @torch.inference_mode()
-def hybrid_engine(checkpoint, eager, mtp_model=None, mtp_verify_mode="serial", max_num_seqs=1):
+def hybrid_engine(checkpoint, eager, mtp_model=None, mtp_verify_mode="serial", max_num_seqs=1, cache_blocks=8):
     observed = SimpleNamespace(latest=None, captured=None)
     original_capture = ModelRunner.capture_cudagraph
 
@@ -93,9 +93,9 @@ def hybrid_engine(checkpoint, eager, mtp_model=None, mtp_verify_mode="serial", m
     def small_cache(runner):
         # Replace only allocation sizing, keeping the real paged cache format.
         config = runner.config
-        config.num_kvcache_blocks = 8
+        config.num_kvcache_blocks = cache_blocks
         attentions = [m for m in runner.model.modules() if isinstance(m, Attention)]
-        shape = (8, 256, config.hf_config.num_key_value_heads, config.hf_config.head_dim)
+        shape = (cache_blocks, 256, config.hf_config.num_key_value_heads, config.hf_config.head_dim)
         runner.kv_cache = torch.empty(2, len(attentions), *shape, device="cuda", dtype=torch.bfloat16)
         for i, attention in enumerate(attentions):
             attention.k_cache, attention.v_cache = runner.kv_cache[0, i], runner.kv_cache[1, i]
