@@ -30,13 +30,11 @@ from nano_qwen.utils.context import reset_context, set_context
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-@pytest.fixture(scope="module")
-def tiny_checkpoint(tmp_path_factory):
-    path = tmp_path_factory.mktemp("mtp-hybrid")
+def build_checkpoint(path, head_dim=64):
     config = AutoConfig.for_model("qwen3_5_text")
     for name, value in dict(hidden_size=128, intermediate_size=256, vocab_size=256,
             num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=1,
-            head_dim=64, linear_num_key_heads=1, linear_num_value_heads=2,
+            head_dim=head_dim, linear_num_key_heads=1, linear_num_value_heads=2,
             linear_key_head_dim=128, linear_value_head_dim=128,
             max_position_embeddings=1024, mtp_num_hidden_layers=1,
             layer_types=["linear_attention", "full_attention"],
@@ -73,9 +71,14 @@ def tiny_checkpoint(tmp_path_factory):
     return path
 
 
+@pytest.fixture(scope="module")
+def tiny_checkpoint(tmp_path_factory):
+    return build_checkpoint(tmp_path_factory.mktemp("mtp-hybrid"))
+
+
 @contextmanager
 @torch.inference_mode()
-def hybrid_engine(checkpoint, eager, mtp_model=None):
+def hybrid_engine(checkpoint, eager, mtp_model=None, mtp_verify_mode="serial"):
     observed = SimpleNamespace(latest=None, captured=None)
     original_capture = ModelRunner.capture_cudagraph
 
@@ -104,6 +107,7 @@ def hybrid_engine(checkpoint, eager, mtp_model=None):
          patch.object(ModelRunner, "capture_cudagraph", capture):
         value = LLMEngine(str(checkpoint), max_num_seqs=1, max_num_batched_tokens=1024,
                           max_model_len=1024, enable_mtp=True, enforce_eager=eager, mtp_model=mtp_model,
+                          mtp_verify_mode=mtp_verify_mode,
                           use_prefill_cudagraph=False)
     handle = value.model_runner.mtp.register_forward_hook(
         lambda m, args, output: setattr(observed, "latest", output))

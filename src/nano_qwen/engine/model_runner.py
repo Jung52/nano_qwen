@@ -16,6 +16,7 @@ from nano_qwen.layers.sampler import Sampler
 from nano_qwen.models.qwen3_5 import Qwen3_5ForCausalLM
 from nano_qwen.layers.linear import LinearBase
 from nano_qwen.models.qwen3_5_mtp import Qwen3_5MTP, load_mtp_weights
+from nano_qwen.models.mtp_verify import forward_verify_reuse
 from nano_qwen.utils.context import set_context, get_context, reset_context, BatchDescriptor
 from nano_qwen.utils.loader import load_model
 from nano_qwen.utils.trace import trace_event
@@ -519,6 +520,16 @@ class ModelRunner:
 
     @torch.inference_mode()
     def forward_verify(self, input_ids: torch.Tensor, positions: torch.Tensor):
+        if self.config.mtp_verify_mode == "reuse":
+            return self.forward_verify_reuse(input_ids, positions)
+        return self.forward_verify_serial(input_ids, positions)
+
+    def forward_verify_reuse(self, input_ids: torch.Tensor, positions: torch.Tensor, observe=None):
+        if self.world_size != 1 or self.config.quant_config is None:
+            raise ValueError("MTP reuse requires an FP8 target and tensor_parallel_size=1")
+        return forward_verify_reuse(self.model, input_ids, positions, observe)
+
+    def forward_verify_serial(self, input_ids: torch.Tensor, positions: torch.Tensor):
         """Verify two rows with the ordinary B1 decode arithmetic.
 
         Different GEMV/GEMM and attention shapes can flip greedy top-1.

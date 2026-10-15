@@ -125,6 +125,100 @@ def test_per_channel_handles_k_and_n_tails():
     assert torch.count_nonzero(actual[0]) == 0
 
 
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("capturing", [False, True])
+def test_reuse_launch_selects_m1_tile_without_overwriting_m2(monkeypatch, block, capturing):
+    from nano_qwen.quantization.fp8 import fp8_per_channel_mm, _per_channel_mm_tuned
+    from nano_qwen.quantization.fp8_block import fp8_block_mm, _block_mm_tuned
+    from nano_qwen.quantization.triton_gemm import GEMM_CONFIGS, gemm_key
+    from nano_qwen.utils.context import set_context, reset_context
+
+    mm = fp8_block_mm if block else fp8_per_channel_mm
+    tuner = _block_mm_tuned if block else _per_channel_mm_tuned
+    _, q, w, sa, sw, _ = fixture(block, m=2, n=128, k=128)
+    expected = torch.cat([mm(q[i:i+1], w, sa[i:i+1], sw) for i in range(2)])
+    m1_key = gemm_key(q[:1], w, sa[:1], sw, expected[:1])
+    m2_key = gemm_key(q, w, sa, sw, expected)
+    chosen = tuner.cache[m1_key]
+    sentinel = next(c for c in GEMM_CONFIGS if c is not chosen)
+    tuner.cache[m2_key] = sentinel
+    before = dict(tuner.cache)
+    original = tuner.fn
+    launches = []
+
+    class RecordingKernel:
+        __name__ = original.__name__
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                launches.append(kwargs)
+                return original[grid](*args, **kwargs)
+            return launch
+
+    monkeypatch.setattr(tuner, "fn", RecordingKernel())
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+    set_context(False, gemm_reference_m=1)
+    try:
+        actual = mm(q, w, sa, sw)
+    finally:
+        reset_context()
+    assert launches == [{"DEVICE": q.device.index, **chosen.all_kwargs()}]
+    assert tuner.cache == before
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("block", [False, True])
+def test_reuse_cold_eager_warms_m1_and_cold_capture_fails_closed(monkeypatch, block):
+    from nano_qwen.quantization.fp8 import fp8_per_channel_mm, _per_channel_mm_tuned
+    from nano_qwen.quantization.fp8_block import fp8_block_mm, _block_mm_tuned
+    from nano_qwen.quantization.triton_gemm import gemm_key
+    from nano_qwen.utils.context import set_context, reset_context
+
+    mm = fp8_block_mm if block else fp8_per_channel_mm
+    tuner = _block_mm_tuned if block else _per_channel_mm_tuned
+    _, q, w, sa, sw, _ = fixture(block, m=2, n=128, k=128)
+    output = torch.empty(2, 128, device="cuda", dtype=torch.bfloat16)
+    key1, key2 = gemm_key(q[:1], w, sa[:1], sw, output[:1]), gemm_key(q, w, sa, sw, output)
+    tuner.cache.pop(key1, None)
+    tuner.cache.pop(key2, None)
+    set_context(False, gemm_reference_m=1)
+    try:
+        with monkeypatch.context() as cold:
+            cold.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+            with pytest.raises(RuntimeError, match="M1"):
+                mm(q, w, sa, sw)
+        assert key1 not in tuner.cache and key2 not in tuner.cache
+        actual = mm(q, w, sa, sw)
+        assert key1 in tuner.cache and key2 not in tuner.cache
+    finally:
+        reset_context()
+    expected = torch.cat([mm(q[i:i+1], w, sa[i:i+1], sw) for i in range(2)])
+    assert torch.equal(actual, expected)
+
+
+def test_reuse_keeps_unquantized_checkpoint_exceptions_on_single_row_math(monkeypatch):
+    from nano_qwen.quantization.unquantized import UnquantizedLinearMethod
+    from nano_qwen.utils.context import set_context, reset_context
+    import torch.nn.functional as functional
+
+    x = torch.randn(2, 256, device="cuda", dtype=torch.bfloat16)
+    layer = SimpleNamespace(weight=torch.randn(512, 256, device="cuda", dtype=x.dtype))
+    bias = torch.randn(512, device="cuda", dtype=x.dtype)
+    original = functional.linear
+    expected = torch.cat([original(row.unsqueeze(0), layer.weight, bias) for row in x])
+    rows = []
+    def linear(values, weight, bias=None):
+        rows.append(values.shape[0])
+        return original(values, weight, bias)
+    monkeypatch.setattr(functional, "linear", linear)
+    set_context(False, gemm_reference_m=1)
+    try:
+        actual = UnquantizedLinearMethod().apply(layer, x, bias)
+    finally:
+        reset_context()
+    assert rows == [1, 1]
+    assert torch.equal(actual, expected)
+
+
 @pytest.mark.parametrize("family", ['per_channel', 'block', 'block_prefill'])
 def test_all_candidate_tiles_match_explicit_dequantization(family):
     from nano_qwen.quantization.triton_gemm import GEMM_CONFIGS

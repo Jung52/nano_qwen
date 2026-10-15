@@ -38,13 +38,15 @@ class Context:
     # is different and must retain the prefill state-update kernel.
     prefill_decode_rows: list[int] = field(default_factory=list)
     is_verify: bool = False
+    # Reuse dispatch: execute two rows using this device's tuned M=1 arithmetic.
+    gemm_reference_m: int | None = None
 
 _CONTEXT = Context()
 
 def get_context():
     return _CONTEXT
 
-def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None, state_indices=None, prefill_slices=None, prefill_chunk_indices=None, batch_descriptor=None, cudagraph_mode=None, prefill_decode_rows=None, is_verify=False):
+def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None, state_indices=None, prefill_slices=None, prefill_chunk_indices=None, batch_descriptor=None, cudagraph_mode=None, prefill_decode_rows=None, is_verify=False, gemm_reference_m=None):
     global _CONTEXT
     _CONTEXT = Context(
         is_prefill,
@@ -62,6 +64,7 @@ def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0
         prefill_chunk_indices,
         [] if prefill_decode_rows is None else prefill_decode_rows,
         is_verify,
+        gemm_reference_m,
     )
 
 def reset_context():

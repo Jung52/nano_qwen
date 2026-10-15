@@ -24,6 +24,7 @@ class CudaGraphManager:
 
         self.verify_graph: torch.cuda.CUDAGraph | None = None
         self.verify_graph_vars: dict[str, torch.Tensor] | None = None
+        self.verify_graph_mode: str | None = None
         self.mtp_decode_graph: torch.cuda.CUDAGraph | None = None
         self.mtp_decode_graph_vars: dict[str, torch.Tensor] | None = None
         self.mtp_cache_graph: torch.cuda.CUDAGraph | None = None
@@ -53,7 +54,7 @@ class CudaGraphManager:
             self.capture_prefill()
 
     def _capture_verify(self) -> None:
-        """Capture two serial B1 target forwards and the first-row rollback state."""
+        """Capture the configured verification path and first-row rollback state."""
         max_blocks = (
             self.config.max_model_len + self.runner.block_size - 1
         ) // self.runner.block_size
@@ -96,6 +97,7 @@ class CudaGraphManager:
             with torch.cuda.graph(graph):
                 outputs.copy_(self.runner.forward_verify(input_ids, positions))
             self.verify_graph = graph
+            self.verify_graph_mode = self.config.mtp_verify_mode
             self.verify_graph_vars = {
                 "input_ids": input_ids,
                 "positions": positions,
@@ -111,6 +113,8 @@ class CudaGraphManager:
                 layer.reset_state([0])
 
     def run_verify(self, input_ids: torch.Tensor, positions: torch.Tensor):
+        if self.verify_graph_mode != self.config.mtp_verify_mode:
+            raise RuntimeError("MTP verify mode changed; recapture its CUDA Graph first")
         context = get_context()
         buffers = self.verify_graph_vars
         buffers["input_ids"].copy_(input_ids)
@@ -415,6 +419,7 @@ class CudaGraphManager:
         self.decode_graph_pool = None
         self.verify_graph = None
         self.verify_graph_vars = None
+        self.verify_graph_mode = None
         self.mtp_decode_graph = None
         self.mtp_decode_graph_vars = None
         self.mtp_cache_graph = None

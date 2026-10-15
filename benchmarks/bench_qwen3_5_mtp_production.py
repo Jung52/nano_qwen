@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from nano_qwen.engine.llm_engine import LLMEngine  # noqa: E402
 from nano_qwen.engine.sequence import Sequence  # noqa: E402
 from nano_qwen.sampling_params import SamplingParams  # noqa: E402
+from nano_qwen.utils.context import reset_context  # noqa: E402
 
 
 def make_prompt(model_path: str, prompt_tokens: int) -> list[int]:
@@ -33,31 +34,59 @@ def make_prompt(model_path: str, prompt_tokens: int) -> list[int]:
 def release(engine, seq: Sequence) -> None:
     if seq.block_table:
         engine.scheduler.block_manager.deallocate(seq)
-    engine.batch_queue.clear()
-    engine.scheduler.waiting.clear()
-    engine.scheduler.running.clear()
-    engine.scheduler.in_flight.clear()
-    engine.model_runner.input_batch.remove(seq.seq_id)
+    for batch in list(engine.batch_queue):
+        if any(s.seq_id == seq.seq_id for s in batch[0]):
+            engine.batch_queue.remove(batch)
+    for queue in (engine.scheduler.waiting, engine.scheduler.running):
+        for item in list(queue):
+            if item.seq_id == seq.seq_id:
+                queue.remove(item)
+    engine.scheduler.in_flight.discard(seq.seq_id)
+    runner = engine.model_runner
+    if runner._pending is not None and any(s.seq_id == seq.seq_id for s in runner._pending[2]):
+        runner._pending = None
+    runner.remove_request(seq.seq_id)
+    reset_context()
 
 
 @torch.inference_mode()
 def run_mode(model_path: str, enable_mtp: bool, prompt: list[int], max_tokens: int,
              duration: float, enforce_eager: bool,
              window_seconds: float | None = None,
-             mtp_model: str | None = None) -> tuple[dict, list[int]]:
-    engine = LLMEngine(
-        model_path,
-        tensor_parallel_size=1,
-        max_num_seqs=1,
-        max_num_batched_tokens=max(512, len(prompt) + 1),
-        max_model_len=len(prompt) + max_tokens + 2,
-        gpu_memory_utilization=0.85,
-        enforce_eager=enforce_eager,
-        use_prefill_cudagraph=False,
-        enable_mtp=enable_mtp,
-        mtp_model=mtp_model,
-    )
+             mtp_model: str | None = None, mtp_verify_mode: str = "serial",
+             engine: LLMEngine | None = None) -> tuple[dict, list[int]]:
+    owned = engine is None
+    if owned:
+        engine = LLMEngine(
+            model_path,
+            tensor_parallel_size=1,
+            max_num_seqs=1,
+            max_num_batched_tokens=max(512, len(prompt) + 1),
+            max_model_len=len(prompt) + max_tokens + 2,
+            gpu_memory_utilization=0.85,
+            enforce_eager=enforce_eager,
+            use_prefill_cudagraph=False,
+            enable_mtp=enable_mtp,
+            mtp_model=mtp_model,
+            mtp_verify_mode=mtp_verify_mode,
+        )
+    seq = None
     try:
+        if not owned:
+            config = engine.config
+            if (config.model != model_path or config.enable_mtp != enable_mtp
+                    or config.mtp_verify_mode != mtp_verify_mode
+                    or config.enforce_eager != enforce_eager):
+                raise ValueError("Existing benchmark engine does not match the requested mode")
+            if enable_mtp and Path(config.mtp_model or config.model).resolve() != Path(mtp_model or model_path).resolve():
+                raise ValueError("Existing engine uses a different MTP checkpoint source")
+            runner = engine.model_runner
+            if (not engine.scheduler.is_finished() or engine.batch_queue
+                    or runner._pending is not None or runner.input_batch.seq_id_to_slot):
+                raise ValueError("Existing benchmark engine must be idle")
+        if engine.config.max_model_len < len(prompt) + max_tokens:
+            raise ValueError("Benchmark engine has insufficient context length capacity")
+        stats_before = dict(engine.model_runner.mtp_stats)
         seq = Sequence(
             prompt,
             SamplingParams(
@@ -66,6 +95,8 @@ def run_mode(model_path: str, enable_mtp: bool, prompt: list[int], max_tokens: i
                 ignore_eos=True,
             ),
         )
+        torch.cuda.reset_peak_memory_stats()
+        request_start = perf_counter()
         engine.scheduler.add(seq)
         torch.manual_seed(0)
 
@@ -82,8 +113,8 @@ def run_mode(model_path: str, enable_mtp: bool, prompt: list[int], max_tokens: i
             if elapsed_window <= 0:
                 return
             tokens = max(0, seq.num_completion_tokens - 1)
-            accepted = engine.model_runner.mtp_stats["accepted_tokens"] if enable_mtp else 0
-            verifies = engine.model_runner.mtp_stats["verify_steps"] if enable_mtp else 0
+            accepted = engine.model_runner.mtp_stats["accepted_tokens"] - stats_before["accepted_tokens"] if enable_mtp else 0
+            verifies = engine.model_runner.mtp_stats["verify_steps"] - stats_before["verify_steps"] if enable_mtp else 0
             windows.append({
                 "start_s": window_start - start,
                 "end_s": now - start,
@@ -120,22 +151,31 @@ def run_mode(model_path: str, enable_mtp: bool, prompt: list[int], max_tokens: i
             "tokens": max(0, len(token_ids) - 1),
             "elapsed_s": elapsed,
             "tokens_per_s": max(0, len(token_ids) - 1) / elapsed,
+            "tpot_ms": elapsed * 1000 / max(1, len(token_ids) - 1),
+            "ttft_s": start - request_start,
+            "e2e_s": start - request_start + elapsed,
+            "allocated_bytes": torch.cuda.memory_allocated(),
+            "reserved_bytes": torch.cuda.memory_reserved(),
+            "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
             "stop_reason": "max_tokens" if seq.is_finished else "duration",
             "windows": windows,
         }
         if enable_mtp:
-            result.update(engine.model_runner.mtp_stats)
-        release(engine, seq)
+            result.update({key: value - stats_before[key] for key, value in engine.model_runner.mtp_stats.items()})
         torch.cuda.synchronize()
         return result, token_ids
     finally:
-        engine.exit()
+        if seq is not None:
+            release(engine, seq)
+        if owned:
+            engine.exit()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--mtp-model", help="Original unquantized checkpoint containing mtp.* weights")
+    parser.add_argument("--mtp-verify-mode", choices=("serial", "reuse"), default="serial")
     parser.add_argument("--prompt-tokens", type=int, default=129)
     parser.add_argument("--max-tokens", type=int, default=10240)
     parser.add_argument("--duration", type=float, default=120.0)
@@ -174,6 +214,7 @@ def main() -> None:
     mtp, mtp_tokens = run_mode(
         args.model, True, prompt, args.max_tokens, args.duration,
         args.enforce_eager, window_seconds, mtp_model=args.mtp_model,
+        mtp_verify_mode=args.mtp_verify_mode,
     )
 
     compare_len = min(len(baseline_tokens), len(mtp_tokens))

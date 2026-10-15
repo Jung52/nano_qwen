@@ -153,6 +153,14 @@ class Qwen3_5Attention(nn.Module):
         attention_pre: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        return self.o_proj(self.forward_decode_core(attention_pre, positions))
+
+    def forward_decode_core(
+        self,
+        attention_pre: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Normalize/rotate QK, update KV, attend and gate before o_proj."""
         q_gate, key, value = attention_pre
         q_gate = q_gate.view(-1, self.num_heads, 2 * self.head_dim)
         query, gate = q_gate.chunk(2, dim=-1)
@@ -165,7 +173,7 @@ class Qwen3_5Attention(nn.Module):
         attn_output = attn_output.reshape(-1, self.q_size)
         gate = gate.reshape(-1, self.q_size)
         attn_output = attn_output * torch.sigmoid(gate)
-        return self.o_proj(attn_output)
+        return attn_output
 
 
 class Qwen3_5MLP(nn.Module):

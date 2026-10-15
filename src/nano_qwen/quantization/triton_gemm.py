@@ -3,6 +3,8 @@
 import torch
 import triton
 
+from nano_qwen.utils.context import get_context
+
 
 GEMM_CONFIGS = [
     triton.Config({"BM": bm, "BN": bn}, num_warps=warps, num_stages=stages)
@@ -82,6 +84,20 @@ def gemm_key(a, w, sa, sw, output):
 def launch_gemm(tuned, a, w, sa, sw, output):
     m, n, k, device = a.shape[0], w.shape[0], a.shape[1], a.device.index
     key = gemm_key(a, w, sa, sw, output)
+    if m == 2 and get_context().gemm_reference_m == 1:
+        # Read the local M1 selection; never transplant it into the M2 cache.
+        reference_key = (1, *key[1:])
+        config = tuned.cache.get(reference_key)
+        if config is None:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("MTP reuse requires eager M1 GEMM warmup before capture")
+            tuned[lambda meta: (1, triton.cdiv(n, meta['BN']))](
+                a[:1], w, sa[:1], sw, output[:1], 1, n, k, DEVICE=device,
+            )
+            config = tuned.cache[reference_key]
+        grid = (triton.cdiv(m, config.kwargs['BM']), triton.cdiv(n, config.kwargs['BN']))
+        tuned.fn[grid](a, w, sa, sw, output, m, n, k, DEVICE=device, **config.all_kwargs())
+        return
     preferred = _preferred_config(tuned, a, w, sa, sw, output)
     if preferred is not None:
         tuned.cache[key] = preferred

@@ -571,10 +571,24 @@ class GatedDeltaNet(nn.Module):
         hidden_states: torch.Tensor,
         state_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        dense = self.forward_dense_pre(hidden_states)
+        return self.out_proj(self.forward_decode_core(dense, state_indices))
+
+    def forward_decode_core(
+        self,
+        dense: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        state_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Update one token per request and return [B,1,value_dim], before out_proj.
+
+        Dense inputs are qkv/z/b/a in [B,1,C] layout, produced by
+        forward_dense_pre. Sequential verification reuses this exact core.
+        """
         # Batched decode: all B sequences in ONE kernel launch per layer. Each
         # row updates its recurrent pool slot inside the GDN kernel, avoiding
         # the large caller-side recurrent-state gather/scatter.
-        B = hidden_states.shape[0]
+        qkv, z, b, a = dense
+        B = qkv.shape[0]
         idx = get_context().state_indices if state_indices is None else state_indices
         if idx is None or idx.numel() == 0:
             raise RuntimeError(
@@ -584,9 +598,6 @@ class GatedDeltaNet(nn.Module):
         idx = idx.reshape(-1)
         conv_state = self.conv_states.index_select(0, idx)
 
-        qkv, z = project_shared_fp8_input(
-            hidden_states, self.in_proj_qkv, self.in_proj_z,
-        )
         qkv = qkv.transpose(1, 2)  # (B, C, 1)
         # causal conv with cached left-context (kernel-1 values)
         x = torch.cat([conv_state, qkv], dim=-1)  # (B, C, kernel)
@@ -605,8 +616,6 @@ class GatedDeltaNet(nn.Module):
         value = value.reshape(B, 1, -1, self.head_v_dim)
 
         z = z.reshape(B, 1, -1, self.head_v_dim)
-        b = self._project_gate(hidden_states, self.in_proj_b)  # (B, 1, Hv)
-        a = self._project_gate(hidden_states, self.in_proj_a)
         if self.gqa_ratio > 1:
             query = query.repeat_interleave(self.gqa_ratio, dim=2)
             key = key.repeat_interleave(self.gqa_ratio, dim=2)
@@ -623,4 +632,4 @@ class GatedDeltaNet(nn.Module):
         z = z.reshape(-1, self.head_v_dim)  # (B*Hv, Dv)
         out = self.norm(out, z)
         out = out.reshape(B, 1, -1)  # (B, S, value_dim)
-        return self.out_proj(out)
+        return out

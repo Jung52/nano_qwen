@@ -25,6 +25,8 @@ class Config:
     enable_mtp: bool = False
     # Converted FP8 targets may omit mtp.*. Load its BF16 head independently.
     mtp_model: str | None = None
+    # Reuse is opt-in for the validated FP8 TP1/B1 path; serial is the reference.
+    mtp_verify_mode: str = "serial"
     hf_config: AutoConfig | None = None
     full_config: AutoConfig | None = None
     eos: int = -1
@@ -36,6 +38,10 @@ class Config:
     quant_config: QuantizationConfig | None = field(default=None, init=False)
 
     def __post_init__(self):
+        if self.mtp_verify_mode not in ("serial", "reuse"):
+            raise ValueError("mtp_verify_mode must be 'serial' or 'reuse'")
+        if self.mtp_verify_mode == "reuse" and not self.enable_mtp:
+            raise ValueError("mtp_verify_mode='reuse' requires enable_mtp=True")
         metadata = read_quantization_metadata(self.model)
         hf_quant = read_hf_fp8_config(self.model) if metadata is None else None
         if metadata is not None and self.quantization is None:
@@ -43,6 +49,8 @@ class Config:
         if hf_quant is not None and self.quantization is None:
             self.quantization = "fp8"
         self.quant_config = get_quantization_config(self.quantization, hf_quant)
+        if self.mtp_verify_mode == "reuse" and self.quant_config is None:
+            raise ValueError("MTP reuse currently requires an FP8 target")
         if self.quant_config is not None:
             if self.tensor_parallel_size != 1:
                 raise ValueError("FP8 currently requires tensor_parallel_size=1")
