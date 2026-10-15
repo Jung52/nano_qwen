@@ -5,7 +5,11 @@ from torch import nn
 class Sampler(nn.Module):
 
     @torch.compile(dynamic=True)
-    def forward(self, logits: torch.Tensor, temperatures: torch.Tensor):
+    def forward(self, logits: torch.Tensor, temperatures: torch.Tensor, all_greedy: bool = False):
+        # The runner derives this hint from CPU request metadata. Branching on
+        # a Python bool avoids temperature tensor reads or device synchronization.
+        if all_greedy:
+            return logits.argmax(dim=-1)
         # MTP verifies greedy proposals with argmax. Tiny temperature alone
         # still samples randomly among tied BF16 logits; keep one tie rule.
         greedy_tokens = logits.argmax(dim=-1)

@@ -882,7 +882,8 @@ class ModelRunner:
             normal_tokens = (
                 torch.empty(bs, dtype=torch.int64, device=logits.device)
                 if speculative_batch
-                else self.sampler(tail_logits, temperatures)
+                else self.sampler(tail_logits, temperatures,
+                                  all_greedy=all(seq.temperature <= 1e-6 for seq in seqs))
             )
 
         output_gpu = torch.full(

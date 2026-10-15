@@ -1,5 +1,7 @@
 # FP8 small-batch MTP（2026-10-15）
 
+后续已加入全greedy fast path，off基线显著加快。这里保留`7dc09b9`阶段的原始结果；新的受控交错对照见[greedy fast path报告](../mtp_greedy_fast_path/results.md)，不能继续把下表提升直接套到新版本。
+
 先完成[B1长度/实际内容矩阵](b1_results.md)及[reuse新trace](reuse_trace.md)，再将B2接入正式生产路径。本轮为4070 Ti SUPER、TP1、FP8 target + 独立BF16 MTP权重；B4/8和5090尚未测量，B4/8继续guard，普通decode B64峰值仍是独立历史基线。
 
 ## 行为与严格门禁

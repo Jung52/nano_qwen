@@ -56,7 +56,7 @@ def runner(monkeypatch):
     r.batch_slots_gpu = torch.tensor([0])
     r.sampled_token_ids_gpu = torch.zeros(1, dtype=torch.long)
     r.gdn_layers = []
-    r.sampler = lambda logits, temperatures: logits.argmax(dim=-1)
+    r.sampler = lambda logits, temperatures, all_greedy=False: logits.argmax(dim=-1)
     r.config = SimpleNamespace(eos=1)
     r.mtp_stats = dict(draft_tokens=0, accepted_tokens=0, rejected_tokens=0, verify_steps=0)
     r.async_output = False

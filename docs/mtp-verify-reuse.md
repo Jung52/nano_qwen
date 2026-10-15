@@ -51,7 +51,10 @@ admissions respect slots held by in-flight/partial requests; a KV-blocked replay
 allows an allocated continuation to finish and free capacity.
 
 `temperature <= 1e-6` uses deterministic argmax, including tied highest logits;
-larger temperatures retain stochastic sampling. Tiny-temperature categorical
+the runner supplies an all-greedy hint from CPU Sequence temperatures so a
+fully greedy batch skips softmax, RNG and stochastic sampling entirely.
+Mixed/non-greedy batches retain the existing sampling path. This adds no GPU
+temperature scalar read. Larger temperatures retain stochastic sampling. Tiny-temperature categorical
 sampling was insufficient to match the verify path when BF16 top logits tied.
 
 ```bash
@@ -61,6 +64,7 @@ PYTHONPATH=src python benchmarks/bench_mtp_verify_reuse.py --model FP8_TARGET_DI
 PYTHONPATH=src python benchmarks/bench_mtp_small_batch.py --model FP8_TARGET_DIR --mtp-model ORIGINAL_BF16_DIR --output logs/mtp-b1.json
 PYTHONPATH=src python benchmarks/bench_mtp_batch2.py --model FP8_TARGET_DIR --mtp-model ORIGINAL_BF16_DIR --output logs/mtp-b2.json
 PYTHONPATH=src python benchmarks/profile_mtp_reuse.py --model FP8_TARGET_DIR --mtp-model ORIGINAL_BF16_DIR --output logs/mtp-profile.json
+PYTHONPATH=src python benchmarks/bench_mtp_interleaved.py --model FP8_TARGET_DIR --mtp-model ORIGINAL_BF16_DIR --output logs/mtp-greedy.json
 ```
 
 The first command compares off with the selected production mode. The second

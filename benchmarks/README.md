@@ -12,6 +12,7 @@
 | `bench_mtp_verify_reuse.py` | 正式serial/reuse路径的逐层/状态严格诊断；`--timing`每模式两次实际decode计时 |
 | `bench_mtp_small_batch.py` | B1长度矩阵及中文/代码，off/reuse每配置两次，保留全部completion与严格门禁 |
 | `bench_mtp_batch2.py` | B2异长eager off/serial/reuse门禁；三类Graph工作负载off/reuse各两次实际提交token计时 |
+| `bench_mtp_interleaved.py` | 同resident engine交错off/reuse；可选旧完整采样/greedy fast对照，每配置2次；实际提交token与严格completion门禁 |
 | `profile_mtp_reuse.py` | 独立reuse Graph/eager短trace；captured events拆分snapshot和MTP内置head，禁止用于正式TPOT |
 | `bench_piecewise_prefill_paths.py` | piecewise prefill路径对比 |
 | `bench_gdn_flashqla.py` | GDN kernel对比 |
