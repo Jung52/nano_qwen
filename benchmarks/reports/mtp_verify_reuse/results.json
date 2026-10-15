@@ -1,0 +1,1427 @@
+{
+  "date": "2026-10-15",
+  "production_base_commit": "3f8a3ba",
+  "experimental_only": true,
+  "protocol": {
+    "batch": 1,
+    "tensor_parallel": 1,
+    "prompt_tokens": 64,
+    "completion_tokens": 128,
+    "timed_decode_tokens": 127,
+    "formal_repeats": 2,
+    "prefill_graph": false,
+    "decode_graph": true,
+    "profiler": false,
+    "mtp_modes_order": [
+      "serial",
+      "reused",
+      "reused",
+      "serial"
+    ],
+    "same_engine": true,
+    "requires_exact_tokens": true
+  },
+  "source_sha256": {
+    "benchmarks/bench_mtp_verify_reuse.py": "30eb459c4204bb1f3b1c0bdd4a02357d8ad87a39ee9073235012ac7790018442",
+    "src/nano_qwen/layers/gated_delta_net.py": "b1381d406d7c8185110808e0858279fb0c0d4623a62d5617feb17189e78674ed",
+    "src/nano_qwen/engine/model_runner.py": "416037a38117fbe21d9b759552cb3308fe16f8f389aa53ddc6d7efb655ec6b1b",
+    "src/nano_qwen/quantization/triton_gemm.py": "5eb96f394fc78c5b92bd1ad82caffd13bab18aaabdca680a7e2e29da1bfcd2ed"
+  },
+  "correctness": {
+    "full_regression_tests": 286,
+    "tiny_fp8_tests": 10,
+    "new_tests": 11,
+    "cpu_nonfinite_tests": 1,
+    "serial_trajectory_diagnostics": {
+      "per_channel": {
+        "window_count": 66,
+        "strict_pass": true,
+        "comparison_per_window": 522,
+        "candidate_graph": false,
+        "windows": [
+          {
+            "positions": [
+              64,
+              65
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              66,
+              67
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              67,
+              68
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              69,
+              70
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              71,
+              72
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              73,
+              74
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              75,
+              76
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              77,
+              78
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              79,
+              80
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              81,
+              82
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              83,
+              84
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              85,
+              86
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              87,
+              88
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              89,
+              90
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              91,
+              92
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              93,
+              94
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              95,
+              96
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              97,
+              98
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              99,
+              100
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              101,
+              102
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              103,
+              104
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              105,
+              106
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              107,
+              108
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              109,
+              110
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              111,
+              112
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              113,
+              114
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              115,
+              116
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              116,
+              117
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              118,
+              119
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              119,
+              120
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              121,
+              122
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              123,
+              124
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              125,
+              126
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              127,
+              128
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              129,
+              130
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              131,
+              132
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              133,
+              134
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              135,
+              136
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              137,
+              138
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              138,
+              139
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              140,
+              141
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              142,
+              143
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              144,
+              145
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              146,
+              147
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              148,
+              149
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              150,
+              151
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              152,
+              153
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              154,
+              155
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              156,
+              157
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              158,
+              159
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              160,
+              161
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              162,
+              163
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              164,
+              165
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              166,
+              167
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              168,
+              169
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              170,
+              171
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              172,
+              173
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              174,
+              175
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              176,
+              177
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              178,
+              179
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              180,
+              181
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              182,
+              183
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              184,
+              185
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              185,
+              186
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              187,
+              188
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              189,
+              190
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          }
+        ],
+        "scope": "candidate vs serial at each verify prefix on authoritative serial trajectory; all layers/hidden/logits/GDN/snapshot/valid target KV"
+      },
+      "block_wise": {
+        "window_count": 70,
+        "strict_pass": true,
+        "comparison_per_window": 522,
+        "candidate_graph": false,
+        "windows": [
+          {
+            "positions": [
+              64,
+              65
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              66,
+              67
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              68,
+              69
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              69,
+              70
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              71,
+              72
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              73,
+              74
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              74,
+              75
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              76,
+              77
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              78,
+              79
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              80,
+              81
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              82,
+              83
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              84,
+              85
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              86,
+              87
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              88,
+              89
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              90,
+              91
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              92,
+              93
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              94,
+              95
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              96,
+              97
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              98,
+              99
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              100,
+              101
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              102,
+              103
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              103,
+              104
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              105,
+              106
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              107,
+              108
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              109,
+              110
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              111,
+              112
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              113,
+              114
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              115,
+              116
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              116,
+              117
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              118,
+              119
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              119,
+              120
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              121,
+              122
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              122,
+              123
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              124,
+              125
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              126,
+              127
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              128,
+              129
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              130,
+              131
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              132,
+              133
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              134,
+              135
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              136,
+              137
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              138,
+              139
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              140,
+              141
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              142,
+              143
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              144,
+              145
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              145,
+              146
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              147,
+              148
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              149,
+              150
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              151,
+              152
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              153,
+              154
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              154,
+              155
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              156,
+              157
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              158,
+              159
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              160,
+              161
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              161,
+              162
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              163,
+              164
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              164,
+              165
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              166,
+              167
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              168,
+              169
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              170,
+              171
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              172,
+              173
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              174,
+              175
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              175,
+              176
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              177,
+              178
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              179,
+              180
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              181,
+              182
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              182,
+              183
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              184,
+              185
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              185,
+              186
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              187,
+              188
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          },
+          {
+            "positions": [
+              189,
+              190
+            ],
+            "strict_pass": true,
+            "first_difference": null
+          }
+        ],
+        "scope": "candidate vs serial at each verify prefix on authoritative serial trajectory; all layers/hidden/logits/GDN/snapshot/valid target KV"
+      }
+    },
+    "initial_window_diagnostics": [
+      {
+        "quantization": "per_channel",
+        "pinned": false,
+        "comparison_count": 522,
+        "strict_pass": true,
+        "all_finite": true,
+        "scope": "initial single-window eager; before rowwise normalization fix"
+      },
+      {
+        "quantization": "per_channel",
+        "pinned": true,
+        "comparison_count": 522,
+        "strict_pass": true,
+        "all_finite": true,
+        "scope": "initial single-window eager; before rowwise normalization fix"
+      },
+      {
+        "quantization": "block_wise",
+        "pinned": false,
+        "comparison_count": 522,
+        "strict_pass": true,
+        "all_finite": true,
+        "scope": "initial single-window eager; before rowwise normalization fix"
+      },
+      {
+        "quantization": "block_wise",
+        "pinned": true,
+        "comparison_count": 522,
+        "strict_pass": true,
+        "all_finite": true,
+        "scope": "initial single-window eager; before rowwise normalization fix"
+      }
+    ],
+    "rejected_batched_norm": {
+      "full_completion_gate_failed": true,
+      "positions": [
+        69,
+        70
+      ],
+      "first_difference": {
+        "layer": 26,
+        "stage": "post_norm",
+        "component": 0,
+        "equal": false,
+        "shape": [
+          2,
+          2560
+        ],
+        "mismatches": 1,
+        "max_abs": 0.015625,
+        "relative_l2": 0.00017764151562005281,
+        "finite": true
+      },
+      "failed_timing_excluded": true,
+      "tiny_bf16_first_difference": {
+        "layer": 1,
+        "stage": "gate_up",
+        "scope": "CPU-generated BF16 tiny checkpoint, real CUDA forwards"
+      }
+    }
+  },
+  "samples": [
+    {
+      "quantization": "per_channel",
+      "repeat": 1,
+      "mode": "off",
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.5049015270014934,
+        "tokens_per_s": 84.39090380421547,
+        "stop_reason": "max_tokens",
+        "windows": []
+      }
+    },
+    {
+      "quantization": "per_channel",
+      "repeat": 2,
+      "mode": "off",
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.5025713280010677,
+        "tokens_per_s": 84.52177785726373,
+        "stop_reason": "max_tokens",
+        "windows": []
+      }
+    },
+    {
+      "quantization": "per_channel",
+      "repeat": 1,
+      "mode": "serial",
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.8339014500015764,
+        "tokens_per_s": 69.25126756396361,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 67,
+        "accepted_tokens": 60,
+        "rejected_tokens": 6,
+        "verify_steps": 66
+      }
+    },
+    {
+      "quantization": "per_channel",
+      "repeat": 1,
+      "mode": "reused",
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.369705419998354,
+        "tokens_per_s": 92.72066690088195,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 67,
+        "accepted_tokens": 60,
+        "rejected_tokens": 6,
+        "verify_steps": 66
+      }
+    },
+    {
+      "quantization": "per_channel",
+      "repeat": 2,
+      "mode": "reused",
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.39550522799982,
+        "tokens_per_s": 91.00646665582853,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 67,
+        "accepted_tokens": 60,
+        "rejected_tokens": 6,
+        "verify_steps": 66
+      }
+    },
+    {
+      "quantization": "per_channel",
+      "repeat": 2,
+      "mode": "serial",
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.8383924660010962,
+        "tokens_per_s": 69.0820933770756,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 67,
+        "accepted_tokens": 60,
+        "rejected_tokens": 6,
+        "verify_steps": 66
+      }
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 1,
+      "mode": "off",
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.5896247860000585,
+        "tokens_per_s": 79.8930672939289,
+        "stop_reason": "max_tokens",
+        "windows": []
+      }
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 2,
+      "mode": "off",
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.5871278869999514,
+        "tokens_per_s": 80.0187565477538,
+        "stop_reason": "max_tokens",
+        "windows": []
+      }
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 1,
+      "mode": "serial",
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 2.0412748570015538,
+        "tokens_per_s": 62.21602130864013,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 70,
+        "accepted_tokens": 57,
+        "rejected_tokens": 13,
+        "verify_steps": 70
+      }
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 1,
+      "mode": "reused",
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.5198425589987892,
+        "tokens_per_s": 83.56128682411845,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 70,
+        "accepted_tokens": 57,
+        "rejected_tokens": 13,
+        "verify_steps": 70
+      }
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 2,
+      "mode": "reused",
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.5105244709993713,
+        "tokens_per_s": 84.07675773433589,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 70,
+        "accepted_tokens": 57,
+        "rejected_tokens": 13,
+        "verify_steps": 70
+      }
+    },
+    {
+      "quantization": "block_wise",
+      "repeat": 2,
+      "mode": "serial",
+      "exact_tokens": true,
+      "metrics": {
+        "tokens": 127,
+        "elapsed_s": 1.9922221870001522,
+        "tokens_per_s": 63.74790966023425,
+        "stop_reason": "max_tokens",
+        "windows": [],
+        "draft_tokens": 70,
+        "accepted_tokens": 57,
+        "rejected_tokens": 13,
+        "verify_steps": 70
+      }
+    }
+  ],
+  "summary": {
+    "per_channel": {
+      "off": 84.4563408307396,
+      "serial": 69.1666804705196,
+      "reused": 91.86356677835525,
+      "reused_vs_serial": 1.3281476883585526,
+      "reused_vs_off": 1.0877047936810404
+    },
+    "block_wise": {
+      "off": 79.95591192084134,
+      "serial": 62.98196548443719,
+      "reused": 83.81902227922717,
+      "reused_vs_serial": 1.3308416406906007,
+      "reused_vs_off": 1.0483155062030987
+    }
+  },
+  "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER",
+  "torch": "2.12.1+cu130",
+  "models": {
+    "per_channel": {
+      "target": "/home/wei/code/models/4b-channel-fp8",
+      "mtp": "/home/wei/code/models/4b",
+      "experiment_sha256": "30eb459c4204bb1f3b1c0bdd4a02357d8ad87a39ee9073235012ac7790018442",
+      "eager_128_tokens_exact": true
+    },
+    "block_wise": {
+      "target": "/home/wei/code/models/4b_block_fp8",
+      "mtp": "/home/wei/code/models/4b",
+      "experiment_sha256": "30eb459c4204bb1f3b1c0bdd4a02357d8ad87a39ee9073235012ac7790018442",
+      "eager_128_tokens_exact": true
+    }
+  }
+}

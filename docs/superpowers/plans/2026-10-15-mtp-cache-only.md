@@ -8,12 +8,18 @@ Use inline execution; the user's design supplies the implementation scope.
   CUDA Graph and acceptance catch-up dispatch. Preserve serial verification.
 - [x] Run the existing forced-decision/cache lifecycle suite and real FP8 B1
   correctness gates. Measure input64/output128, two runs, profiler disabled.
-- [ ] Build an independent two-token layer experiment: batch dense/MLP work,
+- [x] Build an independent two-token layer experiment: batch dense/MLP work,
   sequential GDN updates and first-row snapshot, single-query attention.
   Compare each layer's hidden/residual, logits and final/snapshot/KV state to
   two ordinary B1 forwards; record the first mismatch without drift waivers.
-- [ ] Integrate only proven changes; retain serial reference and all existing
+- [x] Integrate only proven changes; retain serial reference and all existing
   B1/TP1 guards. Leave snapshots/synchronization and B4/8/5090 for later.
 
 Preserve root README/DEVELOPMENT_LOG/evidence changes, linear.py and craft.py.
 Keep correctness diagnostics separate from exactly two formal samples.
+
+Outcome: cache-only is production code; two-token reuse remains an independent
+benchmark. M2 normalization first diverged at layer26/post_norm, positions69/70;
+preserving M1 normalization fixed the observed trajectory. Both FP8 models then
+passed every serial-trajectory verify window and formal eager/Graph token gates.
+Full regression: 286 passed. Snapshot/sync, B4/8 and 5090 remain deferred.

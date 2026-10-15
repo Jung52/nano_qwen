@@ -6,7 +6,7 @@ attention, GDN, scheduler, sampling, rollback and graph replay are real.
 """
 
 from types import SimpleNamespace
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -73,9 +73,9 @@ def tiny_checkpoint(tmp_path_factory):
     return path
 
 
-@pytest.fixture(scope="module", params=[True, False], ids=["eager", "graph"])
+@contextmanager
 @torch.inference_mode()
-def engine(request, tiny_checkpoint):
+def hybrid_engine(checkpoint, eager, mtp_model=None):
     observed = SimpleNamespace(latest=None, captured=None)
     original_capture = ModelRunner.capture_cudagraph
 
@@ -102,8 +102,8 @@ def engine(request, tiny_checkpoint):
 
     with torch.inference_mode(), patch.object(ModelRunner, "allocate_kv_cache", small_cache), \
          patch.object(ModelRunner, "capture_cudagraph", capture):
-        value = LLMEngine(str(tiny_checkpoint), max_num_seqs=1, max_num_batched_tokens=1024,
-                          max_model_len=1024, enable_mtp=True, enforce_eager=request.param,
+        value = LLMEngine(str(checkpoint), max_num_seqs=1, max_num_batched_tokens=1024,
+                          max_model_len=1024, enable_mtp=True, enforce_eager=eager, mtp_model=mtp_model,
                           use_prefill_cudagraph=False)
     handle = value.model_runner.mtp.register_forward_hook(
         lambda m, args, output: setattr(observed, "latest", output))
@@ -113,6 +113,12 @@ def engine(request, tiny_checkpoint):
     finally:
         handle.remove()
         value.exit()
+
+
+@pytest.fixture(scope="module", params=[True, False], ids=["eager", "graph"])
+def engine(request, tiny_checkpoint):
+    with hybrid_engine(tiny_checkpoint, request.param) as value:
+        yield value
 
 
 def valid_cache(cache, blocks, count):
