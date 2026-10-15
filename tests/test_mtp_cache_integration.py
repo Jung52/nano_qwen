@@ -78,7 +78,7 @@ def tiny_checkpoint(tmp_path_factory):
 
 @contextmanager
 @torch.inference_mode()
-def hybrid_engine(checkpoint, eager, mtp_model=None, mtp_verify_mode="serial"):
+def hybrid_engine(checkpoint, eager, mtp_model=None, mtp_verify_mode="serial", max_num_seqs=1):
     observed = SimpleNamespace(latest=None, captured=None)
     original_capture = ModelRunner.capture_cudagraph
 
@@ -105,7 +105,7 @@ def hybrid_engine(checkpoint, eager, mtp_model=None, mtp_verify_mode="serial"):
 
     with torch.inference_mode(), patch.object(ModelRunner, "allocate_kv_cache", small_cache), \
          patch.object(ModelRunner, "capture_cudagraph", capture):
-        value = LLMEngine(str(checkpoint), max_num_seqs=1, max_num_batched_tokens=1024,
+        value = LLMEngine(str(checkpoint), max_num_seqs=max_num_seqs, max_num_batched_tokens=1024,
                           max_model_len=1024, enable_mtp=True, enforce_eager=eager, mtp_model=mtp_model,
                           mtp_verify_mode=mtp_verify_mode,
                           use_prefill_cudagraph=False)

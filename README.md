@@ -26,7 +26,7 @@ trying to keep the implementation small and easy to understand.
 - [ ] Gated DeltaNet / hybrid model architecture
 
 ### 3. Advanced Inference
-- [x] Qwen3.5 MTP2 greedy speculative decoding (opt-in, TP=1, batch size 1)
+- [x] Qwen3.5 MTP2 greedy speculative decoding (opt-in, TP=1, FP8 batch size 1/2)
 - [ ] FP8 / INT8 / INT4 quantization
 - [ ] CUDA Graph optimization
 - [ ] Efficient KV Cache management
@@ -60,14 +60,16 @@ engine = LLMEngine(
 The path loads `mtp.*` weights, allocates a separate MTP KV cache, drafts one
 token, verifies two target tokens, and rolls back both full-attention
 KV bookkeeping and GDN recurrent state after rejection. It currently supports
-greedy sampling only (`temperature <= 1e-6`); stochastic rejection sampling,
-tensor parallelism, and multi-request batching are not implemented.
+greedy sampling only (`temperature <= 1e-6`, deterministic argmax including
+ties). FP8 supports B1/B2; BF16 remains B1 serial. Stochastic rejection
+sampling, tensor parallelism and B4/8 are not implemented.
 
-Verify captures two sequential B1 target forwards in one CUDA Graph and keeps
-the GDN state after the first row for rejection rollback. The LM head also
-processes each row separately to preserve ordinary greedy decode arithmetic.
-The one-layer MTP decode has its own CUDA Graph. This correctness path retains
-two target forwards; acceleration must be measured rather than assumed.
+`mtp_verify_mode="serial"` captures two ordinary B-request target forwards.
+`mtp_verify_mode="reuse"` shares 2B dense rows using ordinary M=B tile choices,
+with B-row norms/head and sequential state/attention steps. Each request has
+its own first-step snapshot, acceptance and cache catch-up. Verify and MTP
+draft/cache-only use exact B1/B2 graphs without padding state writes. See
+[interfaces](docs/mtp-verify-reuse.md) and the [B1 matrix, trace and B2 report](benchmarks/reports/mtp_small_batch/results.md).
 
 MTP RoPE positions start at 1, while its cache rows start at 0. Accepted draft
 and bonus pairs are appended in order. Chunked prefill preserves the preceding

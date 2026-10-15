@@ -10,6 +10,9 @@
 | `bench_one_batch.py` | 固定batch的正式计时与独立profile，按prefill/decode聚合GPU事件并导出Perfetto trace |
 | `bench_qwen3_5_mtp_production.py` | B1 greedy MTP生产对照；独立MTP权重、实际提交token计数及严格completion比较 |
 | `bench_mtp_verify_reuse.py` | 正式serial/reuse路径的逐层/状态严格诊断；`--timing`每模式两次实际decode计时 |
+| `bench_mtp_small_batch.py` | B1长度矩阵及中文/代码，off/reuse每配置两次，保留全部completion与严格门禁 |
+| `bench_mtp_batch2.py` | B2异长eager off/serial/reuse门禁；三类Graph工作负载off/reuse各两次实际提交token计时 |
+| `profile_mtp_reuse.py` | 独立reuse Graph/eager短trace；captured events拆分snapshot和MTP内置head，禁止用于正式TPOT |
 | `bench_piecewise_prefill_paths.py` | piecewise prefill路径对比 |
 | `bench_gdn_flashqla.py` | GDN kernel对比 |
 | `validate_engine_qwen35.py` | engine运行路径与正确性校验 |

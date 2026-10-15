@@ -454,7 +454,7 @@ class ModelRunner:
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             slot_mapping=slot_mapping,
-            context_lens=cu_seqlens_k[1:] if is_verify else None,
+            context_lens=cu_seqlens_k[1:] - cu_seqlens_k[:-1] if is_verify else None,
             block_tables=block_tables,
             state_indices=state_indices,
             prefill_slices=prefill_slices,
@@ -530,33 +530,39 @@ class ModelRunner:
         return forward_verify_reuse(self.model, input_ids, positions, observe)
 
     def forward_verify_serial(self, input_ids: torch.Tensor, positions: torch.Tensor):
-        """Verify two rows with the ordinary B1 decode arithmetic.
+        """Verify two time steps with ordinary B-request decode arithmetic.
 
         Different GEMV/GEMM and attention shapes can flip greedy top-1.
         Keep one graph boundary but execute each target row as ordinary
         decode, taking the rollback snapshot after its authoritative row.
         """
         context = get_context()
-        if input_ids.numel() != 2 or context.state_indices.numel() != 1:
-            raise ValueError("MTP2 verification requires one request and two rows")
+        batch = context.state_indices.numel()
+        if batch not in (1, 2) or input_ids.numel() != 2 * batch:
+            raise ValueError("MTP2 verification requires B1/B2 and two rows per request")
+        ids = input_ids.reshape(batch, 2).T.contiguous()
+        pos = positions.reshape(batch, 2).T.contiguous()
+        slots = context.slot_mapping.reshape(batch, 2).T.contiguous()
         hidden = []
         try:
             for row in range(2):
                 set_context(False,
-                    slot_mapping=context.slot_mapping[row:row + 1],
+                    slot_mapping=slots[row],
                     context_lens=context.context_lens - (1 - row),
                     block_tables=context.block_tables, state_indices=context.state_indices)
-                hidden.append(self.model(input_ids[row:row + 1], positions[row:row + 1]))
+                hidden.append(self.model(ids[row], pos[row]))
                 if row == 0:
                     for layer in self.gdn_layers:
                         layer.save_speculative_state(context.state_indices)
-            return torch.cat(hidden, dim=0)
+            return torch.stack(hidden, dim=1).reshape(2 * batch, -1)
         finally:
             set_context(**{field.name: getattr(context, field.name) for field in fields(context)})
 
     def compute_verify_logits(self, hidden: torch.Tensor):
-        # The vocabulary head must also keep the baseline's M=1 path.
-        return torch.cat([self.model.compute_logits(row.unsqueeze(0)) for row in hidden], dim=0)
+        # Vocabulary projections also preserve ordinary M=B arithmetic.
+        batch = hidden.shape[0] // 2
+        rows = hidden.reshape(batch, 2, -1).transpose(0, 1).contiguous()
+        return torch.stack([self.model.compute_logits(row) for row in rows], dim=1).reshape(2 * batch, -1)
 
     @torch.inference_mode()
     def run_model(
@@ -895,14 +901,20 @@ class ModelRunner:
         if speculative_batch:
             assert self.mtp is not None
             self.mtp_stats["verify_steps"] += 1
+            # Request-major rows -> one prediction pair and accept bit per
+            # request. Transfer the small decision table once for host-owned
+            # lifecycle/EOS handling; caches remain independently indexed.
+            verify_tokens = logits.reshape(bs, 2, -1).argmax(dim=-1)
+            drafts = torch.tensor([seq.draft_token for seq in seqs], device=logits.device)
+            accept_mask = verify_tokens[:, 0] == drafts
+            decisions = torch.cat([verify_tokens, accept_mask[:, None].to(torch.int64)], dim=1).tolist()
 
         for i, seq in enumerate(seqs):
             start = starts[i]
             if is_prefill and seq.is_speculative:
-                first_token = logits[start].argmax()
+                first_token = verify_tokens[i, 0]
                 draft_token = seq.draft_token
-                first_token_id = int(first_token.item())
-                accepted = first_token_id == draft_token
+                first_token_id, second_token_id, accepted = decisions[i]
                 draft_is_eos = (
                     not seq.ignore_eos and draft_token == self.config.eos
                 )
@@ -916,7 +928,7 @@ class ModelRunner:
                         else:
                             layer.commit_speculative_state()
                     if not draft_is_eos:
-                        second_token = logits[start + 1].argmax()
+                        second_token = verify_tokens[i, 1]
                         output_gpu[i, 1] = second_token
                         sampled_values[i] = second_token
                     else:
@@ -936,7 +948,7 @@ class ModelRunner:
                         first_token_id == self.config.eos
                         or (
                             second_token is not None
-                            and int(second_token.item()) == self.config.eos
+                            and second_token_id == self.config.eos
                         )
                     )
                 )

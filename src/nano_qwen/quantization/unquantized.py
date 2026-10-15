@@ -16,8 +16,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
         # utils.loader imports this class while initializing the package.
         from nano_qwen.utils.context import get_context
 
-        if get_context().gemm_reference_m == 1 and x.numel() // x.shape[-1] == 2:
-            flat = x.reshape(2, x.shape[-1])
-            return torch.cat([F.linear(flat[i:i+1], layer.weight, bias) for i in range(2)]).reshape(
+        reference_m = get_context().gemm_reference_m
+        if reference_m is not None and x.numel() // x.shape[-1] == 2 * reference_m:
+            flat = x.reshape(2 * reference_m, x.shape[-1])
+            return torch.cat([F.linear(v, layer.weight, bias) for v in flat.split(reference_m)]).reshape(
                 *x.shape[:-1], layer.weight.shape[0])
         return F.linear(x, layer.weight, bias)

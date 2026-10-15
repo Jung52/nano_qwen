@@ -127,7 +127,8 @@ def test_per_channel_handles_k_and_n_tails():
 
 @pytest.mark.parametrize("block", [False, True])
 @pytest.mark.parametrize("capturing", [False, True])
-def test_reuse_launch_selects_m1_tile_without_overwriting_m2(monkeypatch, block, capturing):
+@pytest.mark.parametrize("reference_m", [1, 2])
+def test_reuse_launch_selects_m1_tile_without_overwriting_m2(monkeypatch, block, capturing, reference_m):
     from nano_qwen.quantization.fp8 import fp8_per_channel_mm, _per_channel_mm_tuned
     from nano_qwen.quantization.fp8_block import fp8_block_mm, _block_mm_tuned
     from nano_qwen.quantization.triton_gemm import GEMM_CONFIGS, gemm_key
@@ -135,9 +136,9 @@ def test_reuse_launch_selects_m1_tile_without_overwriting_m2(monkeypatch, block,
 
     mm = fp8_block_mm if block else fp8_per_channel_mm
     tuner = _block_mm_tuned if block else _per_channel_mm_tuned
-    _, q, w, sa, sw, _ = fixture(block, m=2, n=128, k=128)
-    expected = torch.cat([mm(q[i:i+1], w, sa[i:i+1], sw) for i in range(2)])
-    m1_key = gemm_key(q[:1], w, sa[:1], sw, expected[:1])
+    _, q, w, sa, sw, _ = fixture(block, m=2 * reference_m, n=128, k=128)
+    expected = torch.cat([mm(q[i:i+reference_m], w, sa[i:i+reference_m], sw) for i in range(0, 2 * reference_m, reference_m)])
+    m1_key = gemm_key(q[:reference_m], w, sa[:reference_m], sw, expected[:reference_m])
     m2_key = gemm_key(q, w, sa, sw, expected)
     chosen = tuner.cache[m1_key]
     sentinel = next(c for c in GEMM_CONFIGS if c is not chosen)
@@ -156,7 +157,7 @@ def test_reuse_launch_selects_m1_tile_without_overwriting_m2(monkeypatch, block,
 
     monkeypatch.setattr(tuner, "fn", RecordingKernel())
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
-    set_context(False, gemm_reference_m=1)
+    set_context(False, gemm_reference_m=reference_m)
     try:
         actual = mm(q, w, sa, sw)
     finally:
@@ -195,27 +196,28 @@ def test_reuse_cold_eager_warms_m1_and_cold_capture_fails_closed(monkeypatch, bl
     assert torch.equal(actual, expected)
 
 
-def test_reuse_keeps_unquantized_checkpoint_exceptions_on_single_row_math(monkeypatch):
+@pytest.mark.parametrize("reference_m", [1, 2])
+def test_reuse_keeps_unquantized_checkpoint_exceptions_on_single_row_math(monkeypatch, reference_m):
     from nano_qwen.quantization.unquantized import UnquantizedLinearMethod
     from nano_qwen.utils.context import set_context, reset_context
     import torch.nn.functional as functional
 
-    x = torch.randn(2, 256, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(2 * reference_m, 256, device="cuda", dtype=torch.bfloat16)
     layer = SimpleNamespace(weight=torch.randn(512, 256, device="cuda", dtype=x.dtype))
     bias = torch.randn(512, device="cuda", dtype=x.dtype)
     original = functional.linear
-    expected = torch.cat([original(row.unsqueeze(0), layer.weight, bias) for row in x])
+    expected = torch.cat([original(x[i:i+reference_m], layer.weight, bias) for i in range(0, 2 * reference_m, reference_m)])
     rows = []
     def linear(values, weight, bias=None):
         rows.append(values.shape[0])
         return original(values, weight, bias)
     monkeypatch.setattr(functional, "linear", linear)
-    set_context(False, gemm_reference_m=1)
+    set_context(False, gemm_reference_m=reference_m)
     try:
         actual = UnquantizedLinearMethod().apply(layer, x, bias)
     finally:
         reset_context()
-    assert rows == [1, 1]
+    assert rows == [reference_m, reference_m]
     assert torch.equal(actual, expected)
 
 
@@ -317,7 +319,7 @@ def test_cached_launch_reuses_selected_tile(monkeypatch, capturing):
 
 
 def test_validated_block_prefill_policy_applies_to_eager_and_cold_graph_but_preserves_decode(monkeypatch):
-    from nano_qwen.quantization.fp8_block import fp8_block_mm, _block_mm_tuned, _block_mm_prefill_tuned
+    from nano_qwen.quantization.fp8_block import fp8_block_mm, _block_mm_tuned
     from nano_qwen.quantization.triton_gemm import GEMM_CONFIGS, gemm_key
 
     if torch.cuda.get_device_properties(0).name != 'NVIDIA GeForce RTX 4070 Ti SUPER':

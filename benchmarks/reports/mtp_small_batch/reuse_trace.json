@@ -1,0 +1,782 @@
+{
+  "channel": {
+    "graph": {
+      "kernel_us": 228798.50300000253,
+      "kernel_groups_us": {
+        "phase.target_verify": 144667.35299999433,
+        "phase.lm_head": 76119.70099999999,
+        "other": 181.413,
+        "phase.mtp_cache_only": 1431.3609999999987,
+        "phase.mtp_draft": 6398.674999999989
+      },
+      "lm_head_kernel_signatures": [
+        {
+          "name": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, float, false, true, true, false, 7, false, cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16>, float> >(cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16>, float>)",
+          "grid": [
+            31040,
+            1,
+            1
+          ],
+          "block": [
+            16,
+            8,
+            1
+          ]
+        }
+      ],
+      "device_busy_union_us": 229262.25659179688,
+      "device_span_us": 284241.1689453125,
+      "device_gap_fraction": 0.19342346697178647,
+      "snapshot_event_us_per_round": 329.87200003117323,
+      "mtp_lm_head_event_us_per_round": 2141.5333449840546,
+      "rounds": [
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 314.33599907904863,
+          "phase.lm_head_gpu_us": 2199.903964996338
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 312.8959983587265,
+          "phase.lm_head_gpu_us": 2197.6640224456787
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 545.5360012128949,
+          "phase.lm_head_gpu_us": 2211.6799354553223
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 303.0720008537173,
+          "phase.lm_head_gpu_us": 2200.063943862915
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 285.8560001477599,
+          "phase.lm_head_gpu_us": 2210.2720737457275
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 289.37600273638964,
+          "phase.lm_head_gpu_us": 1956.8320512771606
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 290.59200175106525,
+          "phase.lm_head_gpu_us": 2206.0799598693848
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 291.3279999047518,
+          "phase.lm_head_gpu_us": 1974.784016609192
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 452.03199330717325,
+          "phase.lm_head_gpu_us": 2202.4641036987305
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 285.66400054842234,
+          "phase.lm_head_gpu_us": 2166.656017303467
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 293.440000154078,
+          "phase.lm_head_gpu_us": 1973.3439683914185
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 294.3360023200512,
+          "phase.lm_head_gpu_us": 2198.6560821533203
+        }
+      ],
+      "operator_events": [
+        {
+          "name": "cudaStreamSynchronize",
+          "count": 96,
+          "cpu_us": 189214.98900000003,
+          "self_cpu_us": 189214.98900000003,
+          "gpu_us": 0,
+          "self_gpu_us": 0
+        },
+        {
+          "name": "phase.target_verify",
+          "count": 12,
+          "cpu_us": 50018.77499999999,
+          "self_cpu_us": 613.6689999999307,
+          "gpu_us": 46464.51899999997,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.target_verify",
+          "count": 12,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 206771.47799999994,
+          "self_gpu_us": 206771.47799999994
+        },
+        {
+          "name": "cudaGraphLaunch",
+          "count": 36,
+          "cpu_us": 42509.429000000055,
+          "self_cpu_us": 40814.65700000006,
+          "gpu_us": 0,
+          "self_gpu_us": 0
+        },
+        {
+          "name": "phase.lm_head",
+          "count": 24,
+          "cpu_us": 3464.3520000000663,
+          "self_cpu_us": 1539.6109999999844,
+          "gpu_us": 50507.095000000016,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "aten::item",
+          "count": 12,
+          "cpu_us": 156399.91200000007,
+          "self_cpu_us": 107.6660000000229,
+          "gpu_us": 19.102000000035332,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.lm_head",
+          "count": 24,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 50507.095000000016,
+          "self_gpu_us": 50507.095000000016
+        },
+        {
+          "name": "phase.mtp_cache_only",
+          "count": 12,
+          "cpu_us": 8642.256000000008,
+          "self_cpu_us": 3123.5919999998187,
+          "gpu_us": 108.5739999999787,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.mtp_cache_only",
+          "count": 12,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 8330.250000000007,
+          "self_gpu_us": 8330.250000000007
+        },
+        {
+          "name": "phase.mtp_draft",
+          "count": 12,
+          "cpu_us": 7143.275999999994,
+          "self_cpu_us": 2332.7090000003336,
+          "gpu_us": 109.1820000000771,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.mtp_draft",
+          "count": 12,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 37786.45900000003,
+          "self_gpu_us": 37786.45900000003
+        },
+        {
+          "name": "cudaDeviceSynchronize",
+          "count": 2,
+          "cpu_us": 18.986000000033528,
+          "self_cpu_us": 18.986000000033528,
+          "gpu_us": 0,
+          "self_gpu_us": 0
+        }
+      ]
+    },
+    "eager": {
+      "kernel_us": 257254.56899998503,
+      "kernel_groups_us": {
+        "phase.target_verify": 172692.02000000203,
+        "phase.lm_head": 75568.10600000001,
+        "other": 239.388,
+        "phase.mtp_cache_only": 1790.0819999999994,
+        "phase.mtp_draft": 6964.973000000005
+      },
+      "lm_head_kernel_signatures": [
+        {
+          "name": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, float, false, true, true, false, 7, false, cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16>, float> >(cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16>, float>)",
+          "grid": [
+            31040,
+            1,
+            1
+          ],
+          "block": [
+            16,
+            8,
+            1
+          ]
+        }
+      ],
+      "device_busy_union_us": 258784.94384765625,
+      "device_span_us": 1438833.4870605469,
+      "device_gap_fraction": 0.8201425347860517,
+      "snapshot_event_us_per_round": 0,
+      "mtp_lm_head_event_us_per_round": 0,
+      "rounds": [
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        }
+      ],
+      "operator_events": [
+        {
+          "name": "cudaStreamSynchronize",
+          "count": 96,
+          "cpu_us": 74022.06199999982,
+          "self_cpu_us": 74022.06199999982,
+          "gpu_us": 0,
+          "self_gpu_us": 0
+        },
+        {
+          "name": "phase.target_verify",
+          "count": 12,
+          "cpu_us": 1299035.064,
+          "self_cpu_us": 580269.9530000071,
+          "gpu_us": 129282.29899999294,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.target_verify",
+          "count": 12,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 1347477.268,
+          "self_gpu_us": 1347477.268
+        },
+        {
+          "name": "phase.save_speculative_state",
+          "count": 288,
+          "cpu_us": 25613.44299999986,
+          "self_cpu_us": 10277.268999999687,
+          "gpu_us": 3658.0359999986104,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.save_speculative_state",
+          "count": 288,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 15272.649000000914,
+          "self_gpu_us": 15272.649000000914
+        },
+        {
+          "name": "phase.lm_head",
+          "count": 36,
+          "cpu_us": 2494.4379999994417,
+          "self_cpu_us": 995.4739999996964,
+          "gpu_us": 75568.10600000023,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.lm_head",
+          "count": 36,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 75568.10600000023,
+          "self_gpu_us": 75568.10600000023
+        },
+        {
+          "name": "aten::item",
+          "count": 12,
+          "cpu_us": 48338.93900000001,
+          "self_cpu_us": 44.369999999937136,
+          "gpu_us": 20.381999999808613,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.mtp_cache_only",
+          "count": 12,
+          "cpu_us": 18125.211999999796,
+          "self_cpu_us": 6551.556000002049,
+          "gpu_us": 1797.3799999968905,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.mtp_cache_only",
+          "count": 12,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 16644.461000000098,
+          "self_gpu_us": 16644.461000000098
+        },
+        {
+          "name": "phase.mtp_draft",
+          "count": 12,
+          "cpu_us": 32728.861999999906,
+          "self_cpu_us": 10303.587999997573,
+          "gpu_us": 31418.86699999898,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.mtp_draft",
+          "count": 12,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 56066.016000000294,
+          "self_gpu_us": 56066.016000000294
+        },
+        {
+          "name": "cudaDeviceSynchronize",
+          "count": 2,
+          "cpu_us": 17.985000000102445,
+          "self_cpu_us": 17.985000000102445,
+          "gpu_us": 0,
+          "self_gpu_us": 0
+        }
+      ]
+    }
+  },
+  "block": {
+    "graph": {
+      "kernel_us": 237356.34500003041,
+      "kernel_groups_us": {
+        "phase.target_verify": 152202.85200000126,
+        "phase.lm_head": 76398.50999999998,
+        "other": 204.032,
+        "phase.mtp_cache_only": 1524.3270000000016,
+        "phase.mtp_draft": 7026.623999999982
+      },
+      "lm_head_kernel_signatures": [
+        {
+          "name": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, float, false, true, true, false, 7, false, cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16>, float> >(cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16>, float>)",
+          "grid": [
+            31040,
+            1,
+            1
+          ],
+          "block": [
+            16,
+            8,
+            1
+          ]
+        }
+      ],
+      "device_busy_union_us": 237901.18432617188,
+      "device_span_us": 271354.51318359375,
+      "device_gap_fraction": 0.12328274354069035,
+      "snapshot_event_us_per_round": 343.445333186537,
+      "mtp_lm_head_event_us_per_round": 2147.002637386322,
+      "rounds": [
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 572.6400017738342,
+          "phase.lm_head_gpu_us": 1972.000002861023
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 348.191998898983,
+          "phase.lm_head_gpu_us": 2213.696002960205
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 305.21600134670734,
+          "phase.lm_head_gpu_us": 1967.9679870605469
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 312.64000199735165,
+          "phase.lm_head_gpu_us": 2188.9278888702393
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 301.5679996460676,
+          "phase.lm_head_gpu_us": 2219.7439670562744
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 307.0079991593957,
+          "phase.lm_head_gpu_us": 2442.5599575042725
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 303.03999967873096,
+          "phase.lm_head_gpu_us": 1984.7359657287598
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 311.58400140702724,
+          "phase.lm_head_gpu_us": 2185.728073120117
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 303.51999774575233,
+          "phase.lm_head_gpu_us": 2194.783926010132
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 309.7599996253848,
+          "phase.lm_head_gpu_us": 2199.1679668426514
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 450.8479945361614,
+          "phase.lm_head_gpu_us": 2208.479881286621
+        },
+        {
+          "committed": 2,
+          "accepted": 1,
+          "phase.save_speculative_state_gpu_us": 295.328002423048,
+          "phase.lm_head_gpu_us": 1986.240029335022
+        }
+      ],
+      "operator_events": [
+        {
+          "name": "cudaStreamSynchronize",
+          "count": 96,
+          "cpu_us": 209325.29400000023,
+          "self_cpu_us": 209325.29400000023,
+          "gpu_us": 0,
+          "self_gpu_us": 0
+        },
+        {
+          "name": "phase.target_verify",
+          "count": 12,
+          "cpu_us": 36561.18500000003,
+          "self_cpu_us": -776.960000000126,
+          "gpu_us": 48578.95899999993,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.target_verify",
+          "count": 12,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 213065.93600000002,
+          "self_gpu_us": 213065.93600000002
+        },
+        {
+          "name": "cudaGraphLaunch",
+          "count": 36,
+          "cpu_us": 33206.29399999989,
+          "self_cpu_us": 28852.46399999989,
+          "gpu_us": 1.1209999999846332,
+          "self_gpu_us": 1.1209999999846332
+        },
+        {
+          "name": "phase.lm_head",
+          "count": 24,
+          "cpu_us": 2150.1820000000653,
+          "self_cpu_us": 736.0860000000721,
+          "gpu_us": 50676.937000000005,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "aten::item",
+          "count": 12,
+          "cpu_us": 175569.38499999995,
+          "self_cpu_us": 59.64299999990908,
+          "gpu_us": 40.57100000004357,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.lm_head",
+          "count": 24,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 50676.937000000005,
+          "self_gpu_us": 50676.937000000005
+        },
+        {
+          "name": "phase.mtp_cache_only",
+          "count": 12,
+          "cpu_us": 5226.808000000008,
+          "self_cpu_us": 1790.874999999971,
+          "gpu_us": 117.84600000002683,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.mtp_cache_only",
+          "count": 12,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 5547.416000000005,
+          "self_gpu_us": 5547.416000000005
+        },
+        {
+          "name": "phase.mtp_draft",
+          "count": 12,
+          "cpu_us": 5771.877999999982,
+          "self_cpu_us": 1570.7440000001516,
+          "gpu_us": 121.01399999990463,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.mtp_draft",
+          "count": 12,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 37349.71199999993,
+          "self_gpu_us": 37349.71199999993
+        },
+        {
+          "name": "cudaDeviceSynchronize",
+          "count": 2,
+          "cpu_us": 15.569000000017695,
+          "self_cpu_us": 15.569000000017695,
+          "gpu_us": 0,
+          "self_gpu_us": 0
+        }
+      ]
+    },
+    "eager": {
+      "kernel_us": 266524.0009999855,
+      "kernel_groups_us": {
+        "phase.target_verify": 180339.24199999493,
+        "phase.lm_head": 76755.579,
+        "other": 268.636,
+        "phase.mtp_cache_only": 1934.8039999999958,
+        "phase.mtp_draft": 7225.7400000000025
+      },
+      "lm_head_kernel_signatures": [
+        {
+          "name": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, float, false, true, true, false, 7, false, cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16>, float> >(cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16>, float>)",
+          "grid": [
+            31040,
+            1,
+            1
+          ],
+          "block": [
+            16,
+            8,
+            1
+          ]
+        }
+      ],
+      "device_busy_union_us": 268239.26416015625,
+      "device_span_us": 2325330.132080078,
+      "device_gap_fraction": 0.8846446530496691,
+      "snapshot_event_us_per_round": 0,
+      "mtp_lm_head_event_us_per_round": 0,
+      "rounds": [
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        },
+        {
+          "committed": 2,
+          "accepted": 1
+        }
+      ],
+      "operator_events": [
+        {
+          "name": "cudaStreamSynchronize",
+          "count": 96,
+          "cpu_us": 75980.5499999991,
+          "self_cpu_us": 75980.5499999991,
+          "gpu_us": 0,
+          "self_gpu_us": 0
+        },
+        {
+          "name": "phase.target_verify",
+          "count": 12,
+          "cpu_us": 2127004.882,
+          "self_cpu_us": 927835.3059999781,
+          "gpu_us": 138427.5729999973,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.target_verify",
+          "count": 12,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 2175121.3249999993,
+          "self_gpu_us": 2175121.3249999993
+        },
+        {
+          "name": "phase.save_speculative_state",
+          "count": 288,
+          "cpu_us": 41795.62300000169,
+          "self_cpu_us": 16396.448000000437,
+          "gpu_us": 4144.019000003404,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.save_speculative_state",
+          "count": 288,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 24910.592999996916,
+          "self_gpu_us": 24910.592999996916
+        },
+        {
+          "name": "phase.lm_head",
+          "count": 36,
+          "cpu_us": 2883.040000000561,
+          "self_cpu_us": 1050.2200000007724,
+          "gpu_us": 76755.57900000001,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.lm_head",
+          "count": 36,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 76755.57900000001,
+          "self_gpu_us": 76755.57900000001
+        },
+        {
+          "name": "aten::item",
+          "count": 12,
+          "cpu_us": 48357.19200000088,
+          "self_cpu_us": 65.28200000069046,
+          "gpu_us": 43.840000000360305,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.mtp_cache_only",
+          "count": 12,
+          "cpu_us": 36566.58599999965,
+          "self_cpu_us": 12560.602000001978,
+          "gpu_us": 1941.3639999985608,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.mtp_cache_only",
+          "count": 12,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 34668.09899999939,
+          "self_gpu_us": 34668.09899999939
+        },
+        {
+          "name": "phase.mtp_draft",
+          "count": 12,
+          "cpu_us": 64394.260999999824,
+          "self_cpu_us": 19994.567999996012,
+          "gpu_us": 32725.904999998078,
+          "self_gpu_us": 0.0
+        },
+        {
+          "name": "phase.mtp_draft",
+          "count": 12,
+          "cpu_us": 0,
+          "self_cpu_us": 0,
+          "gpu_us": 88851.76199999962,
+          "self_gpu_us": 88851.76199999962
+        },
+        {
+          "name": "cudaDeviceSynchronize",
+          "count": 2,
+          "cpu_us": 15.609000000171363,
+          "self_cpu_us": 15.609000000171363,
+          "gpu_us": 0,
+          "self_gpu_us": 0
+        }
+      ]
+    }
+  }
+}

@@ -84,15 +84,16 @@ def gemm_key(a, w, sa, sw, output):
 def launch_gemm(tuned, a, w, sa, sw, output):
     m, n, k, device = a.shape[0], w.shape[0], a.shape[1], a.device.index
     key = gemm_key(a, w, sa, sw, output)
-    if m == 2 and get_context().gemm_reference_m == 1:
-        # Read the local M1 selection; never transplant it into the M2 cache.
-        reference_key = (1, *key[1:])
+    reference_m = get_context().gemm_reference_m
+    if reference_m is not None and m == 2 * reference_m:
+        # Read this device's ordinary M=B choice without replacing M=2B's cache.
+        reference_key = (reference_m, *key[1:])
         config = tuned.cache.get(reference_key)
         if config is None:
             if torch.cuda.is_current_stream_capturing():
-                raise RuntimeError("MTP reuse requires eager M1 GEMM warmup before capture")
-            tuned[lambda meta: (1, triton.cdiv(n, meta['BN']))](
-                a[:1], w, sa[:1], sw, output[:1], 1, n, k, DEVICE=device,
+                raise RuntimeError(f"MTP reuse requires eager M{reference_m} GEMM warmup before capture")
+            tuned[lambda meta: (triton.cdiv(reference_m, meta['BM']), triton.cdiv(n, meta['BN']))](
+                a[:reference_m], w, sa[:reference_m], sw, output[:reference_m], reference_m, n, k, DEVICE=device,
             )
             config = tuned.cache[reference_key]
         grid = (triton.cdiv(m, config.kwargs['BM']), triton.cdiv(n, config.kwargs['BN']))

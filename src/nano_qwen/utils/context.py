@@ -38,7 +38,7 @@ class Context:
     # is different and must retain the prefill state-update kernel.
     prefill_decode_rows: list[int] = field(default_factory=list)
     is_verify: bool = False
-    # Reuse dispatch: execute two rows using this device's tuned M=1 arithmetic.
+    # Reuse dispatch: 2B dense rows use this device's tuned ordinary M=B tiles.
     gemm_reference_m: int | None = None
 
 _CONTEXT = Context()

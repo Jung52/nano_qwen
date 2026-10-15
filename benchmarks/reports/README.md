@@ -2,6 +2,7 @@
 
 | 报告 | 内容 |
 |---|---|
+| [mtp_small_batch](mtp_small_batch/results.md) | B1长度/实际内容矩阵、greedy并列分数修复、新reuse trace、B2独立接受mask与exact Graph门禁/两次正式对照 |
 | [mtp_reuse_production](mtp_reuse_production/results.md) | 正式serial/reuse开关与core API、严格状态/边界回归、两种FP8 B1各两次吞吐/TPOT/TTFT/显存 |
 | [mtp_verify_reuse](mtp_verify_reuse/results.md) | 独立两token主干复用，norm首差异及修复、全轨迹状态门禁、两种FP8 B1每模式两次真实decode对照 |
 | [mtp_cache_only](mtp_cache_only/results.md) | 单层MTP仅补KV、独立Graph、逐位KV/后续预测门禁及两种FP8 B1各两次实际吞吐对照 |

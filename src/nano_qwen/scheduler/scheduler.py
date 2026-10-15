@@ -43,10 +43,26 @@ class Scheduler:
         assert not (self.in_flight & ready_ids), (
             "scheduler state overlap: seq is both in_flight and ready"
         )
+        # State slots live across dispatches, partial prefill and preemption.
+        # A new request cannot take a slot just because its owner is in flight
+        # or waiting for another prompt chunk. Finished owners leave all queues.
+        active_ids = self.in_flight | {seq.seq_id for seq in self.running} | {
+            seq.seq_id for seq in self.waiting
+            if seq.num_cached_tokens or seq.num_completion_tokens
+        }
 
         # prefill
         while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
             seq = self.waiting[0]
+            if seq.seq_id not in active_ids and len(active_ids) >= self.max_num_seqs:
+                # Continue an admitted prompt behind new arrivals, rather than
+                # starving all partial prompts behind a request needing a slot.
+                admitted = next((s for s in self.waiting if s.seq_id in active_ids), None)
+                if admitted is None:
+                    break
+                self.waiting.remove(admitted)
+                self.waiting.appendleft(admitted)
+                seq = admitted
             remaining = self.max_num_batched_tokens - num_batched_tokens
             if remaining == 0:
                 break
@@ -57,7 +73,15 @@ class Scheduler:
                 # KV pool was exhausted (benchmark bs=112 crash).
                 num_cached_blocks = self.block_manager.can_allocate(seq)
                 if num_cached_blocks == -1:
-                    if not scheduled_seqs and not self.running:
+                    # A preempted replay may need blocks held by a partial
+                    # prompt behind it. Finish that already allocated prompt
+                    # before declaring exhaustion or waiting indefinitely.
+                    continuation = next((s for s in self.waiting if s.block_table), None)
+                    if continuation is not None:
+                        self.waiting.remove(continuation)
+                        self.waiting.appendleft(continuation)
+                        continue
+                    if not scheduled_seqs and not self.running and not self.in_flight:
                         raise RuntimeError(
                             "KV cache exhausted before admission: "
                             f"need {seq.num_blocks} blocks, "
@@ -76,6 +100,7 @@ class Scheduler:
             num_batched_tokens += seq.num_scheduled_tokens
             self.waiting.popleft()
             self.in_flight.add(seq.seq_id)
+            active_ids.add(seq.seq_id)
             scheduled_seqs.append(seq)
 
         # Fill any remaining token budget with decode rows. This produces a
@@ -83,18 +108,27 @@ class Scheduler:
         # available, and remains a pure decode batch when no prefill was
         # scheduled.
         while self.running and len(scheduled_seqs) < self.max_num_seqs:
+            # Verification owns a two-time-step state/snapshot layout. Keep
+            # it separate from prompt ingestion and ordinary final rows.
+            if (self.enable_mtp and scheduled_seqs and scheduled_seqs[0].is_prefill
+                    and not scheduled_seqs[0].is_speculative):
+                break
             remaining = self.max_num_batched_tokens - num_batched_tokens
             if remaining <= 0:
                 break
-            seq = self.running.popleft()
+            seq = self.running[0]
             committed_completions = seq.num_tokens - seq.num_prompt_tokens
-            if (
+            can_verify = (
                 self.enable_mtp
                 and seq.draft_token is not None
                 and seq.temperature <= 1e-6
                 and committed_completions + 2 <= seq.max_tokens
                 and remaining >= 2
-            ):
+            )
+            if self.enable_mtp and scheduled_seqs and can_verify != scheduled_seqs[0].is_speculative:
+                break
+            self.running.popleft()
+            if can_verify:
                 seq.append_token(seq.draft_token)
                 seq.is_speculative = True
                 # Target verify and shifted MTP catch-up both fit within the
