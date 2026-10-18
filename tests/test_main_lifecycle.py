@@ -159,6 +159,7 @@ def lifecycle(engine, full=False):
 def test_selected_rows_preserve_main_hidden_completion_and_effective_states(engine):
     old,new = lifecycle(engine,True),lifecycle(engine)
     assert old.tokens == new.tokens and old.batches == new.batches
+    assert (False,True) in new.batches, "decode must precede the partial prompt"
     assert old.hidden.keys() == new.hidden.keys() and old.states.keys() == new.states.keys()
     assert sum(new.heads) < sum(old.heads)
     for key,a in old.hidden.items():

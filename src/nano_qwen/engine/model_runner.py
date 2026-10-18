@@ -532,9 +532,12 @@ class ModelRunner:
         )
         self.batch_slots_gpu[:len(seqs)].copy_(slots_t, non_blocking=True) #copy current batch slots to GPU for kernel access
 
-        if new_entries and self.gdn_layers:
+        reset_slots = {slot for _, slot in new_entries}
+        if is_prefill:
+            reset_slots.update(slot for seq, slot in zip(seqs, slots) if seq.num_cached_tokens == 0)
+        if reset_slots and self.gdn_layers:
             new_slots = torch.tensor(
-                [slot for _, slot in new_entries],
+                sorted(reset_slots),
                 dtype=torch.int64,
                 device=self.batch_slots_gpu.device,
             )

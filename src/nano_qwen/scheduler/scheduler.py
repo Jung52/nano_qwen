@@ -43,44 +43,15 @@ class Scheduler:
             "scheduler state overlap: seq is both in_flight and ready"
         )
 
-        # prefill
-        while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
-            seq = self.waiting[0]
-            remaining = self.max_num_batched_tokens - num_batched_tokens
-            if remaining == 0:
-                break
-            if not seq.block_table:
-                # Always check capacity. can_allocate() doubles as the
-                # free-block admission check; skipping it when prefix caching
-                # is disabled let allocate() pop from an empty deque once the
-                # KV pool was exhausted (benchmark bs=112 crash).
-                num_cached_blocks = self.block_manager.can_allocate(seq)
-                if num_cached_blocks == -1:
-                    if not scheduled_seqs and not self.running:
-                        raise RuntimeError(
-                            "KV cache exhausted before admission: "
-                            f"need {seq.num_blocks} blocks, "
-                            f"have {len(self.block_manager.free_block_ids)} free"
-                        )
-                    break
-                num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
-            else:
-                num_tokens = seq.num_tokens - seq.num_cached_tokens
-            if remaining < num_tokens and scheduled_seqs:  # only allow chunked prefill for the first seq
-                break
-            if not seq.block_table:
-                self.block_manager.allocate(seq, num_cached_blocks)
-            seq.num_scheduled_tokens = min(num_tokens, remaining)
-            seq.is_prefill = True
-            num_batched_tokens += seq.num_scheduled_tokens
-            self.waiting.popleft()
-            self.in_flight.add(seq.seq_id)
-            scheduled_seqs.append(seq)
+        # State slots live across dispatches, partial prefill and preemption.
+        # A new request cannot take a slot just because its owner is in flight
+        # or waiting for another prompt chunk. Finished owners leave all queues.
+        active_ids = self.in_flight | {seq.seq_id for seq in self.running} | {
+            seq.seq_id for seq in self.waiting
+            if seq.num_cached_tokens or seq.num_completion_tokens
+        }
 
-        # Fill any remaining token budget with decode rows. This produces a
-        # mixed prefill+decode batch when a prefill request leaves budget
-        # available, and remains a pure decode batch when no prefill was
-        # scheduled.
+        # Reserve token budget for ready decode before prompt work.
         while self.running and len(scheduled_seqs) < self.max_num_seqs:
             remaining = self.max_num_batched_tokens - num_batched_tokens
             if remaining <= 0:
@@ -100,6 +71,57 @@ class Scheduler:
                 scheduled_seqs.append(seq)
                 num_batched_tokens += 1
 
+        # Ordinary decode may share remaining budget with prompt chunks.
+        # prefill
+        while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
+            seq = self.waiting[0]
+            if seq.seq_id not in active_ids and len(active_ids) >= self.max_num_seqs:
+                # Continue an admitted prompt behind new arrivals, rather than
+                # starving all partial prompts behind a request needing a slot.
+                admitted = next((s for s in self.waiting if s.seq_id in active_ids), None)
+                if admitted is None:
+                    break
+                self.waiting.remove(admitted)
+                self.waiting.appendleft(admitted)
+                seq = admitted
+            remaining = self.max_num_batched_tokens - num_batched_tokens
+            if remaining == 0:
+                break
+            if not seq.block_table:
+                # Always check capacity. can_allocate() doubles as the
+                # free-block admission check; skipping it when prefix caching
+                # is disabled let allocate() pop from an empty deque once the
+                # KV pool was exhausted (benchmark bs=112 crash).
+                num_cached_blocks = self.block_manager.can_allocate(seq)
+                if num_cached_blocks == -1:
+                    # A preempted replay may need blocks held by a partial
+                    # prompt behind it. Finish that already allocated prompt
+                    # before declaring exhaustion or waiting indefinitely.
+                    continuation = next((s for s in self.waiting if s.block_table), None)
+                    if continuation is not None:
+                        self.waiting.remove(continuation)
+                        self.waiting.appendleft(continuation)
+                        continue
+                    if not scheduled_seqs and not self.running and not self.in_flight:
+                        raise RuntimeError(
+                            "KV cache exhausted before admission: "
+                            f"need {seq.num_blocks} blocks, "
+                            f"have {len(self.block_manager.free_block_ids)} free"
+                        )
+                    break
+                num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
+            else:
+                num_tokens = seq.num_tokens - seq.num_cached_tokens
+            if not seq.block_table:
+                self.block_manager.allocate(seq, num_cached_blocks)
+            seq.num_scheduled_tokens = min(num_tokens, remaining)
+            seq.is_prefill = True
+            num_batched_tokens += seq.num_scheduled_tokens
+            self.waiting.popleft()
+            self.in_flight.add(seq.seq_id)
+            active_ids.add(seq.seq_id)
+            scheduled_seqs.append(seq)
+
         any_prefill = any(seq.is_prefill for seq in scheduled_seqs)
         scheduled_ids = [seq.seq_id for seq in scheduled_seqs]
         assert len(set(scheduled_ids)) == len(scheduled_ids), (
@@ -108,6 +130,8 @@ class Scheduler:
         return scheduled_seqs, any_prefill
 
     def preempt(self, seq: Sequence):
+        if seq.seq_id in self.in_flight:
+            raise ValueError("Cannot preempt an in-flight request before consuming its result")
         seq.status = SequenceStatus.WAITING
         seq.is_prefill = True
         self.in_flight.discard(seq.seq_id)

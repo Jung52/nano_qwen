@@ -143,8 +143,8 @@ class LLMEngine:
         cohorts (e.g. 11/21 instead of 32), because the in-flight rows are
         not in ``running`` when the next batch is formed. Once the queued
         work contains decode rows, wait for it to drain before scheduling
-        more decode; new prefill work is still allowed to dispatch so
-        late arrivals keep making progress.
+        more work. Ready decode receives the next token budget first;
+        waiting prompt chunks use its remainder.
         """
         # Phase 1: fill the queue (never blocks).
         while len(self.batch_queue) < self.max_concurrent_batches:
@@ -152,7 +152,7 @@ class LLMEngine:
                 batch_seqs for batch_seqs, _, _, _ in self.batch_queue
                 if any(not seq.is_prefill for seq in batch_seqs)
             ]
-            if decode_batches and not self.scheduler.waiting:
+            if decode_batches:
                 if self.scheduler.running and not self._coalesce_armed:
                     source_seqs = [
                         seq for batch_seqs in decode_batches for seq in batch_seqs
