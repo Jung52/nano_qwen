@@ -30,14 +30,16 @@ from nano_qwen.utils.context import reset_context, set_context
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-def build_checkpoint(path, head_dim=64):
+def build_checkpoint(path, head_dim=64, layer_types=None):
+    if layer_types is None:
+        layer_types = ["linear_attention", "full_attention"]
     config = AutoConfig.for_model("qwen3_5_text")
     for name, value in dict(hidden_size=128, intermediate_size=256, vocab_size=256,
-            num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=1,
+            num_hidden_layers=len(layer_types), num_attention_heads=2, num_key_value_heads=1,
             head_dim=head_dim, linear_num_key_heads=1, linear_num_value_heads=2,
             linear_key_head_dim=128, linear_value_head_dim=128,
             max_position_embeddings=1024, mtp_num_hidden_layers=1,
-            layer_types=["linear_attention", "full_attention"],
+            layer_types=layer_types,
             dtype=torch.bfloat16).items():
         setattr(config, name, value)
     config.save_pretrained(path)

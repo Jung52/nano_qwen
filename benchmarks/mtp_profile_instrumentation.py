@@ -213,7 +213,7 @@ class PhaseRecorder:
                 replace(r, "sample_tokens", sample(r.sample_tokens))
                 replace(torch.Tensor, "tolist", decisions)
                 for layer in r.gdn_layers:
-                    for name, label in (("save_speculative_state", "snapshot"), ("rollback_speculative_state", "rollback")):
+                    for name, label in (("save_speculative_state", "snapshot"), ("rollback_speculative_states", "rollback")):
                         replace(layer, name, tagged(getattr(layer, name), label))
                 if self.kind == "events":
                     self.recapture()

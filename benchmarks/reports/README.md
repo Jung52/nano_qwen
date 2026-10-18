@@ -2,6 +2,7 @@
 
 | 报告 | 内容 |
 |---|---|
+| [mtp_batched_rollback](mtp_batched_rollback/results.md) | 同engine固定配置的旧/新回滚对照；B2/B4各两次正式计时、独立host及逐位状态门禁 |
 | [mtp_batch_stages](mtp_batch_stages/results.md) | B2/B4 off/reuse完整阶段、head、snapshot/rollback、决策等待与GPU空隙；轻量host诊断定位逐请求回滚提交增长 |
 | [mtp_batch_curve](mtp_batch_curve/results.md) | greedy fast基线上的B1/2/4/8 off/reuse两次交错曲线；B4/B8异长真实模型eager/Graph门禁与完整生命周期 |
 | [mtp_greedy_fast_path](mtp_greedy_fast_path/results.md) | CPU全greedy直达argmax；同engine交错复测后off提高约36%～39%，B2 MTP相对收益收缩 |

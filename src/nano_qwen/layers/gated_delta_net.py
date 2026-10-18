@@ -304,15 +304,20 @@ class GatedDeltaNet(nn.Module):
             0, state_indices, self.recurrent_states.index_select(0, state_indices))
 
     def rollback_speculative_state(self, slot: int):
+        """Compatibility entry point for a single request outside the runner."""
         if self._speculative_conv_state is None:
             return
-        slot_tensor = torch.tensor([slot], device=self.conv_states.device)
-        self.conv_states.index_copy_(
-            0, slot_tensor, self._speculative_conv_state.index_select(0, slot_tensor)
-        )
-        self.recurrent_states.index_copy_(
-            0, slot_tensor, self._speculative_recurrent_state.index_select(0, slot_tensor)
-        )
+        self.rollback_speculative_states(torch.tensor([slot], device=self.conv_states.device))
+
+    def rollback_speculative_states(self, slots: torch.Tensor):
+        """Restore the round's unique slots using the runner's shared CUDA index."""
+        if self._speculative_conv_state is None or slots.numel() == 0:
+            return
+        from nano_qwen.layers.state_copy import restore_state_slots
+
+        restore_state_slots(self.conv_states, self.recurrent_states,
+                            self._speculative_conv_state, self._speculative_recurrent_state,
+                            slots)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         context = get_context()

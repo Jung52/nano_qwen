@@ -1,0 +1,5 @@
+batch,mode,rejected_rounds,rejected_requests,calls,calls_per_reject_round,total_api_ms,api_ms_per_reject_round
+2,legacy,13,26,624,48.0,65.485413,5.037339461538461
+2,batched,13,26,312,24.0,11.895741000000003,0.9150570000000002
+4,legacy,10,40,960,96.0,150.970065,15.0970065
+4,batched,10,40,240,24.0,12.716052,1.2716052

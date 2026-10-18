@@ -898,6 +898,7 @@ class ModelRunner:
         accepted_hidden: list[torch.Tensor] = []
         accepted_inputs: list[torch.Tensor] = []
         accepted_positions: list[int] = []
+        rollback_slots: list[int] = []
 
         if speculative_batch:
             assert self.mtp is not None
@@ -923,10 +924,10 @@ class ModelRunner:
                 if accepted:
                     output_gpu[i, 0] = draft_token
                     self.mtp_stats["accepted_tokens"] += 1
-                    for layer in self.gdn_layers:
-                        if draft_is_eos:
-                            layer.rollback_speculative_state(slot_ids[i])
-                        else:
+                    if draft_is_eos:
+                        rollback_slots.append(slot_ids[i])
+                    else:
+                        for layer in self.gdn_layers:
                             layer.commit_speculative_state()
                     if not draft_is_eos:
                         second_token = verify_tokens[i, 1]
@@ -938,8 +939,7 @@ class ModelRunner:
                     output_gpu[i, 0] = first_token
                     sampled_values[i] = first_token
                     self.mtp_stats["rejected_tokens"] += 1
-                    for layer in self.gdn_layers:
-                        layer.rollback_speculative_state(slot_ids[i])
+                    rollback_slots.append(slot_ids[i])
 
                 committed_before = seq.num_tokens - seq.num_prompt_tokens - 1
                 produced = 2 if accepted and second_token is not None else 1
@@ -989,6 +989,13 @@ class ModelRunner:
             if final_chunk and draft is not None and seq.num_completion_tokens + 1 < seq.max_tokens:
                 output_gpu[i, 2] = draft
                 self.mtp_stats["draft_tokens"] += 1
+
+        if rollback_slots:
+            # Restore rejected requests and accepted draft-EOS requests to
+            # the first verified state before any subsequent MTP execution.
+            rollback_indices = torch.tensor(rollback_slots, dtype=torch.int64, device=logits.device)
+            for layer in self.gdn_layers:
+                layer.rollback_speculative_states(rollback_indices)
 
         if mtp_seqs:
             assert self.mtp is not None
