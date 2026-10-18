@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from copy import deepcopy
 
 import torch
 
@@ -16,6 +17,7 @@ class CudaGraphManager:
 
     def __init__(self, runner: "ModelRunner") -> None:
         self.runner = runner
+        self._dispatch_stats: dict = {}
 
         self.decode_graph_sizes: list[int] = []
         self.decode_graphs: dict[int, torch.cuda.CUDAGraph] = {}
@@ -27,6 +29,19 @@ class CudaGraphManager:
         self.prefill_graph_pool = None
         self.piecewise_buffers: dict | None = None
         self._piecewise_compiled: dict[tuple[int, str], callable] = {}
+
+    def reset_dispatch_stats(self):
+        self._dispatch_stats.clear()
+
+    def dispatch_stats(self):
+        return deepcopy(self._dispatch_stats)
+
+    def record_dispatch(self, kind: str, batch: int, graph: bool, tokens: int):
+        entry = self._dispatch_stats.setdefault(kind, {
+            "graph_calls": 0, "eager_calls": 0, "batch_counts": {}, "token_counts": {}})
+        entry["graph_calls" if graph else "eager_calls"] += 1
+        for name, value in (("batch_counts", batch), ("token_counts", tokens)):
+            entry[name][value] = entry[name].get(value, 0) + 1
 
     @property
     def model(self):
@@ -161,7 +176,9 @@ class CudaGraphManager:
             (size for size in self.prefill_graph_sizes if size >= num_tokens),
             None,
         )
-        if graph_size is None or graph_size not in self.prefill_graphs:
+        used_graph = graph_size is not None and graph_size in self.prefill_graphs
+        self.record_dispatch("prefill", len(context.prefill_slices), used_graph, num_tokens)
+        if not used_graph:
             return self.runner.project_target_hidden(self.model(input_ids, positions))
 
         entries = self.prefill_graphs[graph_size]
@@ -205,6 +222,7 @@ class CudaGraphManager:
 
     def run_decode(self, input_ids: torch.Tensor, positions: torch.Tensor):
         bs = input_ids.size(0)
+        self.record_dispatch("decode", bs, bs in self.decode_graphs, bs)
         if bs not in self.decode_graphs:
             return self.runner.project_target_hidden(self.model(input_ids, positions))
 

@@ -493,12 +493,16 @@ class ModelRunner:
         else:
             mode = "prefill" if is_prefill else "decode"
 
+        batch = (descriptor.num_reqs if descriptor is not None else
+                 context.state_indices.numel() if context.state_indices is not None else input_ids.numel())
         if self.enforce_eager or not self.cuda_graphs.decode_graphs:
+            self.cuda_graphs.record_dispatch("prefill" if is_prefill else "decode", batch, False, input_ids.numel())
             return self.project_target_hidden(self.model(input_ids, positions))
 
         if mode == "prefill" and self.use_prefill_cudagraph:
             return self.cuda_graphs.run_prefill(input_ids, positions)
         if mode == "prefill":
+            self.cuda_graphs.record_dispatch("prefill", batch, False, input_ids.numel())
             return self.project_target_hidden(self.model(input_ids, positions))
 
         # Decode / spec_decode: dispatch through the graph manager.
