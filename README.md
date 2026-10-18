@@ -73,6 +73,9 @@ draft/cache-only use exact graphs for every size 1..capacity without padding
 state writes. Ordinary decode also captures every exact size when capacity ≤ 8.
 See [interfaces](docs/mtp-verify-reuse.md), the [greedy fast-path comparison](benchmarks/reports/mtp_greedy_fast_path/results.md)
 and [B1/2/4/8 throughput/TPOT curves](benchmarks/reports/mtp_batch_curve/results.md).
+The [B2/B4 cost report](benchmarks/reports/mtp_batch_stages/results.md) records
+new off/reuse traces and the cost of per-request rollback. Functional support
+is separate from measured speedups; these results cover 4B/4070 Ti SUPER.
 
 MTP RoPE positions start at 1, while its cache rows start at 0. Accepted draft
 and bonus pairs are appended in order. Chunked prefill preserves the preceding

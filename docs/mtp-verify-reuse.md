@@ -88,3 +88,14 @@ execution. Read gains per tested workload, rather than treating sparse points as
 a continuous break-even threshold. B16 and 5090 remain untested; ordinary
 decode B64 is a separate baseline. Future kernel work needs a new B2/B4 trace;
 old serial/B1 trace percentages do not describe these larger batches.
+
+The [B2/B4 cost report](../benchmarks/reports/mtp_batch_stages/results.md) separates
+two unprofiled timing samples from CUDA-event spans, untouched-graph timelines
+and a host-only diagnostic. The new run did not stably reproduce the historical
+B2 gain; per-request rollback dispatch grows with batch. The next selected change
+is batched slot rollback, which is not implemented by this profiling commit.
+
+Greedy sampling also ships independently on main (`e936f58`), with no MTP
+weights or code dependency. Functional FP8 TP1 greedy support through B8 does
+not imply a performance benefit. These real-model measurements cover 4B on
+4070 Ti SUPER; 5090, 9B and B16 require their own gates and baselines.
