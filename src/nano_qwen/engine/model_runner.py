@@ -753,9 +753,10 @@ class ModelRunner:
                 hidden,
                 self.model.model.embed_tokens,
             )
-            logits = self.model.compute_logits(mtp_hidden)
             self._mtp_cache_lens[slot] = cache_end
-            return logits[-1].argmax() if final_chunk else None
+            if not final_chunk:
+                return None
+            return self.model.compute_logits(mtp_hidden[-1:]).argmax()
         finally:
             reset_context()
 

@@ -15,6 +15,7 @@
 | `bench_mtp_batch_gates.py` | 真实4B两种FP8的B4/B8异长eager/Graph off/serial/reuse严格completion门禁；仅诊断，不作正式计时 |
 | `bench_mtp_interleaved.py` | 同resident engine交错off/reuse；可选旧完整采样/greedy fast对照，每配置2次；实际提交token与严格completion门禁 |
 | `bench_mtp_rollback.py` | 同engine、固定调优配置交错off/旧逐请求rollback/新合批rollback，每配置2次；独立host诊断与严格completion门禁 |
+| `bench_mtp_prefill_tail.py` | 回滚合批作为共有基线；B2/B4×输入64/256×输出128/512，off/旧MTP prefill head/tail head各2次；独立阶段、首draft及最终状态诊断 |
 | `profile_mtp_reuse.py` | B2/B4 off/reuse：正式两次计时、独立CUDA event阶段、无event节点短trace及轻量host诊断；记录动态活跃batch和实际提交tokens |
 | `bench_piecewise_prefill_paths.py` | piecewise prefill路径对比 |
 | `bench_gdn_flashqla.py` | GDN kernel对比 |
