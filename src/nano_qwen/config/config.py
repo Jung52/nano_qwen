@@ -16,7 +16,7 @@ class Config:
     tensor_parallel_size: int = 1
     enforce_eager: bool = False
     # GDN recurrent state is not part of the prefix-cache block payload.
-    # Keep prefix reuse opt-in until state snapshots are cached as well.
+    # Reject hybrid prefix reuse until matching state snapshots are cached.
     enable_prefix_cache: bool = False
     hf_config: AutoConfig | None = None
     full_config: AutoConfig | None = None
@@ -29,6 +29,11 @@ class Config:
     quant_config: QuantizationConfig | None = field(default=None, init=False)
 
     def __post_init__(self):
+        if self.tensor_parallel_size != 1:
+            raise ValueError(
+                "Only tensor_parallel_size=1 is supported until multi-GPU "
+                "execution and state synchronization are validated"
+            )
         metadata = read_quantization_metadata(self.model)
         hf_quant = read_hf_fp8_config(self.model) if metadata is None else None
         if metadata is not None and self.quantization is None:
@@ -53,3 +58,8 @@ class Config:
         self.is_hybrid = isinstance(layer_types, list) and any(
             t != "full_attention" for t in layer_types
         )
+        if self.is_hybrid and self.enable_prefix_cache:
+            raise ValueError(
+                "Hybrid prefix cache requires matching GDN conv/recurrent "
+                "state snapshots; KV-only prefix reuse is unsupported"
+            )
