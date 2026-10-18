@@ -586,7 +586,10 @@ class ModelRunner:
             observe_gdn_state(self.gdn_layers, slots)
 
         with trace_event("sampler", "runner", args={"prefill": is_prefill, "bs": bs}):
-            token_ids = self.sampler(logits, temperatures)
+            token_ids = self.sampler(
+                logits, temperatures,
+                all_greedy=all(seq.temperature <= 1e-6 for seq in seqs),
+            )
         self.sampled_token_ids_gpu.scatter_(0, slots, token_ids)
 
         buf_idx = self._output_buf_idx

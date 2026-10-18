@@ -33,3 +33,5 @@ PYTHONPATH=src python -m pytest -q tests
 本轮 `bench_fp8_granularity`、`bench_prefill_breakdown`、`bench_fp8_e2e`、`bench_fp8_matrix`、`bench_fp8_decode_capacity` 专项脚本和脚本测试已经归档清理。既有报告保留两次测量的原值和统计；清理前源码在本地 `logs/fp8-release-cleanup-2026-10-14/before-cleanup.zip`。历史计划中的旧命令用于说明测量过程。
 
 校验CLI支持 `--perf-profile batch/context/legacy` 和 `--perf-cases PROMPT:BATCH`，`--workloads`是显式cases的兼容别名；`--chunked-prefill`采用生产调度，decode统计窗口可能包含后来请求的prefill。旧共享输入检查笔记见 [归档](../docs/archived/fp8-shared-input-notes.md)。
+
+main独立greedy控制测试：`bench_greedy_sampling.py --model FP8_DIR --output logs/greedy.json`，同engine交错完整采样/fast，各配置2次，不加载MTP；结果见[greedy_main](reports/greedy_main/results.md)。

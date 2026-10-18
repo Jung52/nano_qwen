@@ -232,7 +232,7 @@ class ArgmaxSampler(nn.Module):
         for key in keys:
             self._diagnostics.pop(key, None)
 
-    def forward(self, logits: torch.Tensor, temperatures: torch.Tensor) -> torch.Tensor:
+    def forward(self, logits: torch.Tensor, temperatures: torch.Tensor, all_greedy: bool = False) -> torch.Tensor:
         assert torch.isfinite(logits).all(), "non-finite logits observed"
         values, indices = logits.float().topk(2, dim=-1)
         margins = (values[:, 0] - values[:, 1]).abs()
@@ -382,7 +382,6 @@ def run_until_idle(
     abort (used for scheduler-invariant checks and late submissions).
     """
     submitted = {s.seq_id: time.perf_counter() for s in seqs}
-    completions: dict[int, list[int]] = {s.seq_id: [] for s in seqs}
     ttft: dict[int, float] = {s.seq_id: float("nan") for s in seqs}
     itl: dict[int, list[float]] = {s.seq_id: [] for s in seqs}
     last_seen = {s.seq_id: 0 for s in seqs}

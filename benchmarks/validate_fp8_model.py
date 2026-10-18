@@ -378,7 +378,7 @@ def storage_bytes(tensors):
 
 
 class GreedySampler(torch.nn.Module):
-    def forward(self, logits, temperatures):
+    def forward(self, logits, temperatures, all_greedy=False):
         assert torch.isfinite(logits).all(), "Non-finite generation logits"
         return logits.argmax(dim=-1)
 
@@ -528,8 +528,8 @@ def main():
     report = {"model": args.model, "mode": args.mode, "gpu": torch.cuda.get_device_name(),
               "torch": torch.__version__, "quantization": engine.config.quantization,
               "parameters_mib": storage_bytes(runner.model.parameters()) / 2**20,
-              "gdn_state_mib": storage_bytes(t for l in runner.gdn_layers
-                                            for t in (l.conv_states, l.recurrent_states)) / 2**20,
+              "gdn_state_mib": storage_bytes(t for layer in runner.gdn_layers
+                                            for t in (layer.conv_states, layer.recurrent_states)) / 2**20,
               "kv_mib": runner.kv_cache.numel() * runner.kv_cache.element_size() / 2**20,
               "generation": [], "timings": []}
     saved_logits = []

@@ -11,6 +11,14 @@ Compared with the original nano-vllm, nano_qwen will progressively introduce
 several features from modern inference systems such as vLLM and SGLang, while
 trying to keep the implementation small and easy to understand.
 
+## Greedy sampling
+
+Requests with `temperature <= 1e-6` use deterministic argmax, including ties.
+The runner selects the all-greedy fast path from CPU request metadata; mixed
+batches retain stochastic sampling for other temperatures. This path skips
+softmax and random-number generation for fully greedy batches and works
+independently of MTP. See the [standalone main measurements](benchmarks/reports/greedy_main/results.md).
+
 ## Roadmap
 
 ### 1. ModelRunnerV2
