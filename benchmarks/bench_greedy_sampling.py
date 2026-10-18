@@ -1,4 +1,4 @@
-"""Standalone MTP-free, two-sample full-sampling versus greedy-fast control."""
+"""Two-sample full-sampling versus greedy-fast control for ordinary decode."""
 
 import argparse
 import hashlib
@@ -51,13 +51,13 @@ def run(engine, prompts, output):
 def measure(args):
     root = Path(__file__).resolve().parents[1]
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    seed = tokenizer.encode("Qwen3.5 MTP2 production throughput verification.", add_special_tokens=False)
+    seed = tokenizer.encode("Qwen3.5 ordinary decode throughput verification.", add_special_tokens=False)
     prompt = (seed*64)[:64]
     texts = ["请解释大语言模型推理中 prefill 和 decode 的区别，并以一个中文聊天请求为例，说明延迟和吞吐为什么会随 batch 大小变化。",
              "Write a Python function that merges overlapping intervals. Include type hints, explain the algorithm, and show tests for empty input, touching intervals, and nested intervals."]
     chat = [tokenizer.apply_chat_template([dict(role="user", content=t)], tokenize=True,
                                          add_generation_prompt=True, enable_thinking=False, return_dict=False) for t in texts]
-    report = dict(model=args.model, mtp_enabled=False, batch=2, input_cases={"same64": [prompt, prompt], "chinese-code": chat},
+    report = dict(model=args.model, batch=2, input_cases={"same64": [prompt, prompt], "chinese-code": chat},
                   output=128, repeats=2, prefill_graph=False, decode_graph=True,
                   environment=dict(gpu=torch.cuda.get_device_name(), torch=torch.__version__, cuda=torch.version.cuda),
                   source=dict(commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),

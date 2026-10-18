@@ -11,13 +11,15 @@ Compared with the original nano-vllm, nano_qwen will progressively introduce
 several features from modern inference systems such as vLLM and SGLang, while
 trying to keep the implementation small and easy to understand.
 
+模块演进、实测收益、性能回退和正确性修复过程见[开发日志](DEVELOPMENT_LOG.md)。
+
 ## Greedy sampling
 
 Requests with `temperature <= 1e-6` use deterministic argmax, including ties.
 The runner selects the all-greedy fast path from CPU request metadata; mixed
 batches retain stochastic sampling for other temperatures. This path skips
 softmax and random-number generation for fully greedy batches and works
-independently of MTP. See the [standalone main measurements](benchmarks/reports/greedy_main/results.md).
+with ordinary decode. See the [standalone main measurements](benchmarks/reports/greedy_main/results.md).
 
 ## Roadmap
 
@@ -34,7 +36,7 @@ independently of MTP. See the [standalone main measurements](benchmarks/reports/
 - [ ] Gated DeltaNet / hybrid model architecture
 
 ### 3. Advanced Inference
-- [ ] MTP / speculative decoding
+- [ ] DFlash2（独立实验分支，尚未实现）
 - [ ] FP8 / INT8 / INT4 quantization
 - [ ] CUDA Graph optimization
 - [ ] Efficient KV Cache management

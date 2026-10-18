@@ -21,9 +21,6 @@ def test_worker_roundtrip_preserves_all_execution_metadata(prefill):
     seq.num_scheduled_tokens = 1
     seq.block_table = [7]
     seq.is_prefill = prefill
-    if hasattr(seq, "draft_token"):
-        seq.draft_token = 6
-        seq.is_speculative = True
     restored = pickle.loads(pickle.dumps(seq))
     assert vars(restored) == vars(seq)
     rows, entries = InputBatch(2).update([restored])

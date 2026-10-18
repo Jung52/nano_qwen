@@ -1,4 +1,4 @@
-"""Standalone vocabulary-row planning, independent of speculative decoding."""
+"""Vocabulary-row planning for ordinary prefill and decode."""
 from types import SimpleNamespace
 from unittest.mock import Mock
 

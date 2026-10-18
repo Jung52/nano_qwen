@@ -4,13 +4,12 @@ import torch
 
 @dataclass(slots=True)
 class BatchDescriptor:
-    """Structured batch description for graph dispatch and spec decoding.
+    """Structured prefill/decode batch description for graph dispatch.
 
     Replaces the bare ``is_prefill`` boolean. ``uniform_token_count`` is 1 for
-    standard decode, ``spec_steps`` for speculative decoding, and ``None``
-    for prefill (variable token counts per request).
+    standard decode and ``None`` for prefill (variable token counts per request).
     """
-    mode: str = "decode"  # "prefill" | "decode" | "spec_decode" | "draft"
+    mode: str = "decode"  # "prefill" | "decode"
     num_tokens: int = 0
     num_reqs: int = 0
     uniform_token_count: int | None = None

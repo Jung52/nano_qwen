@@ -1,0 +1,209 @@
+{
+  "status": "completed",
+  "started_at": "2026-10-09T20:08:13.124986+08:00",
+  "benchmark_wall_seconds": 452.42580332299985,
+  "protocol": {
+    "mode": "decode_graph",
+    "prefill": "chunked_eager",
+    "warmup_rounds": 1,
+    "measurement_rounds": 2,
+    "prompt_lengths": [
+      512,
+      1024,
+      2048,
+      4096
+    ],
+    "batches": [
+      1,
+      4,
+      8
+    ],
+    "output_tokens_per_request": 129,
+    "decode_forwards": 128,
+    "e2e_metric": "Elapsed time including prefill and decode until every request in the batch completes.",
+    "throughput_metric": "batch * 129 / mean measured E2E seconds; output tokens only.",
+    "configuration": {
+      "max_num_seqs": 8,
+      "max_model_len": 8192,
+      "max_num_batched_tokens": 1024,
+      "gpu_memory_utilization": 0.75,
+      "tensor_parallel_size": 1,
+      "prefix_cache": false
+    }
+  },
+  "environment": {
+    "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "torch": "2.12.1+cu130",
+    "cuda": "13.0"
+  },
+  "parameter_storage_mib": {
+    "bf16": 8021.84130859375,
+    "hf-fp8": 4622.67138671875,
+    "fp8": 4626.15380859375
+  },
+  "results": [
+    {
+      "prompt_tokens": 512,
+      "batch": 1,
+      "output_tokens_per_request": 129,
+      "bf16_e2e_s": 2.0027563404999,
+      "hf_fp8_e2e_s": 1.6166454834999513,
+      "fp8_e2e_s": 1.7662290524997388,
+      "bf16_e2e_output_tps": 64.41123035855716,
+      "hf_fp8_e2e_output_tps": 79.79485998421984,
+      "fp8_e2e_output_tps": 73.03695962730693,
+      "hf_fp8_throughput_ratio_vs_bf16": 1.2388345873852562,
+      "fp8_throughput_ratio_vs_bf16": 1.133916542514916
+    },
+    {
+      "prompt_tokens": 1024,
+      "batch": 1,
+      "output_tokens_per_request": 129,
+      "bf16_e2e_s": 2.1456835789999786,
+      "hf_fp8_e2e_s": 1.5182533409999905,
+      "fp8_e2e_s": 1.7885396214999219,
+      "bf16_e2e_output_tps": 60.12070058350448,
+      "hf_fp8_e2e_output_tps": 84.96605705806302,
+      "fp8_e2e_output_tps": 72.12588329008715,
+      "hf_fp8_throughput_ratio_vs_bf16": 1.41325793334776,
+      "fp8_throughput_ratio_vs_bf16": 1.1996846774915422
+    },
+    {
+      "prompt_tokens": 2048,
+      "batch": 1,
+      "output_tokens_per_request": 129,
+      "bf16_e2e_s": 2.5032978859999275,
+      "hf_fp8_e2e_s": 1.7311934849999489,
+      "fp8_e2e_s": 2.1384420374997717,
+      "bf16_e2e_output_tps": 51.532021307353006,
+      "hf_fp8_e2e_output_tps": 74.51506785216662,
+      "fp8_e2e_output_tps": 60.324291113742085,
+      "hf_fp8_throughput_ratio_vs_bf16": 1.4459954405385262,
+      "fp8_throughput_ratio_vs_bf16": 1.1706176001509674
+    },
+    {
+      "prompt_tokens": 4096,
+      "batch": 1,
+      "output_tokens_per_request": 129,
+      "bf16_e2e_s": 2.794906334499956,
+      "hf_fp8_e2e_s": 2.112441308000143,
+      "fp8_e2e_s": 2.8839001095000185,
+      "bf16_e2e_output_tps": 46.155392904456576,
+      "hf_fp8_e2e_output_tps": 61.066785387815024,
+      "fp8_e2e_output_tps": 44.73109161272743,
+      "hf_fp8_throughput_ratio_vs_bf16": 1.3230693434725083,
+      "fp8_throughput_ratio_vs_bf16": 0.9691411728489128
+    },
+    {
+      "prompt_tokens": 512,
+      "batch": 4,
+      "output_tokens_per_request": 129,
+      "bf16_e2e_s": 2.4911312710000857,
+      "hf_fp8_e2e_s": 1.8408311549999326,
+      "fp8_e2e_s": 2.1955152979999184,
+      "bf16_e2e_output_tps": 207.13480899497017,
+      "hf_fp8_e2e_output_tps": 280.30816329812654,
+      "fp8_e2e_output_tps": 235.02455230900384,
+      "hf_fp8_throughput_ratio_vs_bf16": 1.3532644013731814,
+      "fp8_throughput_ratio_vs_bf16": 1.1346453715305327
+    },
+    {
+      "prompt_tokens": 1024,
+      "batch": 4,
+      "output_tokens_per_request": 129,
+      "bf16_e2e_s": 2.759065740500091,
+      "hf_fp8_e2e_s": 2.4064185375000307,
+      "fp8_e2e_s": 2.604185242999847,
+      "bf16_e2e_output_tps": 187.01982791699376,
+      "hf_fp8_e2e_output_tps": 214.4265396725458,
+      "fp8_e2e_output_tps": 198.14258658712103,
+      "hf_fp8_throughput_ratio_vs_bf16": 1.1465444175668698,
+      "fp8_throughput_ratio_vs_bf16": 1.0594736867957335
+    },
+    {
+      "prompt_tokens": 2048,
+      "batch": 4,
+      "output_tokens_per_request": 129,
+      "bf16_e2e_s": 3.439956564999875,
+      "hf_fp8_e2e_s": 2.77192323700001,
+      "fp8_e2e_s": 3.1934964044999106,
+      "bf16_e2e_output_tps": 150.00189399194312,
+      "hf_fp8_e2e_output_tps": 186.15234112992795,
+      "fp8_e2e_output_tps": 161.57838764838178,
+      "hf_fp8_throughput_ratio_vs_bf16": 1.2409999379069612,
+      "fp8_throughput_ratio_vs_bf16": 1.077175649909197
+    },
+    {
+      "prompt_tokens": 4096,
+      "batch": 4,
+      "output_tokens_per_request": 129,
+      "bf16_e2e_s": 4.521948990000055,
+      "hf_fp8_e2e_s": 4.208363670500148,
+      "fp8_e2e_s": 4.902540613499923,
+      "bf16_e2e_output_tps": 114.11008862353259,
+      "hf_fp8_e2e_output_tps": 122.6129774898174,
+      "fp8_e2e_output_tps": 105.25155030416519,
+      "hf_fp8_throughput_ratio_vs_bf16": 1.0745147862809676,
+      "fp8_throughput_ratio_vs_bf16": 0.9223684914609686
+    },
+    {
+      "prompt_tokens": 512,
+      "batch": 8,
+      "output_tokens_per_request": 129,
+      "bf16_e2e_s": 2.9453627064999637,
+      "hf_fp8_e2e_s": 2.490693784499854,
+      "fp8_e2e_s": 2.584131842000261,
+      "bf16_e2e_output_tps": 350.38129522130987,
+      "hf_fp8_e2e_output_tps": 414.3423838058165,
+      "fp8_e2e_output_tps": 399.3604286076886,
+      "hf_fp8_throughput_ratio_vs_bf16": 1.1825470978526613,
+      "fp8_throughput_ratio_vs_bf16": 1.1397880938691156
+    },
+    {
+      "prompt_tokens": 1024,
+      "batch": 8,
+      "output_tokens_per_request": 129,
+      "bf16_e2e_s": 3.765074933999813,
+      "hf_fp8_e2e_s": 2.9093662375000804,
+      "fp8_e2e_s": 3.3728427094999915,
+      "bf16_e2e_output_tps": 274.09813034017327,
+      "hf_fp8_e2e_output_tps": 354.7164281684806,
+      "fp8_e2e_output_tps": 305.9733550850906,
+      "hf_fp8_throughput_ratio_vs_bf16": 1.2941220274952436,
+      "fp8_throughput_ratio_vs_bf16": 1.1162912884716074
+    },
+    {
+      "prompt_tokens": 2048,
+      "batch": 8,
+      "output_tokens_per_request": 129,
+      "bf16_e2e_s": 4.575831695500028,
+      "hf_fp8_e2e_s": 4.236173441000119,
+      "fp8_e2e_s": 5.078736894999793,
+      "bf16_e2e_output_tps": 225.53277058133304,
+      "hf_fp8_e2e_output_tps": 243.6160875784054,
+      "fp8_e2e_output_tps": 203.20013053167665,
+      "hf_fp8_throughput_ratio_vs_bf16": 1.0801804409641262,
+      "fp8_throughput_ratio_vs_bf16": 0.900978292457935
+    },
+    {
+      "prompt_tokens": 4096,
+      "batch": 8,
+      "output_tokens_per_request": 129,
+      "bf16_e2e_s": 7.386230741499958,
+      "hf_fp8_e2e_s": 6.987856402499801,
+      "fp8_e2e_s": 8.069668314999944,
+      "bf16_e2e_output_tps": 139.719436897855,
+      "hf_fp8_e2e_output_tps": 147.6847749233681,
+      "fp8_e2e_output_tps": 127.88629714578389,
+      "hf_fp8_throughput_ratio_vs_bf16": 1.057009519952019,
+      "fp8_throughput_ratio_vs_bf16": 0.9153078482507628
+    }
+  ],
+  "limitations": [
+    "Two measured runs per workload; the mean of their E2E times is used.",
+    "Fixed output length means equal token counts; generated token content may differ.",
+    "Prefill is chunked eager with the same 1024-token budget for all three models; decode_graph is enabled.",
+    "The engine may use eager fallback for active decode batch sizes without a captured graph (captures 1/2/4/8).",
+    "Whole-batch prefill for 4096x8 was rejected after the BF16 capacity preflight ran out of CUDA memory."
+  ]
+}

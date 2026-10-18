@@ -34,4 +34,4 @@ PYTHONPATH=src python -m pytest -q tests
 
 校验CLI支持 `--perf-profile batch/context/legacy` 和 `--perf-cases PROMPT:BATCH`，`--workloads`是显式cases的兼容别名；`--chunked-prefill`采用生产调度，decode统计窗口可能包含后来请求的prefill。旧共享输入检查笔记见 [归档](../docs/archived/fp8-shared-input-notes.md)。
 
-main独立greedy控制测试：`bench_greedy_sampling.py --model FP8_DIR --output logs/greedy.json`，同engine交错完整采样/fast，各配置2次，不加载MTP；结果见[greedy_main](reports/greedy_main/results.md)。
+main独立greedy控制测试：`bench_greedy_sampling.py --model FP8_DIR --output logs/greedy.json`，同engine交错完整采样/fast，各配置2次；历史结果见[greedy_main](reports/greedy_main/results.md)。当前synthetic prompt采用普通decode描述，历史报告保留原prompt token、源码指纹和计时，不因文案清理重测或覆盖。

@@ -1,0 +1,69 @@
+{
+  "purpose": "Small local historical evidence retained alongside DEVELOPMENT_LOG.md; no measurements rerun. Original logs remain untouched.",
+  "scope": "2026-09-03 and 2026-10-09 records; other evidence already lives in benchmarks/reports.",
+  "files": [
+    {
+      "archived_file": "engine-validation-2026-09-03.md",
+      "original_path": "logs/engine_validation_report_20260903.md",
+      "original_bytes": 10180,
+      "original_sha256": "afef730c06dbc3013519d2ff2369cb8780f13c7f29788824c8a1b433a7d5eb60",
+      "archived_bytes": 10180,
+      "archived_sha256": "afef730c06dbc3013519d2ff2369cb8780f13c7f29788824c8a1b433a7d5eb60",
+      "transformation": "none"
+    },
+    {
+      "archived_file": "fp8-format-comparison-2026-10-09.csv",
+      "original_path": "logs/fp8_format_comparison_20261009/comparison.csv",
+      "original_bytes": 5273,
+      "original_sha256": "61209c022cee4f9afb6720e7b34021c8007477815df58defda40f445a3fdd9c5",
+      "archived_bytes": 5240,
+      "archived_sha256": "d61727c88266d6a82e50561c60615292b5c5718c1d3f1064f8b4413e3fffb76b",
+      "transformation": "CRLF to LF only"
+    },
+    {
+      "archived_file": "fp8-format-comparison-2026-10-09.summary.json",
+      "original_path": "logs/fp8_format_comparison_20261009/comparison_summary.json",
+      "original_bytes": 8087,
+      "original_sha256": "9288872471336886e39b07dcc6e9eeac1a0334ef0b35eb265a235f5e99f7f318",
+      "archived_bytes": 8087,
+      "archived_sha256": "9288872471336886e39b07dcc6e9eeac1a0334ef0b35eb265a235f5e99f7f318",
+      "transformation": "none"
+    },
+    {
+      "archived_file": "fp8-e2e-three-models-2026-10-09.csv",
+      "original_path": "logs/graph_e2e_three_models_20261009/e2e_comparison.csv",
+      "original_bytes": 5125,
+      "original_sha256": "76ae7a751a9280d9bb430d88ed36aa55bf9b026b327d433eb8f2af1349c36ec7",
+      "archived_bytes": 5088,
+      "archived_sha256": "b2470d373ca19abb5ac9a2ede85c77bc280e18f468750a8a4b39d5b457bb9119",
+      "transformation": "CRLF to LF only"
+    },
+    {
+      "archived_file": "fp8-e2e-three-models-2026-10-09.summary.json",
+      "original_path": "logs/graph_e2e_three_models_20261009/e2e_summary.json",
+      "original_bytes": 7451,
+      "original_sha256": "60350992ab172944082d6135e88a77e59843d1efdc38749225e89d3e1596cfa8",
+      "archived_bytes": 7451,
+      "archived_sha256": "60350992ab172944082d6135e88a77e59843d1efdc38749225e89d3e1596cfa8",
+      "transformation": "none"
+    },
+    {
+      "archived_file": "fp8-hf-vs-converted-block-2026-10-09.csv",
+      "original_path": "logs/graph_hf_vs_block_fp8_20261009_211456/e2e_comparison.csv",
+      "original_bytes": 3319,
+      "original_sha256": "6c91556d68b3a9bded909b5020edeb7f3777a6f152ae3b2a91108b5b7e7a5dbe",
+      "archived_bytes": 3294,
+      "archived_sha256": "f944eca9e07dbf58dcfc1546d37af7c59ee5de2418ef6f16c88cd56a904a60ce",
+      "transformation": "CRLF to LF only"
+    },
+    {
+      "archived_file": "fp8-hf-vs-converted-block-2026-10-09.summary.json",
+      "original_path": "logs/graph_hf_vs_block_fp8_20261009_211456/e2e_summary.json",
+      "original_bytes": 8159,
+      "original_sha256": "ba66c80ad6e42a21865828faa67c053a30f63f836fd653257429f7e6e0e2f9d0",
+      "archived_bytes": 8159,
+      "archived_sha256": "ba66c80ad6e42a21865828faa67c053a30f63f836fd653257429f7e6e0e2f9d0",
+      "transformation": "none"
+    }
+  ]
+}

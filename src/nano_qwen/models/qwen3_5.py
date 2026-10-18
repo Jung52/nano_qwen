@@ -2,7 +2,7 @@
 
 This module implements the hybrid Qwen3.5 decoder used by the dense text
 checkpoints: Gated DeltaNet linear-attention blocks interleaved with gated
-GQA blocks. Vision, MoE and MTP are intentionally out of scope here.
+GQA blocks. This module implements the dense text backbone.
 """
 
 from __future__ import annotations

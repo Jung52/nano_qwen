@@ -505,7 +505,7 @@ class ModelRunner:
             self.cuda_graphs.record_dispatch("prefill", batch, False, input_ids.numel())
             return self.project_target_hidden(self.model(input_ids, positions))
 
-        # Decode / spec_decode: dispatch through the graph manager.
+        # Decode: dispatch through the graph manager.
         return self.cuda_graphs.run_decode(input_ids, positions)
 
     def execute_model(self, seqs: list[Sequence], is_prefill: bool) -> None:

@@ -1,0 +1,234 @@
+{
+  "status": "completed",
+  "started_at": "2026-10-09T21:14:56.360160+08:00",
+  "benchmark_wall_seconds": 251.40150728400022,
+  "protocol": {
+    "mode": "decode_graph",
+    "prefill": "chunked_eager",
+    "warmup_rounds": 1,
+    "measurement_rounds": 2,
+    "prompt_lengths": [
+      512,
+      1024,
+      2048,
+      4096
+    ],
+    "batches": [
+      1,
+      4,
+      8
+    ],
+    "output_tokens_per_request": 129,
+    "decode_forwards": 128,
+    "e2e_metric": "Elapsed time including prefill and decode until every request in the batch completes.",
+    "throughput_metric": "batch * 129 / mean measured E2E seconds; output tokens only.",
+    "configuration": {
+      "max_num_seqs": 8,
+      "max_model_len": 8192,
+      "max_num_batched_tokens": 1024,
+      "gpu_memory_utilization": 0.75,
+      "tensor_parallel_size": 1,
+      "prefix_cache": false
+    }
+  },
+  "environment": {
+    "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "torch": "2.12.1+cu130",
+    "cuda": "13.0"
+  },
+  "checkpoint_metadata": {
+    "hf-fp8": {
+      "path": "/home/wei/code/models/hf-4b-fp8",
+      "weight_block_size": [
+        128,
+        128
+      ],
+      "activation_scheme": "dynamic",
+      "on_disk_scale_dtypes": {
+        "BF16": 200
+      },
+      "text_block_scale_count": 200,
+      "gpu_scale_dtype": "float32"
+    },
+    "block_fp8": {
+      "path": "/home/wei/code/models/4b_block_fp8",
+      "weight_block_size": [
+        128,
+        128
+      ],
+      "activation_scheme": "dynamic",
+      "on_disk_scale_dtypes": {
+        "F32": 200
+      },
+      "text_block_scale_count": 200,
+      "gpu_scale_dtype": "float32"
+    }
+  },
+  "parameter_storage_mib": {
+    "hf-fp8": 4622.67138671875,
+    "block_fp8": 4622.67138671875
+  },
+  "results": [
+    {
+      "prompt_tokens": 512,
+      "batch": 1,
+      "hf_fp8_e2e_s": 1.439429674999701,
+      "block_fp8_e2e_s": 1.4696646474999397,
+      "hf_fp8_e2e_output_tps": 89.61882767911311,
+      "block_fp8_e2e_output_tps": 87.77512626396988,
+      "block_fp8_throughput_gain_pct": -2.0572701773613256,
+      "hf_fp8_two_run_span_pct": 1.6636316741140156,
+      "block_fp8_two_run_span_pct": 0.251361492966161,
+      "two_run_ranges_overlap": false
+    },
+    {
+      "prompt_tokens": 1024,
+      "batch": 1,
+      "hf_fp8_e2e_s": 1.5753169459999299,
+      "block_fp8_e2e_s": 1.6101756479993128,
+      "hf_fp8_e2e_output_tps": 81.88828307062835,
+      "block_fp8_e2e_output_tps": 80.11548315259023,
+      "block_fp8_throughput_gain_pct": -2.164900583529239,
+      "hf_fp8_two_run_span_pct": 0.703115270074368,
+      "block_fp8_two_run_span_pct": 2.255339785148162,
+      "two_run_ranges_overlap": false
+    },
+    {
+      "prompt_tokens": 2048,
+      "batch": 1,
+      "hf_fp8_e2e_s": 1.7788998935002382,
+      "block_fp8_e2e_s": 1.7658861980003167,
+      "hf_fp8_e2e_output_tps": 72.51672815954481,
+      "block_fp8_e2e_output_tps": 73.05114007124533,
+      "block_fp8_throughput_gain_pct": 0.7369498393870577,
+      "hf_fp8_two_run_span_pct": 0.4422153842697404,
+      "block_fp8_two_run_span_pct": 0.33240058202690564,
+      "two_run_ranges_overlap": false
+    },
+    {
+      "prompt_tokens": 4096,
+      "batch": 1,
+      "hf_fp8_e2e_s": 2.1952452149998862,
+      "block_fp8_e2e_s": 2.182609151000179,
+      "hf_fp8_e2e_output_tps": 58.76336689794661,
+      "block_fp8_e2e_output_tps": 59.10357332685326,
+      "block_fp8_throughput_gain_pct": 0.5789430505189985,
+      "hf_fp8_two_run_span_pct": 0.014902572057157889,
+      "block_fp8_two_run_span_pct": 0.07210260249408414,
+      "two_run_ranges_overlap": false
+    },
+    {
+      "prompt_tokens": 512,
+      "batch": 4,
+      "hf_fp8_e2e_s": 1.8141582409998591,
+      "block_fp8_e2e_s": 1.8202029785002196,
+      "hf_fp8_e2e_output_tps": 284.4294330772439,
+      "block_fp8_e2e_output_tps": 283.48486739932986,
+      "block_fp8_throughput_gain_pct": -0.33209139704524215,
+      "hf_fp8_two_run_span_pct": 1.8901604736397948,
+      "block_fp8_two_run_span_pct": 0.7303995849416323,
+      "two_run_ranges_overlap": true
+    },
+    {
+      "prompt_tokens": 1024,
+      "batch": 4,
+      "hf_fp8_e2e_s": 2.1623765979998097,
+      "block_fp8_e2e_s": 2.1980643074998625,
+      "hf_fp8_e2e_output_tps": 238.6263338575242,
+      "block_fp8_e2e_output_tps": 234.75200349661847,
+      "block_fp8_throughput_gain_pct": -1.6235971521981973,
+      "hf_fp8_two_run_span_pct": 0.5454685373157974,
+      "block_fp8_two_run_span_pct": 1.9756391499812385,
+      "two_run_ranges_overlap": false
+    },
+    {
+      "prompt_tokens": 2048,
+      "batch": 4,
+      "hf_fp8_e2e_s": 2.8399768875001428,
+      "block_fp8_e2e_s": 2.8864884129998245,
+      "hf_fp8_e2e_output_tps": 181.69161948856672,
+      "block_fp8_e2e_output_tps": 178.7639256323013,
+      "block_fp8_throughput_gain_pct": -1.6113532723779023,
+      "hf_fp8_two_run_span_pct": 0.8803862844792743,
+      "block_fp8_two_run_span_pct": 2.5751673093665564,
+      "two_run_ranges_overlap": true
+    },
+    {
+      "prompt_tokens": 4096,
+      "batch": 4,
+      "hf_fp8_e2e_s": 4.1783560630001375,
+      "block_fp8_e2e_s": 4.257916916500108,
+      "hf_fp8_e2e_output_tps": 123.493544403562,
+      "block_fp8_e2e_output_tps": 121.18601891934942,
+      "block_fp8_throughput_gain_pct": -1.8685393599780942,
+      "hf_fp8_two_run_span_pct": 0.024780415643787034,
+      "block_fp8_two_run_span_pct": 0.12906576402696737,
+      "two_run_ranges_overlap": false
+    },
+    {
+      "prompt_tokens": 512,
+      "batch": 8,
+      "hf_fp8_e2e_s": 2.2667401409999,
+      "block_fp8_e2e_s": 2.331075450500066,
+      "hf_fp8_e2e_output_tps": 455.2793596996814,
+      "block_fp8_e2e_output_tps": 442.71411282659847,
+      "block_fp8_throughput_gain_pct": -2.759898204340161,
+      "hf_fp8_two_run_span_pct": 0.10586030378649398,
+      "block_fp8_two_run_span_pct": 1.025359131748652,
+      "two_run_ranges_overlap": false
+    },
+    {
+      "prompt_tokens": 1024,
+      "batch": 8,
+      "hf_fp8_e2e_s": 2.914487896000537,
+      "block_fp8_e2e_s": 2.9916483219999463,
+      "hf_fp8_e2e_output_tps": 354.0930814693662,
+      "block_fp8_e2e_output_tps": 344.96033254005533,
+      "block_fp8_throughput_gain_pct": -2.5791944003574208,
+      "hf_fp8_two_run_span_pct": 1.4161929461714025,
+      "block_fp8_two_run_span_pct": 3.1120314949902665,
+      "two_run_ranges_overlap": false
+    },
+    {
+      "prompt_tokens": 2048,
+      "batch": 8,
+      "hf_fp8_e2e_s": 4.190934581999954,
+      "block_fp8_e2e_s": 4.227449809000063,
+      "hf_fp8_e2e_output_tps": 246.24579071991135,
+      "block_fp8_e2e_output_tps": 244.11880604777738,
+      "block_fp8_throughput_gain_pct": -0.863764885448659,
+      "hf_fp8_two_run_span_pct": 0.33843081353063953,
+      "block_fp8_two_run_span_pct": 0.5383138541997449,
+      "two_run_ranges_overlap": false
+    },
+    {
+      "prompt_tokens": 4096,
+      "batch": 8,
+      "hf_fp8_e2e_s": 6.89899904449976,
+      "block_fp8_e2e_s": 6.883100056999865,
+      "hf_fp8_e2e_output_tps": 149.58691736923257,
+      "block_fp8_e2e_output_tps": 149.93244198891068,
+      "block_fp8_throughput_gain_pct": 0.2309858547490773,
+      "hf_fp8_two_run_span_pct": 1.387964259478415,
+      "block_fp8_two_run_span_pct": 0.13654184775255845,
+      "two_run_ranges_overlap": true
+    }
+  ],
+  "aggregate": {
+    "block_fp8_faster_cases": 3,
+    "block_fp8_slower_cases": 9,
+    "minimum_throughput_gain_pct": -2.759898204340161,
+    "maximum_throughput_gain_pct": 0.7369498393870577,
+    "total_hf_fp8_mean_workload_seconds": 34.25492118249986,
+    "total_block_fp8_mean_workload_seconds": 34.6242818984997,
+    "aggregate_same_workloads_throughput_gain_pct": -1.0667678742987907
+  },
+  "limitations": [
+    "Two measured runs per workload; mean E2E time is used.",
+    "Equal output means equal token counts; generated content may differ.",
+    "Both models use the same block-128 backend; GPU weight scales are FP32 for both.",
+    "Prefill is chunked eager at 1024 tokens; decode_graph is enabled.",
+    "Active decode batch sizes without captured graphs may use eager fallback (captures 1/2/4/8).",
+    "Models run sequentially in separate processes; small timing differences may reflect run-to-run variation."
+  ]
+}

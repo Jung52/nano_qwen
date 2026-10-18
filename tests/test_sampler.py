@@ -1,4 +1,4 @@
-"""Greedy requests must break tied logits identically to MTP verification."""
+"""Greedy requests use deterministic argmax, including tied logits."""
 
 import torch
 
