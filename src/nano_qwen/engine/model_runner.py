@@ -19,6 +19,7 @@ from nano_qwen.utils.loader import load_model
 from nano_qwen.utils.trace import trace_event
 
 from .async_output import AsyncModelOutput
+from .execution import SamplingPlan
 from .decode_init import prepare_decode as prepare_decode_kernel
 
 
@@ -153,6 +154,8 @@ class ModelRunner:
         # (depth-1 async), so a single slot holds the logits/temps/seqs the
         # immediately-following sample_tokens call will consume.
         self._pending: tuple | None = None
+        self._sampling_plan: SamplingPlan | None = None
+        self._target_hidden = None
         self.allocate_gdn_state_pool()
         self.warmup_model()
         self.input_batch.clear()
@@ -465,6 +468,17 @@ class ModelRunner:
             temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         return input_ids, positions, temperatures
 
+    def project_target_hidden(self, hidden: torch.Tensor):
+        """Retain hidden until sampling; project only real output rows."""
+        self._target_hidden = hidden
+        plan = getattr(self, "_sampling_plan", None)
+        if plan is None or plan.row_indices == tuple(range(hidden.shape[0])):
+            return self.model.compute_logits(hidden)
+        if not plan.row_indices:
+            return hidden.new_empty((0, self.model.lm_head.num_embeddings))
+        indices = torch.tensor(plan.row_indices, device=hidden.device, dtype=torch.int64)
+        return self.model.compute_logits(hidden.index_select(0, indices))
+
     @torch.inference_mode()
     def run_model(
         self,
@@ -480,12 +494,12 @@ class ModelRunner:
             mode = "prefill" if is_prefill else "decode"
 
         if self.enforce_eager or not self.cuda_graphs.decode_graphs:
-            return self.model.compute_logits(self.model(input_ids, positions))
+            return self.project_target_hidden(self.model(input_ids, positions))
 
         if mode == "prefill" and self.use_prefill_cudagraph:
             return self.cuda_graphs.run_prefill(input_ids, positions)
         if mode == "prefill":
-            return self.model.compute_logits(self.model(input_ids, positions))
+            return self.project_target_hidden(self.model(input_ids, positions))
 
         # Decode / spec_decode: dispatch through the graph manager.
         return self.cuda_graphs.run_decode(input_ids, positions)
@@ -536,6 +550,7 @@ class ModelRunner:
             "run_model", "runner",
             args={"prefill": is_prefill, "tokens": input_ids.size(0)},
         ):
+            self._sampling_plan = SamplingPlan.for_requests(seqs)
             logits = self.run_model(
                 input_ids,
                 positions,
@@ -552,45 +567,44 @@ class ModelRunner:
             # Non-zero TP ranks do not run the sampler: drop the pending
             # batch's state so rank 0 stays authoritative.
             self._pending = None
+            self._sampling_plan = None
             reset_context()
             return None
 
         logits, temperatures, seqs, is_prefill = self._pending
         self._pending = None
         bs = len(seqs)
-
-        # Prefill produces one logits row per scheduled token. Sampling only
-        # uses the final scheduled position of each request.
-        if is_prefill:
-            last_indices = []
-            offset = 0
-            for seq in seqs:
-                offset += seq.num_scheduled_tokens
-                last_indices.append(offset - 1)
-            last_indices_gpu = torch.tensor(
-                last_indices,
-                dtype=torch.int64,
-                device=logits.device,
-            )
-            logits = logits.index_select(0, last_indices_gpu)
-
+        plan = getattr(self, "_sampling_plan", None)
+        self._sampling_plan = None
+        if plan is None:
+            plan = SamplingPlan.for_requests(seqs)
+            if is_prefill:
+                rows = torch.tensor(plan.row_indices, dtype=torch.int64, device=logits.device)
+                logits = logits.index_select(0, rows)
+        requests = plan.request_indices
+        selected = None if requests == tuple(range(bs)) else torch.tensor(
+            requests, dtype=torch.int64, device=logits.device)
         slots = self.batch_slots_gpu[:bs]
-        # Validation-only samplers may request row-aligned logits/GDN-state
-        # diagnostics. The production sampler has no hooks, so its behavior
-        # remains unchanged.
+        sample_slots = slots if selected is None else slots[selected]
+        sample_temperatures = temperatures if selected is None else temperatures[selected]
+        sampled_seqs = [seqs[i] for i in requests]
         set_batch_context = getattr(self.sampler, "set_batch_context", None)
         if set_batch_context is not None:
-            set_batch_context(seqs, is_prefill)
+            set_batch_context(sampled_seqs, is_prefill)
         observe_gdn_state = getattr(self.sampler, "observe_gdn_state", None)
-        if observe_gdn_state is not None:
-            observe_gdn_state(self.gdn_layers, slots)
-
-        with trace_event("sampler", "runner", args={"prefill": is_prefill, "bs": bs}):
-            token_ids = self.sampler(
-                logits, temperatures,
-                all_greedy=all(seq.temperature <= 1e-6 for seq in seqs),
-            )
-        self.sampled_token_ids_gpu.scatter_(0, slots, token_ids)
+        if observe_gdn_state is not None and requests:
+            observe_gdn_state(self.gdn_layers, sample_slots)
+        token_ids = torch.full((bs,), -1, dtype=torch.int64, device=logits.device)
+        if requests:
+            with trace_event("sampler", "runner", args={"prefill": is_prefill, "bs": bs}):
+                sampled = self.sampler(logits, sample_temperatures,
+                                       all_greedy=all(seq.temperature <= 1e-6 for seq in sampled_seqs))
+            if selected is None:
+                token_ids = sampled
+            else:
+                token_ids[selected] = sampled
+            self.sampled_token_ids_gpu.scatter_(0, sample_slots, sampled)
+        self._target_hidden = None
 
         buf_idx = self._output_buf_idx
         self._output_buf_idx ^= 1 #ping-pong buffer index, switch between 0 and 1 for double buffering

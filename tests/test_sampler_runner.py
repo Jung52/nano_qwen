@@ -24,8 +24,10 @@ def test_cpu_greedy_routing_keeps_rng_and_samples_correct_tail(prefill, monkeypa
     event = SimpleNamespace(record=lambda *a: None, synchronize=lambda: None)
     runner._output_events = [event, event]
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: None)
-    seqs = [SimpleNamespace(temperature=1e-6, num_scheduled_tokens=2),
-            SimpleNamespace(temperature=1e-6, num_scheduled_tokens=1)]
+    seqs = [SimpleNamespace(temperature=1e-6, num_scheduled_tokens=2 if prefill else 1,
+                            num_cached_tokens=0, num_tokens=2, is_prefill=prefill),
+            SimpleNamespace(temperature=1e-6, num_scheduled_tokens=1,
+                            num_cached_tokens=0, num_tokens=1, is_prefill=prefill)]
     logits = torch.tensor([[0., 9., 1.], [8., 8., 1.], [0., 1., 9.]]) if prefill else torch.tensor([[8., 8., 1.], [0., 1., 9.]])
     runner._pending = (logits, torch.tensor([1e-6, 1e-6]), seqs, prefill)
     rng = torch.random.get_rng_state().clone()

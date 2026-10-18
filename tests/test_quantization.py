@@ -659,6 +659,8 @@ def test_fp8_piecewise_prefill_matches_eager(bf16_default):
     runner = SimpleNamespace(model=model, use_prefill_cudagraph=True,
         config=SimpleNamespace(quant_config=Fp8Config(), max_num_batched_tokens=128,
                                hf_config=config))
+    from nano_qwen.engine.model_runner import ModelRunner
+    runner.project_target_hidden = lambda hidden: ModelRunner.project_target_hidden(runner, hidden)
     graphs = CudaGraphManager(runner)
     gdn = model.model.layers[0].linear_attn
     try:

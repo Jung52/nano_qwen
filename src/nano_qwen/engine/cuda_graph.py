@@ -162,7 +162,7 @@ class CudaGraphManager:
             None,
         )
         if graph_size is None or graph_size not in self.prefill_graphs:
-            return self.model.compute_logits(self.model(input_ids, positions))
+            return self.runner.project_target_hidden(self.model(input_ids, positions))
 
         entries = self.prefill_graphs[graph_size]
         hidden = self.model.model.embed_tokens(input_ids)
@@ -201,12 +201,12 @@ class CudaGraphManager:
             hidden[:num_tokens],
             residual[:num_tokens],
         )
-        return self.model.compute_logits(hidden)
+        return self.runner.project_target_hidden(hidden)
 
     def run_decode(self, input_ids: torch.Tensor, positions: torch.Tensor):
         bs = input_ids.size(0)
         if bs not in self.decode_graphs:
-            return self.model.compute_logits(self.model(input_ids, positions))
+            return self.runner.project_target_hidden(self.model(input_ids, positions))
 
         context = get_context()
         graph = self.decode_graphs[bs]
@@ -224,7 +224,7 @@ class CudaGraphManager:
         graph_vars["state_indices"].zero_()
         graph_vars["state_indices"][:bs] = context.state_indices
         graph.replay()
-        return self.model.compute_logits(graph_vars["outputs"][:bs])
+        return self.runner.project_target_hidden(graph_vars["outputs"][:bs])
 
     def clear_prefill(self) -> None:
         self.prefill_graphs.clear()
