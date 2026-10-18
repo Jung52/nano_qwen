@@ -76,15 +76,23 @@ class Sequence:
         self.token_ids[-1] = token_id
         self.last_token = token_id
 
+    def execution_tokens(self, start: int, end: int) -> list[int]:
+        """Read committed input plus the independently held verify draft."""
+        if not 0 <= start <= end <= self.num_tokens + int(self.is_speculative):
+            raise ValueError("Execution rows exceed committed history and draft")
+        rows = self.token_ids[start:min(end, self.num_tokens)]
+        if end > self.num_tokens:
+            if self.draft_token is None:
+                raise ValueError("Speculative execution requires a draft")
+            rows = rows + [self.draft_token]
+        return rows
+
     def __getstate__(self):
-        last_state = self.last_token if not self.is_prefill else self.token_ids
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state)
+        # Workers consume identity, scheduling, sampling and lifecycle fields,
+        # including full chunk/verify input rows. Keep one complete contract.
+        return vars(self).copy()
 
     def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state = state
-        if isinstance(last_state, list):
-            self.token_ids = last_state
-            self.last_token = self.token_ids[-1]
-        else:
-            self.token_ids = []
-            self.last_token = last_state
+        if not isinstance(state, dict):
+            raise ValueError("Unsupported Sequence execution metadata")
+        self.__dict__.update(state)

@@ -34,7 +34,7 @@ class LinearBase(nn.Module):
             UnquantizedLinearMethod() if quant_config is None
             else quant_config.get_quant_method(self, prefix)
         )
-        self.quant_method.create_weights(self, input_size, output_size, self._compute_dtype)
+        self.quant_method.create_weights(self, input_size, output_size, self._compute_dtype)#初始化
         if bias:
             self.bias = nn.Parameter(torch.empty(output_size))
             self.bias.weight_loader = self.weight_loader
@@ -94,7 +94,7 @@ class ColumnParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.quant_method.apply(self, x, self.bias)
+        return self.quant_method.apply(self, x, self.bias)#前向计算
 
 
 class MergedColumnParallelLinear(ColumnParallelLinear):

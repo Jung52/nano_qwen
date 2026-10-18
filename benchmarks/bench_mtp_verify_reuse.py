@@ -352,12 +352,11 @@ def main():
             engine.step()
             if not engine.scheduler.block_manager.ensure_capacity(seq, 2):
                 raise RuntimeError("Insufficient KV capacity for two-token diagnostic")
-            # Sequence's TP serialization deliberately omits lifecycle fields;
-            # construct a diagnostic view explicitly rather than deepcopy it.
+            # Diagnostic execution holds the pending draft outside token_ids.
             probe = Sequence(list(seq.token_ids), params)
             probe.num_cached_tokens = seq.num_cached_tokens
             probe.block_table = list(seq.block_table)
-            probe.append_token(seq.draft_token)
+            probe.draft_token = seq.draft_token
             probe.is_speculative = True
             probe.num_scheduled_tokens = 2
             reports = []

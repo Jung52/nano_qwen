@@ -3,6 +3,7 @@ from collections import deque
 from nano_qwen.config import Config
 from nano_qwen.engine.sequence import Sequence, SequenceStatus
 from nano_qwen.engine.block_manager import BlockManager
+from nano_qwen.engine.execution import RequestOutput
 
 
 class Scheduler:
@@ -51,8 +52,62 @@ class Scheduler:
             if seq.num_cached_tokens or seq.num_completion_tokens
         }
 
+        # Reserve token budget for ready decode before admitting prompt work.
+        while self.running and len(scheduled_seqs) < self.max_num_seqs:
+            # Verification owns a two-time-step state/snapshot layout. Keep
+            # it separate from prompt ingestion and ordinary final rows.
+            remaining = self.max_num_batched_tokens - num_batched_tokens
+            if remaining <= 0:
+                break
+            seq = self.running[0]
+            committed_completions = seq.num_tokens - seq.num_prompt_tokens
+            can_verify = (
+                self.enable_mtp
+                and seq.draft_token is not None
+                and seq.temperature <= 1e-6
+                and committed_completions + 2 <= seq.max_tokens
+                and remaining >= 2
+            )
+            if self.enable_mtp and scheduled_seqs and can_verify != scheduled_seqs[0].is_speculative:
+                break
+            self.running.popleft()
+            if can_verify:
+                seq.is_speculative = True
+                # Target verify and shifted MTP catch-up both fit within the
+                # same two-row extent; RoPE positions do not add a cache row.
+                if self.block_manager.ensure_capacity(seq, 2):
+                    seq.num_scheduled_tokens = 2
+                    seq.is_prefill = True
+                    self.in_flight.add(seq.seq_id)
+                    scheduled_seqs.append(seq)
+                    num_batched_tokens += 2
+                    continue
+                # Rare KV-pressure fallback: discard the draft and replay the
+                # request as a normal prefill after preemption.
+                seq.is_speculative = False
+                seq.draft_token = None
+                self.preempt(seq)
+                continue
+
+            while not self.block_manager.can_append(seq):
+                if self.running:
+                    self.preempt(self.running.pop())
+                else:
+                    self.preempt(seq)
+                    break
+            else:
+                seq.num_scheduled_tokens = 1
+                seq.is_prefill = False
+                self.block_manager.may_append(seq)
+                self.in_flight.add(seq.seq_id)
+                scheduled_seqs.append(seq)
+                num_batched_tokens += 1
+
+        # Ordinary decode may share remaining budget with prompt chunks.
+        decode_owns_batch = self.enable_mtp and bool(scheduled_seqs)
         # prefill
-        while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
+        while (self.waiting and len(scheduled_seqs) < self.max_num_seqs
+               and not decode_owns_batch):
             seq = self.waiting[0]
             if seq.seq_id not in active_ids and len(active_ids) >= self.max_num_seqs:
                 # Continue an admitted prompt behind new arrivals, rather than
@@ -91,8 +146,6 @@ class Scheduler:
                 num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
             else:
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
-            if remaining < num_tokens and scheduled_seqs:  # only allow chunked prefill for the first seq
-                break
             if not seq.block_table:
                 self.block_manager.allocate(seq, num_cached_blocks)
             seq.num_scheduled_tokens = min(num_tokens, remaining)
@@ -103,67 +156,6 @@ class Scheduler:
             active_ids.add(seq.seq_id)
             scheduled_seqs.append(seq)
 
-        # Fill any remaining token budget with decode rows. This produces a
-        # mixed prefill+decode batch when a prefill request leaves budget
-        # available, and remains a pure decode batch when no prefill was
-        # scheduled.
-        while self.running and len(scheduled_seqs) < self.max_num_seqs:
-            # Verification owns a two-time-step state/snapshot layout. Keep
-            # it separate from prompt ingestion and ordinary final rows.
-            if (self.enable_mtp and scheduled_seqs and scheduled_seqs[0].is_prefill
-                    and not scheduled_seqs[0].is_speculative):
-                break
-            remaining = self.max_num_batched_tokens - num_batched_tokens
-            if remaining <= 0:
-                break
-            seq = self.running[0]
-            committed_completions = seq.num_tokens - seq.num_prompt_tokens
-            can_verify = (
-                self.enable_mtp
-                and seq.draft_token is not None
-                and seq.temperature <= 1e-6
-                and committed_completions + 2 <= seq.max_tokens
-                and remaining >= 2
-            )
-            if self.enable_mtp and scheduled_seqs and can_verify != scheduled_seqs[0].is_speculative:
-                break
-            self.running.popleft()
-            if can_verify:
-                seq.append_token(seq.draft_token)
-                seq.is_speculative = True
-                # Target verify and shifted MTP catch-up both fit within the
-                # same two-row extent; RoPE positions do not add a cache row.
-                if self.block_manager.ensure_capacity(seq, 2):
-                    seq.num_scheduled_tokens = 2
-                    seq.is_prefill = True
-                    self.in_flight.add(seq.seq_id)
-                    scheduled_seqs.append(seq)
-                    num_batched_tokens += 2
-                    continue
-                # Rare KV-pressure fallback: discard the draft and replay the
-                # request as a normal prefill after preemption.
-                seq.token_ids.pop()
-                seq.num_tokens -= 1
-                seq.last_token = seq.token_ids[-1]
-                seq.is_speculative = False
-                seq.draft_token = None
-                self.preempt(seq)
-                continue
-
-            while not self.block_manager.can_append(seq):
-                if self.running:
-                    self.preempt(self.running.pop())
-                else:
-                    self.preempt(seq)
-                    break
-            else:
-                seq.num_scheduled_tokens = 1
-                seq.is_prefill = False
-                self.block_manager.may_append(seq)
-                self.in_flight.add(seq.seq_id)
-                scheduled_seqs.append(seq)
-                num_batched_tokens += 1
-
         any_prefill = any(seq.is_prefill for seq in scheduled_seqs)
         scheduled_ids = [seq.seq_id for seq in scheduled_seqs]
         assert len(set(scheduled_ids)) == len(scheduled_ids), (
@@ -172,8 +164,12 @@ class Scheduler:
         return scheduled_seqs, any_prefill
 
     def preempt(self, seq: Sequence):
+        if seq.seq_id in self.in_flight:
+            raise ValueError("Cannot preempt an in-flight request before consuming its result")
         seq.status = SequenceStatus.WAITING
         seq.is_prefill = True
+        seq.is_speculative = False
+        seq.draft_token = None
         self.in_flight.discard(seq.seq_id)
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
@@ -181,44 +177,59 @@ class Scheduler:
     def postprocess(
         self,
         seqs: list[Sequence],
-        token_ids: list[list[int]],
+        results: list[RequestOutput],
         is_prefill: bool,
     ):
-        for seq, token_id in zip(seqs, token_ids):
-            self.in_flight.discard(seq.seq_id)  # sample consumed, seq schedulable again
-            next_draft = seq.draft_token
-            cached_before = seq.num_cached_tokens
-            seq.num_cached_tokens += seq.num_scheduled_tokens
-            seq.num_scheduled_tokens = 0
-            if is_prefill and seq.num_cached_tokens < seq.num_tokens:
-                self.waiting.append(seq)  # chunked prefill: back to waiting for the next chunk
-                continue
-
-            outputs = token_id if isinstance(token_id, list) else [token_id]
-            was_speculative = seq.is_speculative
-            seq.is_speculative = False
-            if was_speculative:
-                # The draft was appended before execution. On rejection the
-                # target token overwrites that slot; on acceptance the second
-                # target output is the only newly appended token.
-                if len(outputs) == 2:
-                    seq.append_token(outputs[1])
-                else:
-                    seq.replace_last_token(outputs[0])
-                    # The rejected draft was executed but never committed.
-                    # Keep its KV slot scheduled again with the corrected
-                    # target token.
-                    seq.num_cached_tokens = cached_before + 1
+        if len({s.seq_id for s in seqs}) != len(seqs):
+            raise ValueError("Duplicate request in commit batch")
+        if len(seqs) != len(results):
+            raise ValueError("Execution result count differs from request count")
+        # Validate the whole batch before changing authoritative state.
+        for seq, result in zip(seqs, results):
+            if not isinstance(result, RequestOutput) or seq.seq_id not in self.in_flight:
+                raise ValueError("Commit requires an explicit result for an in-flight request")
+            tokens = result.committed_tokens
+            partial = seq.is_prefill and not seq.is_speculative and (
+                seq.num_cached_tokens + seq.num_scheduled_tokens < seq.num_tokens)
+            if seq.is_speculative:
+                expected_advance = len(tokens)
+                valid = (len(tokens) in (1, 2) and result.accepted_count in (0, 1)
+                         and (result.accepted_count == 1 or len(tokens) == 1)
+                         and (result.accepted_count == 0 or tokens[0] == seq.draft_token)
+                         and (result.accepted_count == 0 or len(tokens) == 2
+                              or (not seq.ignore_eos and tokens[0] == self.eos)))
             else:
-                seq.append_token(outputs[0])
+                expected_advance = seq.num_scheduled_tokens
+                valid = result.accepted_count == 0 and len(tokens) == int(not partial)
+            if not valid or result.cache_advance != expected_advance:
+                raise ValueError("Invalid committed token count or cache advance")
+            if seq.num_completion_tokens + len(tokens) > seq.max_tokens:
+                raise ValueError("Commit exceeds remaining output budget")
+            if not seq.ignore_eos and self.eos in tokens[:-1]:
+                raise ValueError("Commit continues past EOS")
+            if result.next_draft is not None and (partial or not self.enable_mtp):
+                raise ValueError("Unexpected draft for this execution")
 
-            hit_eos = not seq.ignore_eos and any(token == self.eos for token in outputs)
+        for seq, result in zip(seqs, results):
+            cached_before = seq.num_cached_tokens
+            seq.num_cached_tokens += result.cache_advance
+            seq.num_scheduled_tokens = 0
+            seq.is_speculative = False
+            for token in result.committed_tokens:
+                seq.append_token(token)
+            seq.draft_token = result.next_draft
+            self.in_flight.remove(seq.seq_id)
+            if self.enable_prefix_cache:
+                self.block_manager.hash_blocks(
+                    seq, start_token=cached_before, end_token=seq.num_cached_tokens)
+            if not result.committed_tokens:
+                self.waiting.append(seq)
+                continue
+            hit_eos = not seq.ignore_eos and self.eos in result.committed_tokens
             if hit_eos or seq.num_completion_tokens == seq.max_tokens:
                 seq.status = SequenceStatus.FINISHED
+                seq.draft_token = None
                 self.block_manager.deallocate(seq)
             else:
                 seq.status = SequenceStatus.RUNNING
-                self.running.append(seq)  # back to schedulable
-                seq.draft_token = next_draft
-            if self.enable_prefix_cache:
-                self.block_manager.hash_blocks(seq)
+                self.running.append(seq)

@@ -42,7 +42,7 @@ def checked_prefixes(engine, prompts):
         if rows and all(s.is_speculative for s in rows):
             # same64 requests share decisions; keep the first full state of
             # each actual outcome, rather than only their released zero pools.
-            kind = "accepted" if len(outputs[0]) == 2 else "rejected"
+            kind = "accepted" if outputs[0].accepted_count else "rejected"
             if kind not in checkpoints:
                 tensors, metadata = {}, []
                 for n, layer in enumerate(runner.gdn_layers):
@@ -50,9 +50,9 @@ def checked_prefixes(engine, prompts):
                     tensors[f"gdn{n}.recurrent"] = layer.recurrent_states.cpu()
                 for i, (seq, output) in enumerate(zip(rows, outputs)):
                     slot = runner.input_batch.slots_for([seq])[0]
-                    prefix = seq.num_cached_tokens + seq.num_scheduled_tokens - (len(output) == 1)
+                    prefix = seq.num_cached_tokens + output.cache_advance
                     count = runner._mtp_cache_lens[slot]
-                    metadata.append(dict(slot=slot, target_prefix=prefix, mtp_prefix=count, submitted=len(output)))
+                    metadata.append(dict(slot=slot, target_prefix=prefix, mtp_prefix=count, submitted=len(output.committed_tokens)))
                     for n, module in enumerate(m for m in runner.model.modules() if isinstance(m, Attention)):
                         for label, cache in (("k", module.k_cache), ("v", module.v_cache)):
                             tensors[f"request{i}.target{n}.{label}"] = valid_rows(cache, seq.block_table, prefix)

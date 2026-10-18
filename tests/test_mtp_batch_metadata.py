@@ -5,6 +5,7 @@ import torch
 
 from test_mtp_cache_lifecycle import runner, sequence  # noqa: F401
 from nano_qwen.scheduler.scheduler import Scheduler
+from nano_qwen.engine.execution import RequestOutput
 from nano_qwen.engine.sequence import SequenceStatus
 from nano_qwen.utils.context import get_context
 
@@ -76,7 +77,7 @@ def test_kv_pressure_waits_for_inflight_verify_before_readmission():
     rows, _ = scheduler.schedule()
     assert rows == [b] and list(scheduler.waiting) == [a]
     assert scheduler.schedule()[0] == []  # B may still finish and free both blocks.
-    scheduler.postprocess([b], [[5, 6]], True)
+    scheduler.postprocess([b], [RequestOutput((5, 6), 1, None, 2)], True)
     assert b.is_finished
     assert scheduler.schedule()[0] == [a]
 
@@ -96,14 +97,14 @@ def test_new_admission_waits_for_a_state_slot_including_chunked_requests():
     for seq in (a, b, c):
         scheduler.add(seq)
     assert scheduler.schedule()[0] == [a]
-    scheduler.postprocess([a], [[4]], True)  # A chunk needs its reserved slot later.
+    scheduler.postprocess([a], [RequestOutput((), 0, None, 64)], True)  # Reserved partial prompt.
     assert scheduler.schedule()[0] == [b]
-    scheduler.postprocess([b], [[4]], True)
+    scheduler.postprocess([b], [RequestOutput((4,) if b.num_cached_tokens == 64 else (), 0, None, 64)], True)
     # C cannot steal the slots held by partial A/B, and cannot block their progress.
     assert scheduler.schedule()[0] == [a]
     assert scheduler.schedule()[0] == [b]
     assert scheduler.schedule()[0] == []
-    scheduler.postprocess([a], [[4]], True)
+    scheduler.postprocess([a], [RequestOutput((4,), 0, None, 64)], True)
     assert a.is_finished
     assert scheduler.schedule()[0] == [c]
 
@@ -119,19 +120,22 @@ def test_preempted_replay_does_not_block_a_chunk_that_can_release_kv():
         num_kvcache_blocks=2,
     )
     scheduler = Scheduler(config)
-    a, b = sequence(256, [], max_tokens=4), sequence(128, [], max_tokens=1)
+    a, b = sequence(256, [], max_tokens=4), sequence(192, [], max_tokens=1)
     scheduler.block_manager.allocate(a, 0)
+    scheduler.block_manager.allocate(b, 0)
+    b.num_cached_tokens = 64
     a.num_cached_tokens = 256
     a.append_token(4)
     a.draft_token = 5
     a.status = SequenceStatus.RUNNING
     scheduler.running.append(a)
     scheduler.add(b)
+    # A cannot grow while B holds its block. Its replay goes ahead of B,
+    # but the already admitted prompt must continue and release its block.
     assert scheduler.schedule()[0] == [b]
-    assert scheduler.schedule()[0] == []  # A preempts while B's chunk is in flight.
-    scheduler.postprocess([b], [[4]], True)
+    scheduler.postprocess([b], [RequestOutput((), 0, None, 64)], True)
     assert list(scheduler.waiting) == [a, b]
-    assert scheduler.schedule()[0] == [b]  # B's last chunk can release its block.
-    scheduler.postprocess([b], [[4]], True)
+    assert scheduler.schedule()[0] == [b]
+    scheduler.postprocess([b], [RequestOutput((4,), 0, None, 64)], True)
     assert b.is_finished
     assert scheduler.schedule()[0] == [a]

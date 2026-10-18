@@ -45,7 +45,7 @@ def signature(event):
 def summarize_trace(events):
     physical = [e for e in events if e.get("ph") == "X" and e.get("cat") in ("kernel", "gpu_memcpy", "gpu_memset")]
     kernels = [e for e in physical if e["cat"] == "kernel"]
-    labels = {"target", "target_head", "draft", "draft_head", "cache_only", "snapshot", "rollback"}
+    labels = {"target", "target_head", "draft", "draft_head", "cache_only", "snapshot", "rollback", "mtp_prefill"}
     scopes = [e for e in events if e.get("cat") == "gpu_user_annotation" and e.get("name") in {"mtp."+s for s in labels}]
 
     def contains(scope, event):

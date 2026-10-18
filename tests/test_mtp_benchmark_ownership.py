@@ -10,6 +10,7 @@ import bench_qwen3_5_mtp_production as bench
 from nano_qwen.config import Config
 from nano_qwen.engine.model_runner import InputBatch, ModelRunner
 from nano_qwen.engine.sequence import Sequence
+from nano_qwen.engine.execution import RequestOutput
 from nano_qwen.scheduler import Scheduler
 from test_mtp_weights import checkpoint_pair
 
@@ -52,7 +53,7 @@ def engine(tmp_path, monkeypatch):
         if not prefill:
             runner.mtp_stats["accepted_tokens"] += 1
             runner.mtp_stats["verify_steps"] += 1
-        value.scheduler.postprocess(seqs, [[2] for s in seqs], prefill)
+        value.scheduler.postprocess(seqs, [RequestOutput((2,), 0, None, s.num_scheduled_tokens) for s in seqs], prefill)
         return [], count
 
     value.step = step

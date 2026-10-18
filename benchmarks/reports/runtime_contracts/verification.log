@@ -1,0 +1,38 @@
+........................................................................ [  9%]
+........................................................................ [ 19%]
+...........................ssss.......ssss.....ssss.......ssss.......... [ 29%]
+.......................................................ssss.......ssss.. [ 38%]
+...ssss.......ssss...................................................... [ 48%]
+........................................................................ [ 58%]
+........................................................................ [ 68%]
+........................................................................ [ 77%]
+........................................................................ [ 87%]
+........................................................................ [ 97%]
+...................                                                      [100%]
+=============================== warnings summary ===============================
+<frozen importlib._bootstrap>:241
+  <frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+
+<frozen importlib._bootstrap>:241
+  <frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+
+../../miniconda3/envs/code/lib/python3.10/site-packages/torch/jit/_script.py:365: 14 warnings
+  /home/wei/miniconda3/envs/code/lib/python3.10/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+tests/test_gdn_state_pool.py::test_indexed_decode_graph_matches_dense_with_changing_sparse_slots[8]
+  /home/wei/miniconda3/envs/code/lib/python3.10/site-packages/flashinfer/gemm/kernels/grouped_gemm_masked_blackwell.py:2383: DeprecationWarning: tcgen05.OperandMajorMode is deprecated, use cute.nvgpu.OperandMajorMode instead
+    a_major_mode: tcgen05.OperandMajorMode,
+
+tests/test_gdn_state_pool.py::test_indexed_decode_graph_matches_dense_with_changing_sparse_slots[8]
+  /home/wei/miniconda3/envs/code/lib/python3.10/site-packages/flashinfer/gemm/kernels/grouped_gemm_masked_blackwell.py:2385: DeprecationWarning: tcgen05.OperandMajorMode is deprecated, use cute.nvgpu.OperandMajorMode instead
+    b_major_mode: tcgen05.OperandMajorMode,
+
+tests/test_gdn_state_pool.py::test_indexed_decode_graph_matches_dense_with_changing_sparse_slots[8]
+tests/test_gdn_state_pool.py::test_indexed_decode_graph_matches_dense_with_changing_sparse_slots[8]
+  /home/wei/miniconda3/envs/code/lib/python3.10/site-packages/flashinfer/gdn_kernels/blackwell/gated_delta_net_chunked.py:99: DeprecationWarning: tcgen05.OperandMajorMode is deprecated, use cute.nvgpu.OperandMajorMode instead
+    from cutlass.cute.nvgpu.tcgen05 import OperandMajorMode
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+707 passed, 32 skipped, 20 warnings in 150.81s (0:02:30)
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute

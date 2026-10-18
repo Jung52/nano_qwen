@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from copy import deepcopy
 
 import torch
 
@@ -26,6 +27,7 @@ class CudaGraphManager:
 
     def __init__(self, runner: "ModelRunner") -> None:
         self.runner = runner
+        self._dispatch_stats: dict = {}
 
         self.decode_graph_sizes: list[int] = []
         self.decode_graphs: dict[int, torch.cuda.CUDAGraph] = {}
@@ -48,6 +50,19 @@ class CudaGraphManager:
         self.prefill_graph_pool = None
         self.piecewise_buffers: dict | None = None
         self._piecewise_compiled: dict[tuple[int, str], callable] = {}
+
+    def reset_dispatch_stats(self):
+        self._dispatch_stats.clear()
+
+    def dispatch_stats(self):
+        return deepcopy(self._dispatch_stats)
+
+    def record_dispatch(self, kind: str, batch: int, graph: bool, tokens: int):
+        entry = self._dispatch_stats.setdefault(kind, {
+            "graph_calls": 0, "eager_calls": 0, "batch_counts": {}, "token_counts": {}})
+        entry["graph_calls" if graph else "eager_calls"] += 1
+        for name, value in (("batch_counts", batch), ("token_counts", tokens)):
+            entry[name][value] = entry[name].get(value, 0) + 1
 
     @property
     def model(self):
@@ -139,6 +154,7 @@ class CudaGraphManager:
         if self.verify_graph_mode != self.config.mtp_verify_mode:
             raise RuntimeError("MTP verify mode changed; recapture its CUDA Graph first")
         context = get_context()
+        self.record_dispatch("verify", input_ids.numel() // 2, True, input_ids.numel())
         graph, buffers = self.verify_graphs[input_ids.numel() // 2]
         buffers["input_ids"].copy_(input_ids)
         buffers["positions"].copy_(positions)
@@ -220,6 +236,7 @@ class CudaGraphManager:
 
     def run_mtp_decode(self, input_ids, positions, target_hidden, slot_mapping,
                        context_lens, block_tables):
+        self.record_dispatch("draft", input_ids.numel(), True, input_ids.numel())
         graph, buffers = self.mtp_decode_graphs[input_ids.numel()]
         self._update_mtp_buffers(buffers, input_ids, positions, target_hidden,
                                  slot_mapping, context_lens, block_tables)
@@ -228,6 +245,7 @@ class CudaGraphManager:
 
     def run_mtp_cache_only(self, input_ids, positions, target_hidden, slot_mapping,
                            context_lens, block_tables):
+        self.record_dispatch("cache_only", input_ids.numel(), True, input_ids.numel())
         graph, buffers = self.mtp_cache_graphs[input_ids.numel()]
         self._update_mtp_buffers(buffers, input_ids, positions,
                                  target_hidden, slot_mapping, context_lens, block_tables)
@@ -364,10 +382,12 @@ class CudaGraphManager:
             (size for size in self.prefill_graph_sizes if size >= num_tokens),
             None,
         )
-        if graph_size is None or graph_size not in self.prefill_graphs:
+        used_graph = graph_size is not None and graph_size in self.prefill_graphs
+        self.record_dispatch("prefill", len(context.prefill_slices), used_graph, num_tokens)
+        if not used_graph:
             hidden = self.model.model(input_ids, positions)
             self.runner._target_hidden = hidden
-            return self.model.compute_logits(hidden)
+            return self.runner.project_target_hidden(hidden)
 
         entries = self.prefill_graphs[graph_size]
         hidden = self.model.model.embed_tokens(input_ids)
@@ -407,14 +427,15 @@ class CudaGraphManager:
             residual[:num_tokens],
         )
         self.runner._target_hidden = hidden
-        return self.model.compute_logits(hidden)
+        return self.runner.project_target_hidden(hidden)
 
     def run_decode(self, input_ids: torch.Tensor, positions: torch.Tensor):
         bs = input_ids.size(0)
+        self.record_dispatch("decode", bs, bs in self.decode_graphs, bs)
         if bs not in self.decode_graphs:
             hidden = self.model.model(input_ids, positions)
             self.runner._target_hidden = hidden
-            return self.model.compute_logits(hidden)
+            return self.runner.project_target_hidden(hidden)
 
         context = get_context()
         graph = self.decode_graphs[bs]
@@ -434,7 +455,7 @@ class CudaGraphManager:
         graph.replay()
         hidden = graph_vars["outputs"][:bs]
         self.runner._target_hidden = hidden
-        return self.model.compute_logits(hidden)
+        return self.runner.project_target_hidden(hidden)
 
     def clear_prefill(self) -> None:
         self.prefill_graphs.clear()

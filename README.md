@@ -11,6 +11,8 @@ Compared with the original nano-vllm, nano_qwen will progressively introduce
 several features from modern inference systems such as vLLM and SGLang, while
 trying to keep the implementation small and easy to understand.
 
+模块演进、实测收益、性能回退和正确性修复过程见[开发日志](DEVELOPMENT_LOG.md)。
+
 ## Roadmap
 
 ### 1. ModelRunnerV2

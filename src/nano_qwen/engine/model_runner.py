@@ -22,6 +22,7 @@ from nano_qwen.utils.loader import load_model
 from nano_qwen.utils.trace import trace_event
 
 from .async_output import AsyncModelOutput
+from .execution import OutputSpec, SamplingPlan
 from .decode_init import prepare_decode as prepare_decode_kernel
 
 
@@ -172,6 +173,7 @@ class ModelRunner:
         # (depth-1 async), so a single slot holds the logits/temps/seqs the
         # immediately-following sample_tokens call will consume.
         self._pending: tuple | None = None
+        self._sampling_plan: SamplingPlan | None = None
         self.allocate_gdn_state_pool()
         self.warmup_model()
         self.input_batch.clear()
@@ -402,7 +404,7 @@ class ModelRunner:
             seqlen_q = seq.num_scheduled_tokens
             end = start + seqlen_q
             seqlen_k = end
-            input_ids.extend(seq[start:end])
+            input_ids.extend(seq.execution_tokens(start, end))
             positions.extend(range(start, end))
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
@@ -440,13 +442,7 @@ class ModelRunner:
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         state_indices = self.batch_slots_gpu[:len(seqs)]
         is_verify = all(seq.is_speculative for seq in seqs)
-        descriptor = BatchDescriptor(
-            mode="spec_decode" if is_verify else "prefill",
-            num_tokens=len(input_ids),
-            num_reqs=len(seqs),
-            uniform_token_count=2 if is_verify else None,
-            max_query_len=max_seqlen_q,
-        )
+        descriptor = BatchDescriptor.for_requests(seqs)
         set_context(
             True,
             cu_seqlens_q=cu_seqlens_q,
@@ -564,6 +560,17 @@ class ModelRunner:
         rows = hidden.reshape(batch, 2, -1).transpose(0, 1).contiguous()
         return torch.stack([self.model.compute_logits(row) for row in rows], dim=1).reshape(2 * batch, -1)
 
+    def project_target_hidden(self, hidden: torch.Tensor):
+        """Keep all hidden rows for MTP; project only planned sampling rows."""
+        self._target_hidden = hidden
+        plan = getattr(self, "_sampling_plan", None)
+        if plan is None or plan.row_indices == tuple(range(hidden.shape[0])):
+            return self.model.compute_logits(hidden)
+        if not plan.row_indices:
+            return hidden.new_empty((0, self.model.lm_head.num_embeddings))
+        indices = torch.tensor(plan.row_indices, device=hidden.device, dtype=torch.int64)
+        return self.model.compute_logits(hidden.index_select(0, indices))
+
     @torch.inference_mode()
     def run_model(
         self,
@@ -580,20 +587,24 @@ class ModelRunner:
             mode = "prefill" if is_prefill else "decode"
 
         if self.enforce_eager or not self.cuda_graphs.decode_graphs:
+            self.cuda_graphs.record_dispatch("verify" if is_verify else ("prefill" if is_prefill else "decode"),
+                                            context.state_indices.numel(), False, input_ids.numel())
             hidden = (self.forward_verify(input_ids, positions) if is_verify
                       else self.model.model(input_ids, positions))
             self._target_hidden = hidden
-            return self.compute_verify_logits(hidden) if is_verify else self.model.compute_logits(hidden)
+            return self.compute_verify_logits(hidden) if is_verify else self.project_target_hidden(hidden)
         if is_verify and self.cuda_graphs.verify_graph is not None:
             return self.cuda_graphs.run_verify(input_ids, positions)
         if mode == "prefill" and self.use_prefill_cudagraph:
             return self.cuda_graphs.run_prefill(input_ids, positions)
 
         if is_prefill:
+            self.cuda_graphs.record_dispatch("verify" if is_verify else "prefill",
+                                            context.state_indices.numel(), False, input_ids.numel())
             hidden = (self.forward_verify(input_ids, positions) if is_verify
                       else self.model.model(input_ids, positions))
             self._target_hidden = hidden
-            return self.compute_verify_logits(hidden) if is_verify else self.model.compute_logits(hidden)
+            return self.compute_verify_logits(hidden) if is_verify else self.project_target_hidden(hidden)
 
         # Decode / spec_decode: dispatch through the graph manager.
         return self.cuda_graphs.run_decode(input_ids, positions)
@@ -605,6 +616,9 @@ class ModelRunner:
         not wait for them. Sampling is a separate call (sample_tokens), which
         reads the pending logits and performs the async D2H copy.
         """
+        descriptor = BatchDescriptor.for_requests(seqs)
+        if is_prefill != (descriptor.mode != "decode"):
+            raise ValueError("Batch execution flag differs from request descriptor")
         self.input_batch.remove_finished()
         seqs, new_entries = self.input_batch.update(seqs)
         slots = self.input_batch.slots_for(seqs)
@@ -653,6 +667,7 @@ class ModelRunner:
             "run_model", "runner",
             args={"prefill": is_prefill, "tokens": input_ids.size(0)},
         ):
+            self._sampling_plan = SamplingPlan.for_requests(seqs)
             logits = self.run_model(
                 input_ids,
                 positions,
@@ -805,6 +820,8 @@ class ModelRunner:
             )
             self._mtp_cache_lens.update(zip(slots, positions))
             return result
+        self.cuda_graphs.record_dispatch("cache_only" if cache_only else "draft",
+                                        len(seqs), False, len(seqs))
         set_context(
             False,
             slot_mapping=slot_mapping,
@@ -837,11 +854,14 @@ class ModelRunner:
             # Non-zero TP ranks do not run the sampler: drop the pending
             # batch's state so rank 0 stays authoritative.
             self._pending = None
+            self._sampling_plan = None
             reset_context()
             return None
 
         logits, temperatures, seqs, is_prefill = self._pending
         self._pending = None
+        plan = getattr(self, "_sampling_plan", None)
+        self._sampling_plan = None
         bs = len(seqs)
         slot_ids = self.input_batch.slots_for(seqs)
         speculative_batch = is_prefill and all(seq.is_speculative for seq in seqs)
@@ -857,14 +877,23 @@ class ModelRunner:
             tail_indices.append(offset + seq.num_scheduled_tokens - 1)
             offset += seq.num_scheduled_tokens
 
+        sampling_requests = (tuple(dict.fromkeys(plan.request_indices)) if plan is not None else
+                             tuple(range(bs)) if speculative_batch else tuple(
+                                 i for i, seq in enumerate(seqs)
+                                 if not is_prefill or not seq.is_prefill
+                                 or seq.num_cached_tokens+seq.num_scheduled_tokens == seq.num_tokens))
         tail_logits = logits
-        if is_prefill and not speculative_batch:
+        if plan is None and is_prefill and not speculative_batch:
             tail_indices_gpu = torch.tensor(
-                tail_indices,
+                [tail_indices[i] for i in sampling_requests],
                 dtype=torch.int64,
                 device=logits.device,
             )
             tail_logits = logits.index_select(0, tail_indices_gpu)
+
+        sample_indices = None if sampling_requests == tuple(range(bs)) else torch.tensor(
+            sampling_requests, dtype=torch.int64, device=logits.device)
+        sample_temperatures = temperatures if sample_indices is None else temperatures.index_select(0, sample_indices)
 
         slots = self.batch_slots_gpu[:bs]
         # Validation-only samplers may request row-aligned logits/GDN-state
@@ -872,20 +901,28 @@ class ModelRunner:
         # remains unchanged.
         set_batch_context = getattr(self.sampler, "set_batch_context", None)
         if set_batch_context is not None:
-            set_batch_context(seqs, is_prefill)
+            set_batch_context([seqs[i] for i in sampling_requests], is_prefill)
         observe_gdn_state = getattr(self.sampler, "observe_gdn_state", None)
         if observe_gdn_state is not None:
-            observe_gdn_state(self.gdn_layers, slots)
+            observed_slots = slots if sample_indices is None else slots[sample_indices]
+            if sampling_requests:
+                observe_gdn_state(self.gdn_layers, observed_slots)
 
         with trace_event("sampler", "runner", args={"prefill": is_prefill, "bs": bs}):
             # A verify batch uses greedy top-1 on both target rows below.
             # The generic sampler's full-vocabulary softmax is unused here.
-            normal_tokens = (
-                torch.empty(bs, dtype=torch.int64, device=logits.device)
-                if speculative_batch
-                else self.sampler(tail_logits, temperatures,
-                                  all_greedy=all(seq.temperature <= 1e-6 for seq in seqs))
-            )
+            if speculative_batch:
+                normal_tokens = torch.empty(bs, dtype=torch.int64, device=logits.device)
+            elif sampling_requests:
+                sampled = self.sampler(tail_logits, sample_temperatures,
+                                       all_greedy=all(seqs[i].temperature <= 1e-6 for i in sampling_requests))
+                if sample_indices is None:
+                    normal_tokens = sampled
+                else:
+                    normal_tokens = torch.full((bs,), -1, dtype=torch.int64, device=logits.device)
+                    normal_tokens[sample_indices] = sampled
+            else:
+                normal_tokens = torch.full((bs,), -1, dtype=torch.int64, device=logits.device)
 
         output_gpu = torch.full(
             (bs, 3), -1, dtype=torch.int64, device=logits.device
@@ -900,6 +937,9 @@ class ModelRunner:
         accepted_inputs: list[torch.Tensor] = []
         accepted_positions: list[int] = []
         rollback_slots: list[int] = []
+        output_specs = [OutputSpec(int(i in sampling_requests), 0,
+                                   seq.num_scheduled_tokens if is_prefill else 1)
+                        for i, seq in enumerate(seqs)]
 
         if speculative_batch:
             assert self.mtp is not None
@@ -942,8 +982,9 @@ class ModelRunner:
                     self.mtp_stats["rejected_tokens"] += 1
                     rollback_slots.append(slot_ids[i])
 
-                committed_before = seq.num_tokens - seq.num_prompt_tokens - 1
+                committed_before = seq.num_completion_tokens
                 produced = 2 if accepted and second_token is not None else 1
+                output_specs[i] = OutputSpec(produced, int(accepted), produced)
                 hit_eos = (
                     not seq.ignore_eos
                     and (
@@ -961,14 +1002,14 @@ class ModelRunner:
                         accepted_seqs.append(seq)
                         accepted_hidden.append(self._target_hidden[start])
                         accepted_inputs.append(first_token)
-                        accepted_positions.append(seq.num_tokens - 1)
+                        accepted_positions.append(seq.num_tokens)
                     mtp_seqs.append(seq)
                     mtp_hidden_rows.append(
                         self._target_hidden[start + 1 if accepted else start]
                     )
                     mtp_inputs.append(sampled_values[i])
                     mtp_positions.append(
-                        seq.num_tokens if accepted else seq.num_tokens - 1
+                        seq.num_tokens + 1 if accepted else seq.num_tokens
                     )
                 continue
 
@@ -1020,7 +1061,10 @@ class ModelRunner:
             )
             output_gpu[batch_indices, 2] = next_drafts
 
-        self.sampled_token_ids_gpu.scatter_(0, slots, sampled_values)
+        if sample_indices is None:
+            self.sampled_token_ids_gpu.scatter_(0, slots, sampled_values)
+        elif sampling_requests:
+            self.sampled_token_ids_gpu.scatter_(0, slots[sample_indices], sampled_values[sample_indices])
         token_ids = output_gpu
         self._target_hidden = None
 
@@ -1044,7 +1088,7 @@ class ModelRunner:
             ready_event.record(torch.cuda.current_stream())
 
         reset_context()
-        return AsyncModelOutput(token_ids, output_buf, ready_event)
+        return AsyncModelOutput(token_ids, output_buf, ready_event, output_specs)
 
     def remove_request(self, seq_id: int):
         slot = self.input_batch.seq_id_to_slot.get(seq_id)

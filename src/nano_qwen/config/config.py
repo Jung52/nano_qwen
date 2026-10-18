@@ -17,7 +17,7 @@ class Config:
     tensor_parallel_size: int = 1
     enforce_eager: bool = False
     # GDN recurrent state is not part of the prefix-cache block payload.
-    # Keep prefix reuse opt-in until state snapshots are cached as well.
+    # Reject hybrid prefix reuse until matching state snapshots are cached.
     enable_prefix_cache: bool = False
     # MTP2 currently implements greedy one-draft speculative decoding. Keep it
     # opt-in: older checkpoints may not contain ``mtp.*`` weights and the
@@ -38,6 +38,11 @@ class Config:
     quant_config: QuantizationConfig | None = field(default=None, init=False)
 
     def __post_init__(self):
+        if self.tensor_parallel_size != 1:
+            raise ValueError(
+                "Only tensor_parallel_size=1 is supported until multi-GPU "
+                "execution and state synchronization are validated"
+            )
         if self.mtp_verify_mode not in ("serial", "reuse"):
             raise ValueError("mtp_verify_mode must be 'serial' or 'reuse'")
         if self.mtp_verify_mode == "reuse" and not self.enable_mtp:
@@ -91,3 +96,8 @@ class Config:
         self.is_hybrid = isinstance(layer_types, list) and any(
             t != "full_attention" for t in layer_types
         )
+        if self.is_hybrid and self.enable_prefix_cache:
+            raise ValueError(
+                "Hybrid prefix cache requires matching GDN conv/recurrent "
+                "state snapshots; KV-only prefix reuse is unsupported"
+            )

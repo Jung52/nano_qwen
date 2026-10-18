@@ -1,0 +1,12 @@
+{
+  "formal_continuation_exit_code": 0,
+  "samples": 90,
+  "completed_prefix_retained": 18,
+  "frozen_manifest_entries": 59,
+  "all_strict": true,
+  "legacy_invariant_note": "Recorded drivers check source/tuning after saving every sample. No invariant error occurred; continuation exited0. Initial interruption was GPU busy-wait after18completed samples. Future resume now requires a separately persisted invariant gate; legacy data is not silently relabelled.",
+  "driver_sha256": [
+    "933ebe22c0f3ef921f000a6ff77754ffde9edd179577d4f737227338f28f2b0f",
+    "a01d05605fa7bc57e11dbf10667ff054328c558875888c818f5e9c28c712c531"
+  ]
+}

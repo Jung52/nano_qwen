@@ -39,10 +39,10 @@ def snapshot(runner, seqs, outputs):
 
     for i, (seq, output) in enumerate(zip(seqs, outputs)):
         slot = runner.input_batch.slots_for([seq])[0]
-        prefix = seq.num_cached_tokens + seq.num_scheduled_tokens - (seq.is_speculative and len(output) == 1)
+        prefix = seq.num_cached_tokens + output.cache_advance
         count = runner._mtp_cache_lens[slot]
         metadata.append(dict(slot=slot, target_prefix=prefix, mtp_prefix=count,
-                             committed=seq.num_completion_tokens-int(seq.is_speculative)+len(output)))
+                             committed=seq.num_completion_tokens+len(output.committed_tokens)))
         for n, layer in enumerate(m for m in runner.model.modules() if isinstance(m, Attention)):
             for label, cache in (("k", layer.k_cache), ("v", layer.v_cache)):
                 tensors[f"request{i}.target{n}.{label}"] = valid(cache, seq.block_table, prefix)
@@ -110,7 +110,7 @@ def prefill_probe(engine):
             active = None
 
     def post(seqs, outputs, is_prefill):
-        if seqs and all(s.num_completion_tokens-int(s.is_speculative)+len(tokens) >= s.max_tokens
+        if seqs and all(s.num_completion_tokens+len(tokens.committed_tokens) >= s.max_tokens
                         for s, tokens in zip(seqs, outputs)):
             final_states.append(snapshot(runner, seqs, outputs))
         return postprocess(seqs, outputs, is_prefill)

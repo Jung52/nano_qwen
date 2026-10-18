@@ -1,0 +1,34 @@
+{
+  "old": {
+    "prefill_batches_before_decode": 16,
+    "prefill_tokens_before_decode": 2048,
+    "first_decode_batch": [
+      {
+        "is_decode": true,
+        "rows": 1
+      },
+      {
+        "is_decode": false,
+        "rows": 1
+      },
+      {
+        "is_decode": false,
+        "rows": 1
+      }
+    ]
+  },
+  "new": {
+    "prefill_batches_before_decode": 0,
+    "prefill_tokens_before_decode": 0,
+    "first_decode_batch": [
+      {
+        "is_decode": true,
+        "rows": 1
+      },
+      {
+        "is_decode": false,
+        "rows": 127
+      }
+    ]
+  }
+}

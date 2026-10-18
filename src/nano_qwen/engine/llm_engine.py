@@ -143,8 +143,8 @@ class LLMEngine:
         cohorts (e.g. 11/21 instead of 32), because the in-flight rows are
         not in ``running`` when the next batch is formed. Once the queued
         work contains decode rows, wait for it to drain before scheduling
-        more decode; new prefill work is still allowed to dispatch so
-        late arrivals keep making progress.
+        more work. Prompt work uses the budget left by ready decode rows
+        when the next combined batch is scheduled.
         """
         # Phase 1: fill the queue (never blocks).
         while len(self.batch_queue) < self.max_concurrent_batches:
@@ -152,7 +152,7 @@ class LLMEngine:
                 batch_seqs for batch_seqs, _, _, _ in self.batch_queue
                 if any(not seq.is_prefill or seq.is_speculative for seq in batch_seqs)
             ]
-            if decode_batches and not self.scheduler.waiting:
+            if decode_batches:
                 if self.scheduler.running and not self._coalesce_armed:
                     source_seqs = [
                         seq for batch_seqs in decode_batches for seq in batch_seqs
@@ -242,25 +242,9 @@ class LLMEngine:
             "d2h_wait", "engine",
             args={"prefill": is_prefill, "bs": len(seqs)},
         ):
-            token_ids = async_output.get_output()
+            results = async_output.get_results()
 
-        for seq, row in zip(seqs, token_ids):
-            if (
-                is_prefill
-                and seq.num_cached_tokens + seq.num_scheduled_tokens
-                < seq.num_tokens
-            ):
-                continue
-            seq.draft_token = row[2] if row[2] != -1 else None
-
-        self.scheduler.postprocess(
-            seqs,
-            [
-                [token for token in row[:2] if token != -1]
-                for row in token_ids
-            ],
-            is_prefill,
-        )
+        self.scheduler.postprocess(seqs, results, is_prefill)
         for seq in seqs:
             if seq.is_finished:
                 self.model_runner.call("remove_request", seq.seq_id)

@@ -165,7 +165,8 @@ def run_case(engine, length, chunk, pattern=None, max_tokens=9, eos_at=None):
             result.hidden[position] = hidden.clone()
         # Control only the branch decision; all hidden/cache computations above are real.
         controlled = torch.zeros_like(logits)
-        predicted = torch.tensor([token(p + 1) for p in positions.tolist()], device=logits.device)
+        selected = runner._sampling_plan.row_indices
+        predicted = torch.tensor([token(int(positions[row]) + 1) for row in selected], device=logits.device, dtype=torch.int64)
         controlled.scatter_(1, predicted.unsqueeze(1), 10)
         return controlled
 
@@ -194,9 +195,7 @@ def run_case(engine, length, chunk, pattern=None, max_tokens=9, eos_at=None):
         return rows, prefill
 
     def post(rows, outputs, prefill):
-        prefix = seq.num_cached_tokens + seq.num_scheduled_tokens
-        if seq.is_speculative and len(outputs[0]) == 1:
-            prefix -= 1
+        prefix = seq.num_cached_tokens + outputs[0].cache_advance
         blocks = list(seq.block_table)
         mtp_count = runner._mtp_cache_lens.get(0, 0)
         result.snapshots[prefix] = dict(
@@ -355,7 +354,7 @@ def test_preemption_replay_matches_fresh_request_state(engine):
         count = seq.num_cached_tokens + seq.num_scheduled_tokens
         slot = runner.input_batch.slots_for(rows)[0]
         mtp_count = runner._mtp_cache_lens[slot]
-        snapshots.append((list(outputs[0]),
+        snapshots.append((list(outputs[0].committed_tokens),
             [(m.conv_states[slot].clone(), m.recurrent_states[slot].clone()) for m in runner.gdn_layers],
             [(valid_cache(m.k_cache, seq.block_table, count), valid_cache(m.v_cache, seq.block_table, count))
              for m in runner.model.modules() if isinstance(m, Attention)],
@@ -411,7 +410,7 @@ def test_verify_logits_and_state_match_two_ordinary_decode_steps_exactly(engine)
     torch.manual_seed(5)
     weight = torch.randn(4096, 2560, device="cuda", dtype=torch.bfloat16) * .02
     runner.model.compute_logits = lambda hidden: torch.nn.functional.linear(hidden.repeat(1, 20), weight)
-    seq.append_token(42)
+    seq.draft_token = 42
     seq.is_speculative = True
     seq.num_scheduled_tokens = 2
     kv = runner.kv_cache.clone()

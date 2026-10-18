@@ -174,6 +174,17 @@ class PhaseRecorder:
                     self.mtp_owner = prior
             return call
 
+        def prefill(fn):
+            def call(*args, **kwargs):
+                prior = self.mtp_owner
+                self.mtp_owner = "draft"
+                try:
+                    with self.scope("mtp_prefill"):
+                        return fn(*args, **kwargs)
+                finally:
+                    self.mtp_owner = prior
+            return call
+
         def sample(fn):
             def call(*args, **kwargs):
                 self.in_sample = True
@@ -208,8 +219,10 @@ class PhaseRecorder:
                 replace(r, "forward_verify", tagged(r.forward_verify, "target_body"))
                 replace(r.model, "compute_logits", head(r.model.compute_logits))
                 replace(r, "_run_mtp_decode", mtp(r._run_mtp_decode))
-                replace(r.mtp, "forward", tagged(r.mtp.forward, "draft_body"))
-                replace(r.mtp, "cache_only", tagged(r.mtp.cache_only, "cache_body"))
+                if r.mtp is not None:
+                    replace(r.mtp, "forward", tagged(r.mtp.forward, "draft_body"))
+                    replace(r.mtp, "cache_only", tagged(r.mtp.cache_only, "cache_body"))
+                    replace(r, "_run_mtp_prefill", prefill(r._run_mtp_prefill))
                 replace(r, "sample_tokens", sample(r.sample_tokens))
                 replace(torch.Tensor, "tolist", decisions)
                 for layer in r.gdn_layers:

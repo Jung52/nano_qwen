@@ -976,18 +976,18 @@ class FullStateProbe:
                               "positions": expected_pos, "slot_mapping": expected_mapping}
         return result
 
-    def postprocess(self, seqs, token_ids, is_prefill):
+    def postprocess(self, seqs, results, is_prefill):
         before = [(s.num_cached_tokens, s.num_scheduled_tokens, s.num_tokens, s.num_completion_tokens)
                   for s in seqs]
-        if len(token_ids) != len(seqs):
-            raise AssertionError("Sample count differs from number of scheduled requests")
-        result = self.original_post(seqs, token_ids, is_prefill)
-        for s, (cached, qlen, ntokens, completed) in zip(seqs, before):
-            expected = completed + int(cached + qlen == ntokens)
-            if s.num_completion_tokens != expected:
-                raise AssertionError("Intermediate chunk emitted token, or final/decode token was lost")
-            # BlockManager.deallocate resets num_cached_tokens on completion.
-            expected_cached = 0 if s.is_finished else cached + qlen
+        if len(results) != len(seqs):
+            raise AssertionError("Result count differs from scheduled requests")
+        result = self.original_post(seqs, results, is_prefill)
+        for s, output, (cached, qlen, ntokens, completed) in zip(seqs, results, before):
+            if cached+qlen < ntokens and output.committed_tokens:
+                raise AssertionError("Intermediate chunk emitted a token")
+            if s.num_completion_tokens != completed+len(output.committed_tokens):
+                raise AssertionError("Committed execution tokens were lost")
+            expected_cached = 0 if s.is_finished else cached+output.cache_advance
             if s.num_cached_tokens != expected_cached:
                 raise AssertionError("postprocess num_cached_tokens drift")
         return result

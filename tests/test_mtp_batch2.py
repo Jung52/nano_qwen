@@ -96,6 +96,7 @@ def batch_case(
                 r, m.recurrent_states[j]
             ), "inactive graph row wrote state"
         result = torch.zeros_like(logits)
+        selected = {row: i for i, row in enumerate(runner._sampling_plan.row_indices)}
         offset = 0
         for slot, size in zip(slots, sizes):
             request = runner.input_batch.seqs[slot]
@@ -103,8 +104,9 @@ def batch_case(
             for row in range(offset, offset + size):
                 p = int(positions[row])
                 hidden[i, p] = runner._target_hidden[row].clone()
-                actual_logits[i, p] = logits[row].clone()
-                result[row, token(i, p + 1)] = 10
+                if row in selected:
+                    actual_logits[i, p] = logits[selected[row]].clone()
+                    result[selected[row], token(i, p + 1)] = 10
             offset += size
         return result
 
@@ -130,9 +132,7 @@ def batch_case(
         for seq, output in zip(rows, outputs):
             i = seqs.index(seq)
             slot = runner.input_batch.seq_id_to_slot[seq.seq_id]
-            prefix = seq.num_cached_tokens + seq.num_scheduled_tokens
-            if seq.is_speculative and len(output) == 1:
-                prefix -= 1
+            prefix = seq.num_cached_tokens + output.cache_advance
             count = runner._mtp_cache_lens.get(slot, 0)
             tensors = []
             for m in runner.gdn_layers:

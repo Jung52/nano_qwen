@@ -50,7 +50,7 @@ def runner(monkeypatch):
                               compute_logits=lambda hidden: torch.zeros(len(hidden), 16))
     r._mtp_last_hidden = {}
     r._mtp_cache_lens = {}
-    r.cuda_graphs = SimpleNamespace(mtp_decode_graph=None, mtp_cache_graph=None)
+    r.cuda_graphs = SimpleNamespace(mtp_decode_graph=None, mtp_cache_graph=None, record_dispatch=lambda *args: None)
     r.input_batch = InputBatch(1)
     r.rank = 0
     r.batch_slots_gpu = torch.tensor([0])
@@ -128,7 +128,6 @@ def test_decode_cache_row_is_independent_of_rope_position(runner):
 def test_sampler_appends_accepted_draft_before_bonus(runner, accepted):
     seq = sequence(129)
     seq.append_token(4)
-    seq.append_token(5)
     seq.draft_token = 5
     seq.is_speculative = True
     seq.num_cached_tokens = 129
@@ -197,9 +196,8 @@ def run_lifecycle(runner, length, pattern, chunk, max_tokens=9, eos_at=None):
         for i, position in enumerate(positions):
             logits[i, token(position + 1)] = 1
         runner._pending = (logits, torch.ones(1), [seq], prefill)
-        row = runner.sample_tokens().get_output()[0]
-        seq.draft_token = None if row[2] == -1 else row[2]
-        scheduler.postprocess([seq], [[x for x in row[:2] if x != -1]], prefill)
+        results = runner.sample_tokens().get_results()
+        scheduler.postprocess([seq], results, prefill)
         calls = runner.mtp.calls
         ropes = [p for call in calls for p in call["positions"]]
         assert ropes == list(range(1, len(ropes) + 1))

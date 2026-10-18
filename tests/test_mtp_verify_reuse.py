@@ -46,7 +46,6 @@ def test_configured_reuse_batches_dense_work_without_changing_norm_rows(engine):
     )
     engine.scheduler.add(seq)
     engine.step()
-    seq.append_token(seq.draft_token)
     seq.is_speculative = True
     seq.num_scheduled_tokens = 2
     ids, positions = runner.prepare_prefill([seq])
@@ -93,7 +92,6 @@ def test_reused_verify_matches_serial_layers_logits_kv_and_snapshots(engine):
     )
     engine.scheduler.add(seq)
     engine.step()
-    seq.append_token(seq.draft_token)
     seq.is_speculative = True
     seq.num_scheduled_tokens = 2
     norm_rows = []

@@ -16,6 +16,24 @@ class BatchDescriptor:
     uniform_token_count: int | None = None
     max_query_len: int = 0
 
+    @classmethod
+    def for_requests(cls, seqs):
+        counts = [s.num_scheduled_tokens for s in seqs]
+        if not counts or min(counts) <= 0:
+            raise ValueError("Batch requires positive scheduled row counts")
+        speculative = [s.is_speculative for s in seqs]
+        if any(speculative):
+            if not all(speculative) or any(n != 2 for n in counts):
+                raise ValueError("Speculative verify requires two rows for every request")
+            mode, uniform = "spec_decode", 2
+        elif any(s.is_prefill for s in seqs):
+            mode, uniform = "prefill", None
+        else:
+            if any(n != 1 for n in counts):
+                raise ValueError("Ordinary decode requires one row per request")
+            mode, uniform = "decode", 1
+        return cls(mode, sum(counts), len(seqs), uniform, max(counts))
+
 
 @dataclass(slots=True)
 class Context:
