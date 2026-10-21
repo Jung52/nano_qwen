@@ -289,3 +289,29 @@ B128在KV预算guard处失败，B192/256在初始化warmup的LM head或GDN chunk
 ## 10. 后续记录方式
 
 继续保留模块引入后回退、单算子加速未转化为端到端收益、正确性修复牺牲性能等结果。每项新实验记录源码、模型、GPU、预热和计时口径、实际token数、原始数据、状态门禁及未验证范围；不同版本的绝对吞吐不拼接成控制变量曲线。
+
+## 11. 2026-10-21：moondream式双slot、融合norm与slot replay trace
+
+本地分支 `feat/moondream-dual-slot`（基线 main `db22de3`），分三次应用增量包：双slot执行槽、norm融合、CPU replay/GPU slot trace。硬件 RTX 4070 Ti SUPER 16 GiB，torch 2.12.1+cu130（code 环境），模型固定 FP8 per-channel Qwen3.5-4B。所有 E2E 固定 B8/I128/O256、greedy temperature=1e-6、workload KV 策略，基线/实验共用相同 prompt 与 KV 容量。
+
+### 11.1 双slot流水线：气泡消除有实测收益，收益随batch波动
+
+实现为 `decode_slot.py`/`pipeline.py` 两个新文件加少量引擎改动：两个执行槽各持独立输入暂存与 decode Graph bank；循环为 launch forward t+1 → commit t → sample t+1；EOS 请求标记 FINISHED 后按 `inflight_refs` 延迟释放 KV；`reserve_tokens` 按计划位置预留 KV 页。默认关闭，`dual_slot_decode=True` 开启。
+
+A/B（每配置独立进程、AB/BA交替、3轮中位数，bench_dual_slot_perf）：B1 decode 1.03–1.07x、B4 1.00–1.11x、B16 1.03–1.10x，两次运行幅度有 ±5–8% 波动（WSL2 后台负载）。trace 诊断（33-token 短窗口）显示首尾 GPU 事件间空隙从基线 57.98/60.02/58.41 ms 降到 7.92/8.34/9.67 ms（B1/4/16），kernel 累计时间不变——气泡被消除而非计算变快。诊断脚本的 `get_output 与计算重叠` 指标在两模式下都接近满值，不适合作为差异判据。slot trace（bench_one_batch_slots）验证双slot 的 20 次 graph launch 严格 1/0 交替、CPU `CUDAGraph.replay/slotN/bs8` 与 GPU `cuda_graph_slot0/1` 范围齐全，单/双slot token 输出逐 token 一致。
+
+### 11.2 融合norm：严格逐token验收暴露了归约树逐位不一致
+
+`fused_norm.py` 把 RMSNorm/gemma/gated（含残差与 gate+SiLU）合成单 kernel，kernel/replay 从 1995 降到 867（−56%），端到端 fused_dual 相对 reference_single 约 1.20x。但严格逐token验收失败：三份模型路径（gated N=128、2560 维残差 norm）中 triton `tl.sum` 的树归约与 torch `pow(2).mean()` 差约 1 ULP(fp32)，真实 GDN 激活有少量元素落在 bf16 舍入边界被翻转（随机数据几乎全部被 bf16 舍入吸收，这也是微基准逐位一致但 E2E 翻转的原因）。microbench 的 strided 输入恰好与 triton 树同构，掩盖了连续布局下的差异。
+
+定位过程：首个差异在 `model.layers.0.linear_attn.norm`（[32768,128] gated），翻转前参考 top1/top2 margin 仅 0.0625。修复分两步：先全部改用 torch 算子算 `rsqrt(mean+eps)` 传入 kernel（kernel/replay 回升到 1520，E2E 四组全部 accepted，fusion_single 1.063x/fusion_dual 1.059x/slots_reference 1.039x/slots_fused 1.035x，合计约 1.10x；microbench 1.36–2.08x 且 max_abs=0）；再把归约接回 kernel 内——N=128 用 32 线程×4 元素布局的 `tl.sum`（与 torch 的 vec4+32线程结构同构，随机 8192 行逐位一致）；N%128==0 的其余形状显式复现 torch 的线程映射（{4t+i+128k} 顺序累加、槽位 l2r 合并）加相邻对树。N=128 路径经诊断确认零差异；N=2560 仍存在未解决项：宽动态范围行上 torch 的线程内累加顺序与显式顺序结果不同（1024 行随机数据约 1/3 行有差，当前树版本在真实 [1024,2560] 输入上仍有 22 元素差异）。严格验收的 E2E 通过记录属于 torch-inv 版本。
+
+### 11.3 验证口径与状态
+
+CPU 状态机 9 项、融合数值 63 项、slot/replay trace 测试 10+1 项、全套 pytest 205 项通过。BF16 模型 graph 模式在本卡上仍受 KV 预算=0 限制（首个 engine 的 CUDA graph 池内存在 driver 层不随 exit 归还，与本次改动无关）；FP8 模型无此问题。单slot 与双slot 之间未发现任何数值差异。
+
+### 11.4 待验证
+
+- N=2560 线程内累加顺序的逐位复现（掩码行探针表明 torch 的每线程部分和在宽动态范围行上不等于任何已尝试的 20 元素顺序，仍在排查）。
+- 融合+双slot 组合在严格逐token验收下的 E2E 重跑（当前 kernel 版本尚未通过）。
+- B1/B4 的 A/B 波动来源（多次 pair 复测）。

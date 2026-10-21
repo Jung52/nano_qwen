@@ -15,6 +15,7 @@ from nano_qwen.sampling_params import SamplingParams
 from nano_qwen.utils.trace import trace_event
 
 from .model_runner import ModelRunner, find_free_port
+from .pipeline import DualSlotPipeline
 from ..scheduler import Scheduler
 
 
@@ -71,6 +72,8 @@ class LLMEngine:
         # MRV2 async batch queue: up to max_concurrent_batches batches in
         # flight, CPU runs ahead of GPU by N-1 steps (core.py:622-736).
         self.max_concurrent_batches = 2
+        self._dual_pipeline = (DualSlotPipeline(self.scheduler, self.model_runner, self.config)
+                               if self.config.dual_slot_decode else None)
         self.batch_queue: deque[tuple[list[Sequence], bool, int, object]] = deque()
         self.coalesce_stats = {
             "coalesce_attempts": 0,
@@ -110,6 +113,10 @@ class LLMEngine:
         # AsyncModelOutput retains both device and pinned host tensors until
         # consumed. Drop all engine-owned queues/references before collecting.
         self.batch_queue.clear()
+        pipeline = getattr(self, "_dual_pipeline", None)
+        if pipeline is not None:
+            pipeline.clear()
+            self._dual_pipeline = None
         self.ps.clear()
         self.events.clear()
         scheduler = getattr(self, "scheduler", None)
@@ -146,6 +153,10 @@ class LLMEngine:
         more work. Ready decode receives the next token budget first;
         waiting prompt chunks use its remainder.
         """
+        pipeline = getattr(self, "_dual_pipeline", None)
+        if pipeline is not None:
+            return pipeline.step()
+
         # Phase 1: fill the queue (never blocks).
         while len(self.batch_queue) < self.max_concurrent_batches:
             decode_batches = [

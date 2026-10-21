@@ -15,6 +15,7 @@ class Config:
     gpu_memory_utilization: float = 0.9
     tensor_parallel_size: int = 1
     enforce_eager: bool = False
+    dual_slot_decode: bool = False
     # GDN recurrent state is not part of the prefix-cache block payload.
     # Reject hybrid prefix reuse until matching state snapshots are cached.
     enable_prefix_cache: bool = False
@@ -29,6 +30,8 @@ class Config:
     quant_config: QuantizationConfig | None = field(default=None, init=False)
 
     def __post_init__(self):
+        if self.dual_slot_decode and self.enable_prefix_cache:
+            raise ValueError("dual_slot_decode does not support prefix-cache reuse")
         if self.tensor_parallel_size != 1:
             raise ValueError(
                 "Only tensor_parallel_size=1 is supported until multi-GPU "

@@ -23,6 +23,7 @@ class CudaGraphManager:
         self.decode_graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self.decode_graph_pool = None
         self.decode_graph_vars: dict[str, torch.Tensor] | None = None
+        self.decode_graph_banks: list[tuple] = []
 
         self.prefill_graph_sizes: list[int] = []
         self.prefill_graphs: dict[int, dict[int, dict]] = {}
@@ -57,6 +58,18 @@ class CudaGraphManager:
             self.capture_prefill()
 
     def _capture_decode(self) -> None:
+        self.decode_graph_banks.clear()
+        count = 2 if getattr(self.config, "dual_slot_decode", False) else 1
+        for _ in range(count):
+            # Each slot has its own graph pool, inputs and hidden output.
+            # Model weights, KV and persistent GDN pools remain shared.
+            self._capture_decode_bank()
+            self.decode_graph_banks.append((self.decode_graphs,
+                                           self.decode_graph_vars,
+                                           self.decode_graph_pool))
+        self.decode_graphs, self.decode_graph_vars, self.decode_graph_pool = self.decode_graph_banks[0]
+
+    def _capture_decode_bank(self) -> None:
         config = self.config
         hf_config = config.hf_config
         max_bs = min(config.max_num_seqs, 512)
@@ -83,7 +96,9 @@ class CudaGraphManager:
             device=device,
         )
 
-        self.decode_graph_sizes = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+        self.decode_graph_sizes = [bs for bs in
+                                   [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+                                   if bs <= max_bs]
         self.decode_graphs = {}
         self.decode_graph_pool = None
 
@@ -222,13 +237,16 @@ class CudaGraphManager:
 
     def run_decode(self, input_ids: torch.Tensor, positions: torch.Tensor):
         bs = input_ids.size(0)
-        self.record_dispatch("decode", bs, bs in self.decode_graphs, bs)
-        if bs not in self.decode_graphs:
+        graphs, graph_vars = self.decode_graphs, self.decode_graph_vars
+        if self.decode_graph_banks:
+            slot_id = getattr(self.runner, "_active_slot_id", 0)
+            graphs, graph_vars, _ = self.decode_graph_banks[slot_id]
+        self.record_dispatch("decode", bs, bs in graphs, bs)
+        if bs not in graphs:
             return self.runner.project_target_hidden(self.model(input_ids, positions))
 
         context = get_context()
-        graph = self.decode_graphs[bs]
-        graph_vars = self.decode_graph_vars
+        graph = graphs[bs]
         graph_vars["input_ids"][:bs] = input_ids
         graph_vars["positions"][:bs] = positions
         graph_vars["slot_mapping"].fill_(-1)
@@ -258,6 +276,7 @@ class CudaGraphManager:
         self.decode_graphs.clear()
         self.decode_graph_vars = None
         self.decode_graph_pool = None
+        self.decode_graph_banks.clear()
 
     def _allocate_piecewise_buffers(
         self,

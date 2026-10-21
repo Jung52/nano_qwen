@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 
+from nano_qwen.layers.fused_norm import can_fuse, fused_norm
+
 
 class RMSNorm(nn.Module):
 
@@ -17,6 +19,8 @@ class RMSNorm(nn.Module):
         self,
         x: torch.Tensor,
     ) -> torch.Tensor:
+        if can_fuse(x, self.weight):
+            return fused_norm(x, self.weight, self.eps)
         orig_dtype = x.dtype
         x = x.float()
         var = x.pow(2).mean(dim=-1, keepdim=True)
@@ -29,6 +33,8 @@ class RMSNorm(nn.Module):
         x: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if can_fuse(x, self.weight, residual):
+            return fused_norm(x, self.weight, self.eps, residual)
         orig_dtype = x.dtype
         x = x.float().add_(residual.float())
         residual = x.to(orig_dtype)
@@ -80,6 +86,8 @@ class GemmaRMSNorm(nn.Module):
         self,
         x: torch.Tensor,
     ) -> torch.Tensor:
+        if can_fuse(x, self.weight):
+            return fused_norm(x, self.weight, self.eps, gemma=True)
         orig_dtype = x.dtype
         x = x.float()
         var = x.pow(2).mean(dim=-1, keepdim=True)
@@ -92,6 +100,8 @@ class GemmaRMSNorm(nn.Module):
         x: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if can_fuse(x, self.weight, residual):
+            return fused_norm(x, self.weight, self.eps, residual, gemma=True)
         orig_dtype = x.dtype
         x = x.float() + residual.float()
         residual = x.to(orig_dtype)
@@ -141,6 +151,8 @@ class RMSNormGated(nn.Module):
         hidden_states: torch.Tensor,
         gate: torch.Tensor,
     ) -> torch.Tensor:
+        if can_fuse(hidden_states, self.weight, gate=gate):
+            return fused_norm(hidden_states, self.weight, self.eps, gate=gate)
         # Matches official Qwen3_5RMSNormGated exactly: normalize in fp32,
         # multiply the learned weight in the input dtype, then gate with
         # silu(gate) in fp32 (bf16 * fp32 promotes to fp32), cast back.
