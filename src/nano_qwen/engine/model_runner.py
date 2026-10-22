@@ -150,9 +150,9 @@ class ModelRunner:
         )
         self.allocate_decode_buffers()
         self.input_batch = InputBatch(config.max_num_seqs)
-        # Single pending sampling state: one batch is dispatched per step
-        # (depth-1 async), so a single slot holds the logits/temps/seqs the
-        # immediately-following sample_tokens call will consume.
+        # execute_model is always immediately followed by sample_tokens.
+        # A single sampling state is enough even with two output batches
+        # outstanding; it is consumed before the next execute_model call.
         self._pending: tuple | None = None
         self._sampling_plan: SamplingPlan | None = None
         self._target_hidden = None
@@ -515,6 +515,11 @@ class ModelRunner:
         not wait for them. Sampling is a separate call (sample_tokens), which
         reads the pending logits and performs the async D2H copy.
         """
+        if any(getattr(seq, "_async_decode_view", False) for seq in seqs):
+            if is_prefill or self.world_size != 1:
+                raise RuntimeError("lookahead metadata requires single-GPU decode")
+            if any(seq.seq_id not in self.input_batch.seq_id_to_slot for seq in seqs):
+                raise RuntimeError("lookahead decode requires an existing GPU token slot")
         self.input_batch.remove_finished()
         seqs, new_entries = self.input_batch.update(seqs)
         slots = self.input_batch.slots_for(seqs)
@@ -563,9 +568,9 @@ class ModelRunner:
                 positions,
                 is_prefill,
             )
-        # Depth-1 async: store the sampling state for the immediately-
-        # following sample_tokens() call. batch_slots_gpu is safe to reuse
-        # here because no second batch can be dispatched before sampling.
+        # Sampling consumes this state before the next execute_model call.
+        # All GPU input updates, graph replays and token scatters stay on the
+        # same compute stream, preserving dependencies across iterations.
         self._pending = (logits, temperatures, seqs, is_prefill)
         return None
 
@@ -669,3 +674,4 @@ class ModelRunner:
     @property
     def prefill_piecewise_graphs(self):
         return self.cuda_graphs.prefill_graphs
+

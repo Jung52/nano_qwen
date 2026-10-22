@@ -15,6 +15,9 @@ class Config:
     gpu_memory_utilization: float = 0.9
     tensor_parallel_size: int = 1
     enforce_eager: bool = False
+    # Opt-in one-batch lookahead for steady decode. Prefill/admission still
+    # use the original scheduler. Keep False for the reference baseline.
+    async_scheduling: bool = False
     # GDN recurrent state is not part of the prefix-cache block payload.
     # Reject hybrid prefix reuse until matching state snapshots are cached.
     enable_prefix_cache: bool = False
@@ -29,6 +32,8 @@ class Config:
     quant_config: QuantizationConfig | None = field(default=None, init=False)
 
     def __post_init__(self):
+        if self.async_scheduling and self.enable_prefix_cache:
+            raise ValueError("async decode currently requires enable_prefix_cache=False")
         if self.tensor_parallel_size != 1:
             raise ValueError(
                 "Only tensor_parallel_size=1 is supported until multi-GPU "
@@ -63,3 +68,4 @@ class Config:
                 "Hybrid prefix cache requires matching GDN conv/recurrent "
                 "state snapshots; KV-only prefix reuse is unsupported"
             )
+

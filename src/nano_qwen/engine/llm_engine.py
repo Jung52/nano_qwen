@@ -27,8 +27,8 @@ class LLMEngine:
 
         schedule -> execute_model -> sample_tokens -> postprocess
 
-    Each step consumes its sampled tokens before scheduling the next step, so
-    Sequence, KV-cache and scheduler state stay consistent.
+    With async_scheduling=True, stable decode can enqueue one batch ahead.
+    CPU token history is committed in order; GPU tokens feed the next decode.
     """
 
     def __init__(self, model: str, use_prefill_cudagraph: bool = True, **kwargs):
@@ -117,6 +117,7 @@ class LLMEngine:
             scheduler.waiting.clear()
             scheduler.running.clear()
             scheduler.in_flight.clear()
+            scheduler.async_decode = None
             self.scheduler = None
         self.tokenizer = None
         gc.collect()
@@ -131,6 +132,50 @@ class LLMEngine:
         self.scheduler.add(Sequence(prompt, sampling_params))
 
     def step(self):
+        """Use lookahead only when the two-buffer output queue can support it."""
+        active = getattr(self.scheduler, "async_decode", None)
+        enabled = (getattr(self.config, "async_scheduling", False)
+                   and self.max_concurrent_batches == 2
+                   and getattr(self.model_runner, "async_output", True))
+        if active is not None or (enabled and not self.batch_queue
+                                  and self.scheduler.begin_async_decode()):
+            return self._step_async_decode()
+        return self._step_serial()
+
+    def _step_async_decode(self):
+        cohort = self.scheduler.async_decode
+        # New arrivals need the normal admission/preemption policy. Retire all
+        # queued work before returning owners to that policy.
+        if self.scheduler.waiting:
+            cohort.draining = True
+        while len(self.batch_queue) < self.max_concurrent_batches and not cohort.draining:
+            with trace_event("schedule", "engine"):
+                seqs, is_prefill = self.scheduler.schedule()
+            if not seqs:
+                break
+            assert not is_prefill
+            with trace_event("execute_model", "engine", args={"prefill": False, "bs": len(seqs)}):
+                self.model_runner.call("execute_model", seqs, False)
+            with trace_event("sample_tokens", "engine"):
+                async_output = self.model_runner.call("sample_tokens")
+            assert async_output is not None
+            self.batch_queue.append((seqs, False, -len(seqs), async_output))
+
+        if not self.batch_queue:
+            self.scheduler.end_async_decode()
+            return self._step_serial()
+        seqs, is_prefill, num_tokens, async_output = self.batch_queue.popleft()
+        with trace_event("d2h_wait", "engine", args={"prefill": False, "bs": len(seqs)}):
+            token_ids = async_output.get_output()
+        finished, released = self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        for seq_id in released:
+            self.model_runner.call("remove_request", seq_id)
+        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in finished]
+        if not self.batch_queue:
+            self.scheduler.end_async_decode()
+        return outputs, num_tokens
+
+    def _step_serial(self):
         """MRV2 async scheduling step with batch queue (core.py:622-736).
 
         Phase 1 (dispatch): while the queue has room, schedule a batch and
@@ -314,3 +359,4 @@ class LLMEngine:
             for token_ids in outputs
         ]
         return outputs
+

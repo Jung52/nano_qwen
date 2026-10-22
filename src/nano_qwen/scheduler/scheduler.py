@@ -3,6 +3,7 @@ from collections import deque
 from nano_qwen.config import Config
 from nano_qwen.engine.sequence import Sequence, SequenceStatus
 from nano_qwen.engine.block_manager import BlockManager
+from .async_decode import AsyncDecodeCohort
 
 
 class Scheduler:
@@ -16,11 +17,28 @@ class Scheduler:
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
-        # MRV2 zombie equivalent: seqs dispatched to execute_model but not yet
-        # consumed by postprocess. They are moved OUT of waiting/running while
-        # in flight, so schedule() can never re-dispatch them (their next
-        # decode step depends on the in-flight sample).
+        # In the normal path, dispatched owners leave waiting/running until
+        # postprocess. During lookahead, the cohort holds those owners and
+        # schedules execution views using GPU-resident token feedback instead.
         self.in_flight: set[int] = set()
+        self.async_decode: AsyncDecodeCohort | None = None
+
+    def begin_async_decode(self) -> bool:
+        """Borrow the entire ready cohort; admission/mixed batches stay serial."""
+        if (self.async_decode is not None or self.waiting or self.in_flight
+                or not self.running or self.enable_prefix_cache
+                or len(self.running) > min(self.max_num_seqs, self.max_num_batched_tokens)):
+            return False
+        seqs = list(self.running)
+        assert all(not seq.is_finished and seq.num_cached_tokens == len(seq) - 1 for seq in seqs)
+        self.running.clear()
+        self.in_flight.update(seq.seq_id for seq in seqs)
+        self.async_decode = AsyncDecodeCohort(self, seqs)
+        return True
+
+    def end_async_decode(self):
+        self.async_decode.close()
+        self.async_decode = None
 
     def is_finished(self):
         return not self.waiting and not self.running and not self.in_flight
@@ -29,6 +47,8 @@ class Scheduler:
         self.waiting.append(seq)
 
     def schedule(self) -> tuple[list[Sequence], bool]:
+        if self.async_decode is not None:
+            return self.async_decode.schedule()
         scheduled_seqs = []
         num_batched_tokens = 0
         # A sequence is either awaiting dispatch (waiting/running) or in
@@ -139,6 +159,8 @@ class Scheduler:
         self.waiting.appendleft(seq)
 
     def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
+        if self.async_decode is not None:
+            return self.async_decode.postprocess(seqs, token_ids, is_prefill)
         for seq, token_id in zip(seqs, token_ids):
             self.in_flight.discard(seq.seq_id)  # sample consumed, seq schedulable again
             if self.enable_prefix_cache:
@@ -155,3 +177,4 @@ class Scheduler:
             else:
                 seq.status = SequenceStatus.RUNNING
                 self.running.append(seq)  # back to schedulable
+
