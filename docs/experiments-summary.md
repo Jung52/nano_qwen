@@ -103,11 +103,12 @@ B64 是已测吞吐最高点；B128 在 KV budget guard 失败，B192/256 在初
 
 ## 本地实验产物
 
-2026-10-26 起 `benchmarks/reports/` 不再随 Git 分发（历史提交中的文件仍可追溯）。原始报告、图表与日志的完整备份位于本机仓库外：
+2026-10-26 起 `benchmarks/reports/` 不再随 Git 分发（历史提交中的文件仍可追溯）。原始材料全部保留在本机仓库内（均被 .gitignore 忽略，注意勿用 `git clean -fdx` 之类的命令清理）：
 
-- `/home/wei/code/nano_qwen_experiment_archive/2026-10-26_031e88c/`（含 `benchmarks-reports/`、`logs/`、`benchmarks-logs/` 与 `MANIFEST.md`，记录了源码 commit、硬件/软件环境与执行命令）
-- 各报告对应的 JSON/CSV 逐次数据在 commit `031e88c^` 的 Git 历史中（`git show 031e88c^:benchmarks/reports/<路径>`）
-- 原始 trace、源码快照与运行日志在本机 `logs/`、`benchmarks/logs/`（被 .gitignore 忽略）
+- 报告与图表：`benchmarks/reports/`（24 个 md/png/svg）
+- 原始 trace、源码快照与运行日志：`logs/`、`benchmarks/logs/`
+- 各报告对应的 JSON/CSV 逐次数据：commit `031e88c^` 的 Git 历史中（`git show 031e88c^:benchmarks/reports/<路径>`）
+- 源码 commit、硬件/软件环境与执行命令：见各报告"复现"小节、`benchmarks/README.md` 与本文"测试环境"一节
 
 本地报告目录（本机路径，供查证）：
 
