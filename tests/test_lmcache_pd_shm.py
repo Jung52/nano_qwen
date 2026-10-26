@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -355,3 +356,79 @@ else:
         assert status["states"]["ready"] == 1
         reader = client.acquire("dead")
         client.release(reader, delete=True)
+
+
+def open_fd_count():
+    return len(os.listdir("/proc/self/fd"))
+
+
+@pytest.mark.parametrize("path", ["writing", "reading"])
+def test_backend_exception_does_not_leak_pidfd(endpoint, monkeypatch, path):
+    store, client = endpoint
+    if path == "reading":
+        sample(client, "ready")
+    def boom(*args, **kwargs):
+        raise RuntimeError("backend down")
+    monkeypatch.setattr(store.manager, "reserve_write" if path == "writing" else "reserve_read", boom)
+    def call():
+        if path == "writing":
+            client.allocate("leak", {}, [dict(name="kv", shape=[64], dtype="float32")])
+        else:
+            client.acquire("ready")
+    with pytest.raises(Exception):
+        call()  # Warm up lazy connections so they are not counted as leaks.
+    before = open_fd_count()
+    for _ in range(5):
+        with pytest.raises(Exception):
+            call()
+    assert open_fd_count() == before, "pidfd leaked when the backend raises"
+
+
+def test_checkpoint_identity_checks_weight_contents(tmp_path):
+    path = tmp_path / "model.safetensors"
+    path.write_bytes(b"weights-A")
+    def runner():
+        return SimpleNamespace(config=SimpleNamespace(model=str(tmp_path), quantization=None,
+            hf_config=SimpleNamespace(to_dict=lambda: {"hidden_size": 4})))
+    first = state.model_identity(runner())
+    path.write_bytes(b"weights-B")
+    assert state.model_identity(runner()) != first
+
+
+def test_destination_context_limit_covers_remaining_generation(endpoint):
+    store, client = endpoint
+    p, d = ready_engine(), ready_engine()
+    params = SamplingParams(temperature=1e-8, max_tokens=8, ignore_eos=True)
+    p.prefill_to_lmcache([3] * 257, params, client, "ctx")
+    d.config.max_model_len = 260
+    with pytest.raises(ValueError, match="max_model_len"):
+        d.resume_from_lmcache(client, "ctx")
+    assert not d.scheduler.block_manager.used_block_ids
+    assert store.status()["states"]["ready"] == 1  # Failed restore keeps the snapshot for retry.
+
+
+def test_idle_and_async_guards(endpoint):
+    store, client = endpoint
+    e = ready_engine()
+    params = SamplingParams(temperature=1e-8, max_tokens=8, ignore_eos=True)
+    fake = SimpleNamespace(direct_tensors=True)  # Guards fire before any connector I/O.
+    e.config.async_scheduling = True
+    with pytest.raises(ValueError, match="async_scheduling"):
+        e.prefill_to_lmcache([3] * 17, params, fake, "nope")
+    e.config.async_scheduling = False
+    e.scheduler.add(Sequence([3], SamplingParams()))
+    with pytest.raises(ValueError, match="idle"):
+        e.prefill_to_lmcache([3] * 17, params, fake, "nope")
+    assert store.status()["used_bytes"] == 0
+
+
+def test_tail_bytes_are_zeroed(endpoint):
+    store, client = endpoint
+    p = ready_engine()
+    params = SamplingParams(temperature=1e-8, max_tokens=8, ignore_eos=True)
+    p.model_runner.kv_cache.fill_(12345)
+    p.prefill_to_lmcache([3] * 257, params, client, "tail")
+    reader = client.acquire("tail")
+    assert not torch.count_nonzero(reader.tensors["kv"][:, :, -1, 1:])
+    client.release(reader, delete=True)
+    assert store.status()["used_bytes"] == 0

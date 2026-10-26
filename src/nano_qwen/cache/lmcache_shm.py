@@ -18,12 +18,37 @@ from .lmcache_l1 import validate_key
 from .shm_protocol import CONTROL_LIMIT, validate_layout
 
 
+try:
+    _pidfd_open = os.pidfd_open
+except AttributeError:
+    # Some CPython builds (e.g. older conda-forge toolchains) expose no
+    # os.pidfd_open although the kernel syscall exists. Fall back to calling
+    # it directly; OSError(errno) still maps to ESRCH etc.
+    import ctypes
+    import platform
+
+    def _pidfd_open(pid, flags=0):
+        number = {"x86_64": 434, "aarch64": 424}.get(platform.machine())
+        if number is None:
+            raise RuntimeError(f"no pidfd_open syscall number for {platform.machine()}")
+        libc = ctypes.CDLL(None, use_errno=True)
+        result = libc.syscall(ctypes.c_long(number), ctypes.c_int(pid), ctypes.c_uint(flags))
+        if result < 0:
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err))
+        return result
+
+
 class LMCacheShmStore:
     def __init__(self, size_bytes, ttl_seconds=900):
         if importlib.metadata.version("lmcache") != "0.5.6":
             raise RuntimeError("this adapter requires lmcache==0.5.6")
-        if not hasattr(os, "pidfd_open") or not Path("/dev/shm").is_dir():
-            raise RuntimeError("Linux pidfd and POSIX /dev/shm are required")
+        if not Path("/dev/shm").is_dir():
+            raise RuntimeError("POSIX /dev/shm is required")
+        try:  # Probe the syscall once; missing kernel support must fail fast.
+            os.close(_pidfd_open(os.getpid(), 0))
+        except (AttributeError, OSError, RuntimeError) as exc:
+            raise RuntimeError("Linux pidfd_open is required") from exc
         if type(size_bytes) is not int or size_bytes < 4096 or ttl_seconds <= 0:
             raise ValueError("invalid L1 capacity/TTL")
         free = os.statvfs("/dev/shm")
@@ -60,7 +85,7 @@ class LMCacheShmStore:
         if type(pid) is not int or pid < 1:
             raise ValueError("invalid owner PID")
         try:
-            fd = os.pidfd_open(pid, 0)
+            fd = _pidfd_open(pid, 0)
         except ProcessLookupError as exc:
             raise ValueError("owner process is not alive / not in the same PID namespace") from exc
         if select.select([fd], [], [], 0)[0]:
@@ -115,9 +140,15 @@ class LMCacheShmStore:
                 raise FileExistsError("transfer ID already exists")
             owner = self._owner(pid)
             token, k = uuid.uuid4().hex, self._key(key)
-            desc = self.Layout(shapes=[self.torch.Size(x["shape"]) for x in layout],
-                               dtypes=[getattr(self.torch, x["dtype"]) for x in layout])
-            error, obj = self.manager.reserve_write([k], [False], desc, tag=token)[k]
+            try:
+                desc = self.Layout(shapes=[self.torch.Size(x["shape"]) for x in layout],
+                                   dtypes=[getattr(self.torch, x["dtype"]) for x in layout])
+                error, obj = self.manager.reserve_write([k], [False], desc, tag=token)[k]
+            except BaseException:
+                # The backend raised instead of returning an error code;
+                # the lease was never registered, so the pidfd is ours to close.
+                os.close(owner)
+                raise
             if error != self.Error.SUCCESS or obj is None:
                 os.close(owner)
                 if error == self.Error.OUT_OF_MEMORY:
@@ -176,7 +207,11 @@ class LMCacheShmStore:
                 raise FileExistsError("snapshot is writing or already leased by a reader")
             owner = self._owner(pid)
             k = entry["key"]
-            error, obj = self.manager.reserve_read([k])[k]
+            try:
+                error, obj = self.manager.reserve_read([k])[k]
+            except BaseException:
+                os.close(owner)
+                raise
             if error != self.Error.SUCCESS or obj is None:
                 os.close(owner)
                 raise RuntimeError(f"LMCache reserve_read: {error}")

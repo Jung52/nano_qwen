@@ -12,13 +12,14 @@ P、D 直接 mmap 该 arena，通过 arena 内的 offset 构造 CPU tensor 视�
 HTTP 8766 仅传少量 JSON 元数据，以及 reserve/commit/acquire/release 控制操作。
 同一个 arena 在两个进程中的虚拟地址可以不同；协议传 offset，不传可直接解引用的指针。
 
-旧 `LMCacheConnector`、8765 服务和旧 benchmark 保留为二进制 HTTP 对照。
-**要使用新路径，必须使用 `LMCacheShmConnector` 与本页的新服务/脚本。没有自动回退到旧数据通道。**
+v1/v2 的 `LMCacheConnector`、8765 字节服务和相关 benchmark/测试已随清理移除；
+仓库中不存在其他数据通道，也不提供回退。
 
 ## 运行条件
 
 - 同一 Linux 主机，服务和推理进程共享 `/dev/shm`、PID namespace，并具有相应读写权限。
-- 内核支持 `pidfd_open`；Docker 中需要足够的 `--shm-size`。服务启动前检查可用 SHM 容量。
+- 内核支持 `pidfd_open`（CPython 构建缺 `os.pidfd_open` 时自动退回 syscall 直调，
+  服务启动时探测一次并快速失败）；Docker 中需要足够的 `--shm-size`。服务启动前检查可用 SHM 容量。
 - LMCache 服务仍用原来的独立 CPU Python 环境，固定 `lmcache==0.5.6`；推理环境不需要安装 LMCache。
 - TP=1、async_scheduling=False、prefix cache=False，单请求空闲边界交接。
 - 传完整 attention KV、GDN conv/recurrent state、请求进度与首个生成 token。

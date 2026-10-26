@@ -339,10 +339,14 @@ P 端把 KV/GDN 逐张量直接拷入 LMCache 0.5.6 L1 的共享 CPU tensor 池�
 | 257 | 304.1 | **15.0** | ~20× | 25.4 | 同构，D2H 5.4、H2D 4.2 |
 | 1024 | 448.6 | **17.3** | ~26× | 15.8 | D2H 5.5、H2D 6.5 |
 
-关键性质：开销几乎不随 prompt 长度增长（16 倍状态量仅 +3ms），因为大张量驻留共享池按 mmap 映射，不存在随体积缩放的打包/传输。正确性：roundtrip（64/256/257/512 × 32，Graph）4/4 输出逐 token 一致；独立进程 P 退出→D 恢复通过；CPU 回归 71/71。限制不变：单请求同步、TP=1、同主机同 IPC/PID namespace；pageable 映射内存走阻塞拷贝，非纯 PCIe 带宽测试。
+关键性质：开销几乎不随输入长度增长（64→1024，输入长度增加 16 倍；attention KV 随之线性增长，计入固定大小的 GDN 状态后总快照体积约增加 1.72 倍，暂停仅 +3ms），因为大张量驻留共享池按 mmap 映射，不存在随体积缩放的打包/传输。正确性：roundtrip（64/256/257/512 × 32，Graph）4/4 输出逐 token 一致；独立进程 P 退出→D 恢复通过；CPU 回归 71/71。限制不变：单请求同步、TP=1、同主机同 IPC/PID namespace；pageable 映射内存走阻塞拷贝，非纯 PCIe 带宽测试。
 
 环境注记：conda 构建的 CPython 缺 `os.pidfd_open`（内核 syscall 本身可用，系统 Python 有），以 ctypes 包装 `SYS_pidfd_open` 的 sitecustomize shim 补齐（`/tmp/pidfd_shim`，经活/死进程语义验证），不影响仓库代码。
 
 ### 清理：移除 HTTP payload 路径
 
 应用户要求删除 v1/v2 的字节快照路径：`cache/connector.py`、`cache/service.py`、`state.pack/unpack`、`LMCacheL1Store` 字节存储、v1/v2 benchmark 与测试及两份文档。被 SHM 复用的部分保留：`state.py` 的 Snapshot/capture/validate/restore/model_identity、`lmcache_l1.validate_key`；公共基准工具提取到 `benchmarks/pd_common.py`（Recorder 不再插桩 codec），CPU 引擎 fixture 提取到 `tests/pd_cpu_fixture.py`。`engine_ops` 只保留 direct-tensor 分支，非 `LMCacheShmConnector` 明确报错；测试与 benchmark 守卫升级为断言 `pack/unpack` 属性不存在。清理后回归 23/23（71 项中 48 项随路径移除），GPU 真实模型 roundtrip 复测通过。现存唯一交接路径：GPU → LMCache L1 共享池 → GPU。
+
+### 稳定性补丁（同日）
+
+外部复查发现并修复四个问题：其一，`lmcache_shm` 在 `reserve_write/reserve_read` 抛异常（而非返回错误码）时泄漏 pidfd——复现为两条路径各注入 5 次异常、fd 各增加 5 个；现统一为 lease 注册前异常即关闭 fd，并以注入式回归锁住（fd 计数不变）。其二，pidfd 兼容从 `/tmp` sitecustomize shim 内化为 `lmcache_shm` 的模块级 syscall 直调 fallback（构造时探测一次、缺失快速失败），复现条件随仓库固定，服务/测试不再依赖外部 PYTHONPATH。其三，文档同步：README 将 PD 从“待探索”改为已落地并给出下一步（压力测试、请求队列、decode 合批；`require_idle()` 的空闲边界先保持，顺序多请求跑稳后再设计恢复期调度），SHM 文档移除“旧 HTTP 对照保留”的失效描述，本节“16 倍状态量”更正为“输入长度增加 16 倍、计入固定 GDN 状态后总快照体积约增加 1.72 倍”。其四，补回通用状态验证回归：权重哈希身份、目标上下文越界（失败保留快照可重试）、idle/async 守卫、脏 KV 尾页清零，连同 fd 泄漏测试合计回归 29 项全过（不再需要外部 shim）。

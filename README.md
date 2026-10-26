@@ -51,17 +51,22 @@ prefill、没有等待请求的稳定 decode 阶段；新请求到达或 KV bloc
 
 ## 后续计划
 
-### 优先评估：LMCache 与 Prefill/Decode 分离
+### 已落地：LMCache PD 状态交接（单请求同步原型）
 
-- [ ] 调研并尝试接入 LMCache，评估缓存存储、复用与传输接口。
-- [ ] 明确混合模型 attention KV 与 GDN conv/recurrent state 的导出、
-      恢复及一致性边界，再推进跨请求复用和跨 worker 迁移。
-- [ ] 实验性实现 Prefill/Decode（PD）分离：拆分 worker 职责、
-      交接请求状态，并验证交接后的生成结果。
-- [ ] 分别评估缓存命中/未命中、状态传输开销、TTFT、TPOT 与端到端吞吐。
+- [x] 接入真实 LMCache 0.5.6 L1：KV/GDN/请求进度直接拷入共享 CPU tensor 池，
+      decode 端按描述符 mmap 恢复；HTTP 仅承载 JSON 控制消息（无 payload 序列化/传输）。
+- [x] 实测单卡串行交接（CUDA Graph）：暂停 14–17ms 且几乎不随 prompt 长度增长
+      （对比序列化+HTTP 路径 252–464ms），恢复后 TPOT 与 baseline 持平。
+- [x] 回归覆盖：真实 L1 分配/租约、跨进程交接、输出一致、fd/泄漏回收与通用状态校验。
+      用法见 [docs/lmcache-pd-shm.md](docs/lmcache-pd-shm.md)，开发记录见 DEVELOPMENT_LOG.md 第 11–12 节。
+
+### 下一步（PD 方向）
+
+- [ ] 连续请求压力测试：混合长度交接 100–1000 次，输出一致，L1/KV block/slot 全部回收。
+- [ ] 请求队列：有界排队、容量背压、取消与失败重试（当前 `require_idle()` 要求引擎空闲，
+      先把顺序多请求跑稳，再设计恢复期间的调度边界）。
+- [ ] 在安全边界接入已有 continuous batching 的 decode 合批。
 - [ ] 继续分析异步调度的 CPU/GPU 空隙与适用负载，完善正确性和性能验证。
-
-LMCache 接入与 PD 分离目前均为待探索方向，具体实现范围根据接口适配和实测结果调整。
 
 ### 后续探索
 
