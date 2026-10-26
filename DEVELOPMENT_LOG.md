@@ -309,3 +309,40 @@ B128在KV预算guard处失败，B192/256在初始化warmup的LM head或GDN chunk
 | 双进程交接（P 进程退出后 D 进程独立恢复） | passed：prompt 257 快照 41.1MiB，P 提交 405ms、D 恢复 218ms，输出与不中断 reference 的 32 token 完全相同 |
 
 口径与限制：交接耗时包含同步、序列化与 HTTP 副本，只用于诊断原型，**不作为生产 PD 加速结论**。256/257 长度覆盖完整 KV 页与尾页，防止对齐边界多分配 block。两端必须同权重、同配置、同量化格式与同推理软件版本，快照不支持跨格式转换；模型身份哈希读取全部 checkpoint 权重，位于计时外。逐次 JSON 保留在本地 `logs/lmcache_pd/`。
+
+## 12. 2026-10-26：交接开销定位与共享内存直通重构（移除 HTTP payload 路径）
+
+### v2：开销定位（测量脚本已随后续清理移除）
+
+同机单卡串行测量（同一常驻引擎，baseline 与交接交替，10 组配置 × 1 预热 + 5 次）：CUDA Graph 下交接额外 E2E 224–442ms、暂停 252–464ms，随 prompt 长度线性增长。阶段分解（ms，中位数，64→1024）：
+
+| 阶段 | 耗时 | 说明 |
+|---|---|---|
+| serialize | 46–115 | `state.pack`：张量逐块转字节 + SHA256 |
+| PUT | 79–133 | HTTP 上传 + 服务端 L1 写入 |
+| GET | 52–93 | HTTP 下载 + 客户端校验 |
+| deserialize | 34–80 | `state.unpack`：字节重建张量 |
+| GPU 导出/恢复 | 5–18 | 真正的 D2H/H2D 拷贝与状态管理 |
+| ACK | ~1 | DELETE 确认 |
+
+约 95% 的交接开销在 CPU 序列化与 HTTP 副本，GPU 状态搬运几乎免费；恢复后 TPOT 与 baseline 持平（11.5–12.0ms）。eager 对照的 E2E 差值被 decode 抖动（TPOT 51–73ms）淹没、出现负值，仅其暂停时间与 Graph 一致，不可作结论依据。
+
+### v3：GPU↔共享池直通（`lmcache_shm` + `tensor_ops`）
+
+P 端把 KV/GDN 逐张量直接拷入 LMCache 0.5.6 L1 的共享 CPU tensor 池并 commit；D 端按描述符 mmap 同一池、校验后一次 H2D 散射到自己分配的 block/slot。HTTP 只承载约 3KiB 的 JSON 控制消息（reserve/commit/acquire/ack/release），payload pack/unpack 调用为 0、payload HTTP 字节为 0。租约用 pidfd 检测对端存活：活进程的映射不被 TTL 回收，进程死亡自动释放租约且不 unlink 共享池。
+
+实测（同机同模型同 Graph 配置，prompt 64/257/1024 × 输出 128，5 次中位数）：
+
+| Input | v2 暂停 | v3 暂停 | 提升 | v3 额外 E2E | v3 阶段分解（ms） |
+|---:|---:|---:|---:|---:|---|
+| 64 | 251.8 | **14.2** | ~17× | 18.1 | reserve/map 1.6 + D2H 5.0 + commit 0.7 + acquire 0.9 + H2D 4.2 + ACK 0.8 |
+| 257 | 304.1 | **15.0** | ~20× | 25.4 | 同构，D2H 5.4、H2D 4.2 |
+| 1024 | 448.6 | **17.3** | ~26× | 15.8 | D2H 5.5、H2D 6.5 |
+
+关键性质：开销几乎不随 prompt 长度增长（16 倍状态量仅 +3ms），因为大张量驻留共享池按 mmap 映射，不存在随体积缩放的打包/传输。正确性：roundtrip（64/256/257/512 × 32，Graph）4/4 输出逐 token 一致；独立进程 P 退出→D 恢复通过；CPU 回归 71/71。限制不变：单请求同步、TP=1、同主机同 IPC/PID namespace；pageable 映射内存走阻塞拷贝，非纯 PCIe 带宽测试。
+
+环境注记：conda 构建的 CPython 缺 `os.pidfd_open`（内核 syscall 本身可用，系统 Python 有），以 ctypes 包装 `SYS_pidfd_open` 的 sitecustomize shim 补齐（`/tmp/pidfd_shim`，经活/死进程语义验证），不影响仓库代码。
+
+### 清理：移除 HTTP payload 路径
+
+应用户要求删除 v1/v2 的字节快照路径：`cache/connector.py`、`cache/service.py`、`state.pack/unpack`、`LMCacheL1Store` 字节存储、v1/v2 benchmark 与测试及两份文档。被 SHM 复用的部分保留：`state.py` 的 Snapshot/capture/validate/restore/model_identity、`lmcache_l1.validate_key`；公共基准工具提取到 `benchmarks/pd_common.py`（Recorder 不再插桩 codec），CPU 引擎 fixture 提取到 `tests/pd_cpu_fixture.py`。`engine_ops` 只保留 direct-tensor 分支，非 `LMCacheShmConnector` 明确报错；测试与 benchmark 守卫升级为断言 `pack/unpack` 属性不存在。清理后回归 23/23（71 项中 48 项随路径移除），GPU 真实模型 roundtrip 复测通过。现存唯一交接路径：GPU → LMCache L1 共享池 → GPU。
