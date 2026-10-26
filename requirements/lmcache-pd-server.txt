@@ -1,0 +1,4 @@
+# Install CPU torch==2.13.0 first in an isolated Python 3.12 environment.
+lmcache==0.5.6
+pytest>=8,<10
+xxhash

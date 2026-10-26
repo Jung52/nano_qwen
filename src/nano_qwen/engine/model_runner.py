@@ -640,6 +640,22 @@ class ModelRunner:
         reset_context()
         return AsyncModelOutput(token_ids, output_buf, ready_event)
 
+    def pd_model_identity(self):
+        from nano_qwen.cache.state import model_identity
+        return model_identity(self)
+
+    def export_request_state(self, seq, identity):
+        from nano_qwen.cache.state import capture
+        return capture(self, seq, identity)
+
+    def validate_request_state(self, snapshot, identity):
+        from nano_qwen.cache.state import validate
+        return validate(self, snapshot, identity)
+
+    def restore_request_state(self, seq, snapshot, identity):
+        from nano_qwen.cache.state import restore
+        return restore(self, seq, snapshot, identity)
+
     def remove_request(self, seq_id: int):
         self.input_batch.remove(seq_id)
 
@@ -674,4 +690,3 @@ class ModelRunner:
     @property
     def prefill_piecewise_graphs(self):
         return self.cuda_graphs.prefill_graphs
-

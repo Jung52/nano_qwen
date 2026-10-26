@@ -306,6 +306,19 @@ class LLMEngine:
         ]
         return outputs, num_tokens
 
+    def prefill_to_lmcache(self, prompt, sampling_params, connector, transfer_id):
+        """Prefill one request, commit its full KV/GDN state, release GPU state."""
+        from nano_qwen.cache.engine_ops import prefill_to_cache
+        return prefill_to_cache(self, prompt, sampling_params, connector, transfer_id, Sequence)
+
+    def resume_from_lmcache(self, connector, transfer_id, delete_after_restore=True):
+        """Restore a request into local blocks/slots; subsequent step() decodes."""
+        from nano_qwen.cache.engine_ops import resume_from_cache
+        from nano_qwen.engine.sequence import SequenceStatus
+        from nano_qwen.sampling_params import SamplingParams
+        return resume_from_cache(self, connector, transfer_id, Sequence, SamplingParams,
+                                 SequenceStatus.RUNNING, delete_after_restore)
+
     def is_finished(self) -> bool:
         return self.scheduler.is_finished() and not self.batch_queue
 
@@ -359,4 +372,3 @@ class LLMEngine:
             for token_ids in outputs
         ]
         return outputs
-
