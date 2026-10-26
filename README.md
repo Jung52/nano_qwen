@@ -19,7 +19,7 @@ Requests with `temperature <= 1e-6` use deterministic argmax, including ties.
 The runner selects the all-greedy fast path from CPU request metadata; mixed
 batches retain stochastic sampling for other temperatures. This path skips
 softmax and random-number generation for fully greedy batches and works
-with ordinary decode. See the [standalone main measurements](benchmarks/reports/greedy_main/results.md).
+with ordinary decode. See the [experiment summary](docs/experiments-summary.md).
 
 ## Roadmap
 
@@ -61,6 +61,6 @@ The final goal is to provide a small but relatively modern inference engine:
 ## FP8 implementation and measurements
 
 See [optimization summary](docs/fp8-performance-2026-10-14.md),
-[benchmark entry points](benchmarks/README.md), and
-[retained measurement reports](benchmarks/reports/README.md).
+[experiment results](docs/experiments-summary.md), and
+[benchmark entry points](benchmarks/README.md).
 Production regression tests live in `tests/`.

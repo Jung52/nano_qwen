@@ -16,7 +16,7 @@
 - 9月3日主要性能表是预热2次、正式5次取中位数；10月9日格式对照是3次取中位数，另外两组端到端对照是2次。10月14日以后的专项正式实验通常每配置2次；波动大的样本保留，不补第三次挑结果。
 - 编译、autotune、capture和预热通常不计入稳态性能。短正确性gate不当性能结论；带profiler的诊断不替代关闭profiler的正式计时。
 
-早期仅存本机`logs/`的7份小报告已整理到[历史证据目录](docs/development-records/README.md)。保留原始来源、原文件与归档文件SHA256；只统一了CRLF换行。后续数据沿用[现有报告目录](benchmarks/reports/README.md)，没有重新测试或重写旧样本。
+早期仅存本机`logs/`的7份小报告已整理到[历史证据目录](docs/development-records/README.md)。保留原始来源、原文件与归档文件SHA256；只统一了CRLF换行。后续数据沿用`benchmarks/reports/`——该目录自2026-10-26起是**本地实验产物**，不再随Git分发；正文中的报告路径均为本机路径，公开的优化前后指标、正确性与限制汇总见[优化结果总结](docs/experiments-summary.md)，没有重新测试或重写旧样本。
 
 ## 1. 2026-09-03：第一次把异步执行、Graph和完整engine放在一起检查
 
@@ -110,7 +110,7 @@ prefix cache的经历也说明：Qwen3.5不仅有全注意力KV，还有GDN recu
 
 embedding、LM head、norm、GDN state/卷积/门控及采样没有全部变成FP8。一次Linear还多了动态量化和scale处理。这些额外工作在小batch、eager下可能抵消矩阵计算收益。
 
-10月9日的正确性smoke确实保留了一个反例：128输入、32输出、两边都是eager时，B1的BF16/FP8 decode为21.26/19.40 token/s，B4为123.83/68.01 token/s。这里FP8为HF block checkpoint；这些只是诊断脚本中的短计时，不是配对性能实验，不能用于给整个FP8方案定性，但足以说明“加入量化就应该更快”并不成立。[BF16原记录](benchmarks/reports/precision_bf16_eager.json)、[FP8原记录](benchmarks/reports/precision_fp8_eager.json)
+10月9日的正确性smoke确实保留了一个反例：128输入、32输出、两边都是eager时，B1的BF16/FP8 decode为21.26/19.40 token/s，B4为123.83/68.01 token/s。这里FP8为HF block checkpoint；这些只是诊断脚本中的短计时，不是配对性能实验，不能用于给整个FP8方案定性，但足以说明“加入量化就应该更快”并不成立。BF16原记录（本地产物 `benchmarks/reports/precision_bf16_eager.json`）、FP8原记录（本地产物 `benchmarks/reports/precision_fp8_eager.json`）
 
 ### 4.2 为保持路径一致，部分更激进的编译/派发被收回
 
@@ -122,7 +122,7 @@ embedding、LM head、norm、GDN state/卷积/门控及采样没有全部变成F
 
 [`45265de`](https://github.com/Jung52/nano_qwen/commit/45265de37f94fb8d74838bb2eb8412525090d12bb)加入HF block-128识别与block-scaled Triton GEMM，随后`fcaebf0`补离线128×128权重转换。block-wise的激活是每token、每128通道一组，与per-channel的per-token激活不同。
 
-10月9日的本地诊断发现：FP32到E4M3的转换经由FP16中间值，会在FP8中点附近丢失信息；仅调整除法精度并未降低原始mismatch数量。改为直接FP32→FP8 RNE转换后，6组真实checkpoint矩阵的最大relative L2约0.000761，两条48-token生成轨迹在该FP8方案内eager/graph完全一致。该轮全套57项通过。[舍入修复记录](benchmarks/reports/precision_check_summary.json)
+10月9日的本地诊断发现：FP32到E4M3的转换经由FP16中间值，会在FP8中点附近丢失信息；仅调整除法精度并未降低原始mismatch数量。改为直接FP32→FP8 RNE转换后，6组真实checkpoint矩阵的最大relative L2约0.000761，两条48-token生成轨迹在该FP8方案内eager/graph完全一致。该轮全套57项通过。舍入修复记录（本地产物 `benchmarks/reports/precision_check_summary.json`）
 
 这证明的是实现与显式反量化参考的误差受控、所测路径一致；3段短文本、24个logits位置的检查不等于数据集质量或perplexity评估。
 
@@ -137,7 +137,7 @@ embedding、LM head、norm、GDN state/卷积/门控及采样没有全部变成F
 | 1 / 128 | 48.00 | 97.68 | 87.21 | 92.08 |
 | 8 / 512 | 762.67 | 642.45 | 586.46 | 639.88 |
 
-当时per-channel用`torch._scaled_mm`，block用Triton；激活和权重scale粒度也不同。它能说明“这两个实现的实际表现”，不能将差值全归因于block更精确或scale访存更多。[CSV](docs/development-records/fp8-format-comparison-2026-10-09.csv)、[协议与环境](docs/development-records/fp8-format-comparison-2026-10-09.summary.json)
+当时per-channel用`torch._scaled_mm`，block用Triton；激活和权重scale粒度也不同。它能说明“这两个实现的实际表现”，不能将差值全归因于block更精确或scale访存更多。CSV（`docs/development-records/fp8-format-comparison-2026-10-09.csv`，已随 031e88c 删除，可从 `git show 031e88c^:docs/development-records/fp8-format-comparison-2026-10-09.csv` 恢复）、协议与环境（`docs/development-records/fp8-format-comparison-2026-10-09.summary.json`，已随 031e88c 删除，可从 `git show 031e88c^:docs/development-records/fp8-format-comparison-2026-10-09.summary.json` 恢复）
 
 ### 5.2 三模型端到端：decode受益，prefill仍可能恶化
 
@@ -149,13 +149,13 @@ embedding、LM head、norm、GDN state/卷积/门控及采样没有全部变成F
 | HF block FP8 | 566.32 | 2490.69 | 414.34 |
 | 原生per-channel FP8 | 657.66 | 2584.13 | 399.36 |
 
-两种FP8总耗时更低，但TTFT更高。到B8、输入4096时，原生per-channel端到端输出吞吐为127.89 token/s，低于BF16的139.72；HF block为147.68。不能把一次“FP8更快”推广到所有prompt长度和阶段。[CSV](docs/development-records/fp8-e2e-three-models-2026-10-09.csv)、[协议与限制](docs/development-records/fp8-e2e-three-models-2026-10-09.summary.json)
+两种FP8总耗时更低，但TTFT更高。到B8、输入4096时，原生per-channel端到端输出吞吐为127.89 token/s，低于BF16的139.72；HF block为147.68。不能把一次“FP8更快”推广到所有prompt长度和阶段。CSV（`docs/development-records/fp8-e2e-three-models-2026-10-09.csv`，已随 031e88c 删除，可从 `git show 031e88c^:docs/development-records/fp8-e2e-three-models-2026-10-09.csv` 恢复）、协议与限制（`docs/development-records/fp8-e2e-three-models-2026-10-09.summary.json`，已随 031e88c 删除，可从 `git show 031e88c^:docs/development-records/fp8-e2e-three-models-2026-10-09.summary.json` 恢复）
 
 ### 5.3 自己转换block checkpoint，没有额外性能收益
 
 HF原始block与自转block都走同一block-128后端，GPU scale都为FP32。B1/4/8×输入512/1024/2048/4096、输出129，每项2次端到端对照：自转block在12个case中3个更快、9个更慢；按相同workload总耗时合并，输出吞吐约低1.07%。
 
-这轮主要完成checkpoint格式与转换链路验证，没有产生一个更快的GEMM实现。原始HF scale与自转scale的磁盘dtype不同，也不意味着运行时是不同dtype；小差值还包含顺序运行波动，不能反推出哪种磁盘格式更快。[CSV](docs/development-records/fp8-hf-vs-converted-block-2026-10-09.csv)、[scale与协议记录](docs/development-records/fp8-hf-vs-converted-block-2026-10-09.summary.json)
+这轮主要完成checkpoint格式与转换链路验证，没有产生一个更快的GEMM实现。原始HF scale与自转scale的磁盘dtype不同，也不意味着运行时是不同dtype；小差值还包含顺序运行波动，不能反推出哪种磁盘格式更快。CSV（`docs/development-records/fp8-hf-vs-converted-block-2026-10-09.csv`，已随 031e88c 删除，可从 `git show 031e88c^:docs/development-records/fp8-hf-vs-converted-block-2026-10-09.csv` 恢复）、scale与协议记录（`docs/development-records/fp8-hf-vs-converted-block-2026-10-09.summary.json`，已随 031e88c 删除，可从 `git show 031e88c^:docs/development-records/fp8-hf-vs-converted-block-2026-10-09.summary.json` 恢复）
 
 ## 6. 2026-10-10至10-14：从比较两种量化，转向控制shape、后端与配置
 
@@ -163,7 +163,7 @@ HF原始block与自转block都走同一block-128后端，GPU scale都为FP32。B
 
 ### 6.1 先拆掉“block访存更多，所以一定更慢”的假设
 
-受控实验固定M/N/K和Triton算法，分别切换per-token/per-group激活、per-channel/per-block权重，另外用完全相同的量化数据比较Torch与Triton。MLP `gate_up`在M512时：同一数据的Torch GEMM约956.3μs，共同Triton约643.5μs；固定Triton后四种粒度为643.5–654.4μs，跨度约1.7%。这说明原比较中后端是明确因素，两个样本不足以给接近的粒度结果稳定排序。[粒度实验](benchmarks/reports/fp8_granularity/results.md)
+受控实验固定M/N/K和Triton算法，分别切换per-token/per-group激活、per-channel/per-block权重，另外用完全相同的量化数据比较Torch与Triton。MLP `gate_up`在M512时：同一数据的Torch GEMM约956.3μs，共同Triton约643.5μs；固定Triton后四种粒度为643.5–654.4μs，跨度约1.7%。这说明原比较中后端是明确因素，两个样本不足以给接近的粒度结果稳定排序。粒度实验（本地产物 `benchmarks/reports/fp8_granularity/results.md`）
 
 scale的唯一数据量也推翻了一个直觉：block权重scale不一定更多。以`gate_up`的N=18432、K=2560为例：
 
@@ -177,11 +177,11 @@ scale的唯一数据量也推翻了一个直觉：block权重scale不一定更�
 
 生产两条GEMM都使用有限的六组tile/warp/stage候选，按shape、device和dtype缓存；正式计时与搜索分开，Graph capture中不临时启动搜索。per-channel在完整K归约后缩放，block仍逐K块应用scale，量化语义没有为了共用框架而改成一样。
 
-调优后微基准中，M512的`gate_up`约941.2→310.8μs，`down`约492.5→184.6μs，分别观察到约3.03×/2.67×的GEMM比值。部分样本波动超过5%，而且这只是两种MLP投影，不能写成整个模型提速3倍。[调优记录](benchmarks/reports/fp8_granularity/triton_autotuned.md)
+调优后微基准中，M512的`gate_up`约941.2→310.8μs，`down`约492.5→184.6μs，分别观察到约3.03×/2.67×的GEMM比值。部分样本波动超过5%，而且这只是两种MLP投影，不能写成整个模型提速3倍。调优记录（本地产物 `benchmarks/reports/fp8_granularity/triton_autotuned.md`）
 
 ### 6.3 Prefill真正差在哪里：GDN投影比“多切几个块”更具体
 
-固定B8、每请求64输入，prefill M512，真实engine稳态Graph计时PC/BW平均59.42/75.48ms；两个PC样本波动超过5%，比例作观察。独立profile中，BW比PC的GEMM累计多11.485ms、激活量化多1.514ms，而GDN核心、卷积、norm和attention核心差值很小。[算子分解](benchmarks/reports/prefill_breakdown/results.md)
+固定B8、每请求64输入，prefill M512，真实engine稳态Graph计时PC/BW平均59.42/75.48ms；两个PC样本波动超过5%，比例作观察。独立profile中，BW比PC的GEMM累计多11.485ms、激活量化多1.514ms，而GDN核心、卷积、norm和attention核心差值很小。算子分解（本地产物 `benchmarks/reports/prefill_breakdown/results.md`）
 
 这些投影属于模型的不同部分，不能只看名称里的`in/out`：
 
@@ -201,19 +201,19 @@ GDN `out_proj`的M/N/K=512/2560/4096，BW缓存tile为16×32时GEMM约201.1μs�
 
 ### 6.4 单算子好结果，没有自动变成端到端好结果
 
-把这个out_proj/o_proj配置带回B8、输入64、输出128的真实engine，block优化前后总耗时1800.00→1800.63ms，decode589.77→592.54 token/s；TTFT77.29→84.72ms且波动很大。共同轨迹1024个位置上，两版block logits完全相同，但**两次样本没有证明额外端到端提速**。这条失败结果保留，没有用单算子201→91μs替代它。[端到端与精度回归](benchmarks/reports/fp8_e2e/results.md)
+把这个out_proj/o_proj配置带回B8、输入64、输出128的真实engine，block优化前后总耗时1800.00→1800.63ms，decode589.77→592.54 token/s；TTFT77.29→84.72ms且波动很大。共同轨迹1024个位置上，两版block logits完全相同，但**两次样本没有证明额外端到端提速**。这条失败结果保留，没有用单算子201→91μs替代它。端到端与精度回归（本地产物 `benchmarks/reports/fp8_e2e/results.md`）
 
 ### 6.5 Graph输出buffer复用：先让完整prefill跑得下
 
 顺序层此前会各自持有完整M的投影输出。后来按projection shape/dtype/device复用prefill输出buffer，同时保留各层独立KV/GDN状态，实测支持完整M到8192。这里复用的是顺序执行的临时dense输出，不是让不同请求或层共享状态。
 
-B4/8×输入256/512/1024×输出512/1024的完整Graph矩阵，BF16/PC/BW共72次正式测量：PC总耗时比BF16减少约29.6%–33.6%，BW约27.9%–33.3%；PC在12个case的TTFT都更低，decode中10个case略快。[完整矩阵](benchmarks/reports/fp8_matrix/results.md)
+B4/8×输入256/512/1024×输出512/1024的完整Graph矩阵，BF16/PC/BW共72次正式测量：PC总耗时比BF16减少约29.6%–33.6%，BW约27.9%–33.3%；PC在12个case的TTFT都更低，decode中10个case略快。完整矩阵（本地产物 `benchmarks/reports/fp8_matrix/results.md`）
 
 这更新了“PC prefill快、BW decode快”的早期印象：**在这版源码和矩阵里，BW并没有稳定的decode优势。** 后端、tile、共享量化、Graph以及具体batch/context共同决定排序。这批测量发生在当时的源码快照，后续整合保留数据，不冒充整合后全部重测。
 
 ## 7. 2026-10-14：decode容量上去了，吞吐却逐渐饱和
 
-decode-only实验先建立真实KV/GDN状态，计时128步、context65→192；仅捕获当前batch，KV每请求1个256-token block，统一90% allocator预算。预热、prefill和收尾不计入decode。[容量实验](benchmarks/reports/fp8_decode_capacity/results.md)
+decode-only实验先建立真实KV/GDN状态，计时128步、context65→192；仅捕获当前batch，KV每请求1个256-token block，统一90% allocator预算。预热、prefill和收尾不计入decode。容量实验（本地产物 `benchmarks/reports/fp8_decode_capacity/results.md`）
 
 | 方案 | 当次16对齐容量边界 | 吞吐最高的已测batch | 已测峰值 token/s |
 |---|---:|---:|---:|
@@ -229,7 +229,7 @@ BF16 B128一次未限额预热在WSL接近显存满载时明显变慢，正式�
 
 ## 8. 2026-10-15：profile把大batch热点从FP8转到了GDN状态复制
 
-先用`bench_one_batch`对两种FP8做B1/4/8/16/32/64、输入64、输出128，每配置2次，prefill/decode均Graph；另外独立采prefill和最初8步decode的trace。旧版正式结果中B64的PC/BW约2102/2079 token/s，TPOT约30.44/30.80ms。[优化前报告](benchmarks/reports/fp8_phase_profile_before_gdn_pool_20261015/results.md)
+先用`bench_one_batch`对两种FP8做B1/4/8/16/32/64、输入64、输出128，每配置2次，prefill/decode均Graph；另外独立采prefill和最初8步decode的trace。旧版正式结果中B64的PC/BW约2102/2079 token/s，TPOT约30.44/30.80ms。优化前报告（本地产物 `benchmarks/reports/fp8_phase_profile_before_gdn_pool_20261015/results.md`）
 
 在小batch和prefill，FP8 GEMM仍是大项；B8 eager投影诊断里，`gate_up_proj`占FP8 GEMM约42%。但这是“FP8 GEMM内部占比”，不是整模型占比。到B64，GDN recurrent-state gather/scatter占GPU累计时间约33%–34%，比全部FP8 GEMM的约26%–27%还高。这时继续只调FP8 tile，并没有覆盖最大的共享开销。
 
@@ -248,7 +248,7 @@ BF16 B128一次未限额预热在WSL接近显存满载时明显变慢，正式�
 | PC / 64 | 30.205 | 20.557 | 2118.9 / 3114.2 | +47.0% |
 | BW / 64 | 31.269 | 20.257 | 2048.2 / 3159.5 | +54.3% |
 
-独立B64 profile每个8步窗口中，旧版192次recurrent gather、192次scatter，新版两项都为0；旧版这部分约9.7–10.9ms/步，核心时间仍约4.4–5.0ms/步。这次有“操作消失”与正式吞吐共同支持归因，不只是整模型一次变快。[受控A/B与trace证据](benchmarks/reports/gdn_state_pool/results.md)
+独立B64 profile每个8步窗口中，旧版192次recurrent gather、192次scatter，新版两项都为0；旧版这部分约9.7–10.9ms/步，核心时间仍约4.4–5.0ms/步。这次有“操作消失”与正式吞吐共同支持归因，不只是整模型一次变快。受控A/B与trace证据（本地产物 `benchmarks/reports/gdn_state_pool/results.md`）
 
 实际CUDA回归覆盖稀疏乱序slot、slot0、slot大于当前batch、多次Graph replay改变索引，输出与完整BF16状态池对dense参考逐位一致。优化没有换成低精度state，也没有删除请求隔离；该阶段98项通过是当时的回归数量，不是全模型质量分数。
 
@@ -263,7 +263,7 @@ BF16 B128一次未限额预热在WSL接近显存满载时明显变慢，正式�
 | 96 | 39.42 | 36.76 | 2435.35 | 2611.70 |
 | 128/192/256 | 未完成 | 未完成 | 不生成数字 | 不生成数字 |
 
-这版完整流程中B64是已测吞吐最高点；B96能完成但更慢，并且部分样本device-used达到显卡容量。没有分页/DRAM计数证据，不能断言具体驱动回退机制。[现阶段矩阵与曲线](benchmarks/reports/fp8_phase_profile/results.md)
+这版完整流程中B64是已测吞吐最高点；B96能完成但更慢，并且部分样本device-used达到显卡容量。没有分页/DRAM计数证据，不能断言具体驱动回退机制。现阶段矩阵与曲线（本地产物 `benchmarks/reports/fp8_phase_profile/results.md`）
 
 B128在KV预算guard处失败，B192/256在初始化warmup的LM head或GDN chunk状态处OOM。一个共同问题是prefill仍对所有token做完整词表投影：`[B×64,248320]`的BF16 logits，仅B128/192/256就约需3.79/5.68/7.58GiB，还没加权重、GDN、KV和图内临时量。
 
@@ -271,7 +271,7 @@ B128在KV预算guard处失败，B192/256在初始化warmup的LM head或GDN chunk
 
 ## 9. 2026-10-18：将通用改进独立保留在 main
 
-确定性greedy fast path已独立保留：CPU请求温度选择全greedy路径，直接argmax；混合温度仍执行原采样语义。基线和原始数据见[独立控制实验](benchmarks/reports/greedy_main/results.md)。
+确定性greedy fast path已独立保留：CPU请求温度选择全greedy路径，直接argmax；混合温度仍执行原采样语义。基线和原始数据见独立控制实验（本地产物 `benchmarks/reports/greedy_main/results.md`）。
 
 随后分别提交四项通用改进：
 

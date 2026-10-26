@@ -1,6 +1,6 @@
 # Benchmark 与测试入口
 
-本轮优化内容和历史测量见 [FP8总结](../docs/fp8-performance-2026-10-14.md)。数据索引见 [reports/README.md](reports/README.md)。
+本轮优化内容和历史测量见 [FP8总结](../docs/fp8-performance-2026-10-14.md) 与 [优化结果总结](../docs/experiments-summary.md)。原始报告与图表是本地实验产物，位于本机 `benchmarks/reports/`（不随 Git 分发，备份见 `docs/experiments-summary.md` 的“本地实验产物”一节）。
 
 ## 保留的入口
 
@@ -18,11 +18,11 @@
 
 模型相关命令需在已有CUDA、PyTorch、Triton和模型依赖的环境运行；各入口的 `--help` 给出参数。原始日志和trace写入Git忽略的 `logs/`。
 
-最新两种FP8的阶段分解与batch–TPOT–吞吐曲线见 [fp8_phase_profile](reports/fp8_phase_profile/results.md)。`bench_one_batch.py --timing-rounds 2 --profile-rounds 0`只做两次正式计时；`--timing-rounds 0 --profile-rounds 2 --profile-decode-steps 8`单独做短窗口诊断。加`--workload-memory`可固定KV容量、限制allocator显存预算，并仅捕获精确prefill bucket。
+最新两种FP8的阶段分解与batch–TPOT–吞吐曲线见 [优化结果总结](../docs/experiments-summary.md)；原始数据与图表为本机产物 `benchmarks/reports/fp8_phase_profile/`。`bench_one_batch.py --timing-rounds 2 --profile-rounds 0`只做两次正式计时；`--timing-rounds 0 --profile-rounds 2 --profile-decode-steps 8`单独做短窗口诊断。加`--workload-memory`可固定KV容量、限制allocator显存预算，并仅捕获精确prefill bucket。
 
-GDN大batch的recurrent-state复制已改为按slot原地更新；旧/新路径B8/64的对照与原始数据见 [gdn_state_pool](reports/gdn_state_pool/results.md)。
+GDN大batch的recurrent-state复制已改为按slot原地更新；旧/新路径B8/64的对照与原始数据见 [优化结果总结](../docs/experiments-summary.md)，本机产物为 `benchmarks/reports/gdn_state_pool/`。
 
-当前阶段报告覆盖batch32/64/96/128/192/256、输入64/输出128，显存不足的配置保留实际完成次数与失败状态。优化前的batch1–64报告见 [归档](reports/fp8_phase_profile_before_gdn_pool_20261015/results.md)。
+当前阶段报告覆盖batch32/64/96/128/192/256、输入64/输出128，显存不足的配置保留实际完成次数与失败状态。优化前的batch1–64报告为本机产物 `benchmarks/reports/fp8_phase_profile_before_gdn_pool_20261015/`。
 
 生产回归测试已移到 `tests/`：
 
@@ -34,4 +34,4 @@ PYTHONPATH=src python -m pytest -q tests
 
 校验CLI支持 `--perf-profile batch/context/legacy` 和 `--perf-cases PROMPT:BATCH`，`--workloads`是显式cases的兼容别名；`--chunked-prefill`采用生产调度，decode统计窗口可能包含后来请求的prefill。旧共享输入检查笔记见 [归档](../docs/archived/fp8-shared-input-notes.md)。
 
-main独立greedy控制测试：`bench_greedy_sampling.py --model FP8_DIR --output logs/greedy.json`，同engine交错完整采样/fast，各配置2次；历史结果见[greedy_main](reports/greedy_main/results.md)。当前synthetic prompt采用普通decode描述，历史报告保留原prompt token、源码指纹和计时，不因文案清理重测或覆盖。
+main独立greedy控制测试：`bench_greedy_sampling.py --model FP8_DIR --output logs/greedy.json`，同engine交错完整采样/fast，各配置2次；结果见 [优化结果总结](../docs/experiments-summary.md)，本机产物为 `benchmarks/reports/greedy_main/`。当前synthetic prompt采用普通decode描述，历史报告保留原prompt token、源码指纹和计时，不因文案清理重测或覆盖。

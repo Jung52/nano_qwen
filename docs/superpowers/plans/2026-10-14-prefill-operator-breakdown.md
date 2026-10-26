@@ -14,7 +14,7 @@
 
 ## 已有证据与待验证原因
 
-[已有算子报告](../../../benchmarks/reports/fp8_granularity/triton_autotuned.md) 中，M=512 的耗时如下，单位 μs：
+已有算子报告（本地产物 `benchmarks/reports/fp8_granularity/triton_autotuned.md`） 中，M=512 的耗时如下，单位 μs：
 
 | 投影 | per-channel 量化 | block-wise 量化 | per-channel GEMM | block-wise GEMM |
 |---|---:|---:|---:|---:|
@@ -107,4 +107,4 @@ LM head 要单列：当前 compute_logits 使用 F.linear 对全部 prefill hidd
 - 独立只读审查核对全部raw trace、样本数与主要结论。补充GPU union空隙/重叠统计和实验身份复用校验，CPU重解析，没有重测性能；B/C/D逐specialization资源信息明确缺失。
 - 工作区完整测试95 passed；原始trace/input/cache及日志保留在 logs/prefill-breakdown-2026-10-14/。未修改生产算子或提交无关改动。
 
-报告：[results.md](../../../benchmarks/reports/prefill_breakdown/results.md)。原脚本已归档清理，当前入口见 [benchmarks/README.md](../../../benchmarks/README.md)。
+报告：results.md（本地产物 `benchmarks/reports/prefill_breakdown/results.md`）。原脚本已归档清理，当前入口见 [benchmarks/README.md](../../../benchmarks/README.md)。

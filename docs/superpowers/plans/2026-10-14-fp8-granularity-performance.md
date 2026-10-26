@@ -57,7 +57,7 @@ block 权重量化同时缩短 K 分组、合并 128 个输出通道，与 per-c
 | gate_up_proj | 2560 | 18432 | 4、8、16、512 |
 | down_proj | 9216 | 2560 | 4、8、16、512 |
 
-模型配置依据：[4b/config.json](../../../../models/4b/config.json)；投影组合依据：[qwen3_5.py](../../../src/nano_qwen/models/qwen3_5.py)。`M=512` 是固定 prefill 算子形状，不能与 batch=512 等同。
+模型配置依据：`models/4b/config.json`（本机模型目录）；投影组合依据：[qwen3_5.py](../../../src/nano_qwen/models/qwen3_5.py)。`M=512` 是固定 prefill 算子形状，不能与 batch=512 等同。
 
 对于 128 整除的 K、N，scale 唯一数据体积为：
 

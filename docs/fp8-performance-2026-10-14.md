@@ -16,15 +16,17 @@
 
 `M` 是 Linear 实际输入行数：decode 为当前活跃 batch，prefill 为本次 forward 的实际 token 总数，例如 `batch8 × input64 = M512`。
 
-以下为整合远端更新前的历史测量，模型/源码/缓存指纹和逐次数据随报告保留。最终提交中的远端共享量化和 prefill kernel 也要通过正确性回归；这些历史数据不视为整合后版本新增的性能测量。
+以下为整合远端更新前的历史测量，模型/源码/缓存指纹和逐次数据随报告保留。最终提交中的远端共享量化和 prefill kernel 也要通过正确性回归；这些历史数据不视为整合后版本新增的性能测量。优化前后指标、正确性与限制的汇总见 [experiments-summary.md](experiments-summary.md)。
 
-| 实验 | 覆盖和主要结论 | 数据 |
+> 自 2026-10-26 起 `benchmarks/reports/` 不再随 Git 分发，下表中的“数据”是本机实验产物路径（备份位置见 experiments-summary.md 的“本地实验产物”一节）。
+
+| 实验 | 覆盖和主要结论 | 数据（本地实验产物） |
 |---|---|---|
-| 粒度、GEMM与逻辑流量 | 固定 M/N/K，分拆量化/GEMM/Linear，控制激活/权重 scale 粒度；逻辑字节数不能直接当实际 DRAM 流量 | [granularity](../benchmarks/reports/fp8_granularity/results.md)、[autotuned](../benchmarks/reports/fp8_granularity/triton_autotuned.md) |
-| Prefill算子分解 | M512时 block 比 per-channel 的 GEMM 累计多约11.485ms，激活量化多约1.514ms。GDN QKV/out 投影是主要差值热点；固定 tile 后 out_proj GEMM 约201→91μs，配置选择是明确因素 | [breakdown](../benchmarks/reports/prefill_breakdown/results.md) |
-| M512端到端与精度 | tile调整前后同量化结果1024位置逐位一致；两次端到端样本未证明该 tile 单项调整带来额外提速，TTFT波动较大 | [e2e](../benchmarks/reports/fp8_e2e/results.md) |
-| 完整graph矩阵 | batch4/8 × input256/512/1024 × output512/1024，三方案共72次正式测量。PC总耗时比BF16减少约29.6%–33.6%，BW约27.9%–33.3%；PC的TTFT在12个case均更低，decode中10个case略快 | [matrix](../benchmarks/reports/fp8_matrix/results.md) |
-| 大batch decode | context65→192，128步，统一90%显存allocator预算；BF16最大16对齐batch96，两种FP8为256。已测峰值1877/2476/2488 tok/s，PC/BW比BF16峰值约+31.9%/+32.5%；同batch96约+20.4%/+14.2% | [capacity](../benchmarks/reports/fp8_decode_capacity/results.md) |
+| 粒度、GEMM与逻辑流量 | 固定 M/N/K，分拆量化/GEMM/Linear，控制激活/权重 scale 粒度；逻辑字节数不能直接当实际 DRAM 流量 | `benchmarks/reports/fp8_granularity/results.md`、`benchmarks/reports/fp8_granularity/triton_autotuned.md` |
+| Prefill算子分解 | M512时 block 比 per-channel 的 GEMM 累计多约11.485ms，激活量化多约1.514ms。GDN QKV/out 投影是主要差值热点；固定 tile 后 out_proj GEMM 约201→91μs，配置选择是明确因素 | `benchmarks/reports/prefill_breakdown/results.md` |
+| M512端到端与精度 | tile调整前后同量化结果1024位置逐位一致；两次端到端样本未证明该 tile 单项调整带来额外提速，TTFT波动较大 | `benchmarks/reports/fp8_e2e/results.md` |
+| 完整graph矩阵 | batch4/8 × input256/512/1024 × output512/1024，三方案共72次正式测量。PC总耗时比BF16减少约29.6%–33.6%，BW约27.9%–33.3%；PC的TTFT在12个case均更低，decode中10个case略快 | `benchmarks/reports/fp8_matrix/results.md` |
+| 大batch decode | context65→192，128步，统一90%显存allocator预算；BF16最大16对齐batch96，两种FP8为256。已测峰值1877/2476/2488 tok/s，PC/BW比BF16峰值约+31.9%/+32.5%；同batch96约+20.4%/+14.2% | `benchmarks/reports/fp8_decode_capacity/results.md` |
 
 每个正式实验配置保留两次样本，不因波动补第三次；编译、调优、capture、预热和独立精度诊断另计。BF16 batch96两次吞吐波动5.6%，收益按近似值解读。大batch实验只捕获目标batch，短上下文和该显存预算内的容量不代表所有部署设置。
 
@@ -42,7 +44,7 @@ scale的逻辑额外访问、逐块缩放以及 tile/调度共同影响耗时。
 
 - `benchmarks/` 保留通用吞吐、profile和模型质量校验入口；本轮5个专项实验脚本及其5个脚本测试已归档清理。
 - `tests/` 保留checkpoint、GEMM数学/尾部、全部候选配置、bias/dtype、冷热capture、缓存复用、GDN混合批次、prefill buffer复用及校验CLI的回归测试，脱离临时benchmark helper。
-- `benchmarks/reports/` 中Markdown/JSON/CSV和吞吐图保留；原始trace、输入、调优缓存和执行源码位于本地被Git忽略的 `logs/`，不提交大型运行产物。
+- `benchmarks/reports/` 中的报告与图表为本地实验产物，不随 Git 提交；原始trace、输入、调优缓存和执行源码位于本地被Git忽略的 `logs/`，不提交大型运行产物。
 - 清理前源码备份：`logs/fp8-release-cleanup-2026-10-14/before-cleanup.zip`。`docs/superpowers/plans/` 是已完成实验的历史计划，命令不作为当前运行入口。
 
 收尾验证：整合后90项测试通过；只读审查未发现Critical/Important问题。合并遗留的无用容量helper、重复参数表/解析函数和重复JSON字段已清理；容量回归直接调用真实fixed-batch入口，缺KV错误同时报告required/available。数值报告与图表SHA保持清理前原值。未修改本地无关的 `linear.py` 注释及 `craft.py`。

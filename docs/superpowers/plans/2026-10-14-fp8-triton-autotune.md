@@ -54,7 +54,7 @@ Triton 的配置、key 与自定义 do_bench 接口依据：[官方 autotune 文
 
 - 两种生产 GEMM 均为 Triton；六组配置按 shape、device、dtype 缓存。调优 capture 显式使用设备对应的 stream；冷 capture 使用保守配置，warm capture 复用已选 tile。
 - 工作区完整验证：`/home/wei/miniconda3/envs/code/bin/python -m pytest -q`，86 passed；精度、尾部、bias、dtype、逐配置、冷热 capture 和缓存选择检查通过。
-- 一次 native sweep：12 行结果、32 个独立计时 ID、每 ID 两个正式样本；未重复性能 sweep。报告：[triton_autotuned.md](../../../benchmarks/reports/fp8_granularity/triton_autotuned.md)。原 results.* 报告保留。
+- 一次 native sweep：12 行结果、32 个独立计时 ID、每 ID 两个正式样本；未重复性能 sweep。报告：triton_autotuned.md（本地产物 `benchmarks/reports/fp8_granularity/triton_autotuned.md`）。原 results.* 报告保留。
 - M=512 的 per-channel GEMM：gate_up 旧 Torch 941.248 μs → 新 Triton 310.784 μs；down 492.480 μs → 184.640 μs。部分小 M 与 block 样本波动超过 5%，不用于推断整模型排序。
 - 独立只读审查提出设备 stream 问题，修复并通过复核。实际 DRAM/L2 counter 仍受 `ERR_NVGPUCTRPERM` 限制；本次未执行多 GPU 硬件验证。
 - 日志和旧文件备份保存于 `logs/triton-autotune-2026-10-14/`；未提交更改，保留工作区中无关改动。
