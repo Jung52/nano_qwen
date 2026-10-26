@@ -1,6 +1,6 @@
 # nano_qwen 开发日志
 
-记录截至 **2026-10-18，main通用推理路径**。这是开发过程的复盘：为什么加入一个模块、实现后遇到了什么、哪些实验改变了原来的判断，以及目前还没有解决什么。README 保留项目介绍和入口，本文件保留过程。
+记录截至 **2026-10-26，main通用推理路径**。这是开发过程的复盘：为什么加入一个模块、实现后遇到了什么、哪些实验改变了原来的判断，以及目前还没有解决什么。README 保留项目介绍和入口，本文件保留过程。
 
 ## 记录范围与读数口径
 
@@ -289,3 +289,23 @@ B128在KV预算guard处失败，B192/256在初始化warmup的LM head或GDN chunk
 ## 10. 后续记录方式
 
 继续保留模块引入后回退、单算子加速未转化为端到端收益、正确性修复牺牲性能等结果。每项新实验记录源码、模型、GPU、预热和计时口径、实际token数、原始数据、状态门禁及未验证范围；不同版本的绝对吞吐不拼接成控制变量曲线。
+
+## 11. 2026-10-26：LMCache CPU RAM 状态交接原型（PD 交接第一步）
+
+`e6ab0b1` 加入单请求同步的 PD 状态交接原型：P 实例完成完整 prompt 并采样首 token 后，把 attention KV、全部 GDN conv/recurrent state 和请求进度序列化为完整快照，经本机二进制 HTTP 服务提交到真实 LMCache 0.5.6 CPU L1 内存池；D 实例分配自己的 block/slot，恢复 GPU 输入后从下一步 decode 继续。原始推理路径不变；新路径要求 `async_scheduling=False`、`enable_prefix_cache=False`、`ignore_eos=True`、`max_tokens>=2`，用于固定长度正确性验证。
+
+- 接入代码在 `src/nano_qwen/cache/`（L1 存储、HTTP 服务、connector 与 engine_ops）；引擎新增 `prefill_to_lmcache` / `resume_from_lmcache` 两个入口，实现与使用说明见 [docs/lmcache-pd.md](docs/lmcache-pd.md)。
+- 传输是本项目自己的二进制 HTTP 协议，**不是**官方 LMCache MP 协议、RDMA 或共享内存零拷贝；未实现并发路由、自动 P/D 池调度、部分前缀命中；快照不自动 LRU 淘汰，满容量明确失败，D 成功恢复后 ACK 删除，遗留快照默认 900 秒后在下一次服务操作时回收。缓存服务重启会丢失待交接快照。
+- 回归：`tests/test_lmcache_pd_state.py` 用 AST 加载真实的 Sequence/BlockManager/Scheduler/LLMEngine 类、以确定性 CPU 状态替代模型执行；`tests/test_lmcache_pd_store.py` 覆盖真实 L1 分配、提交/校验/删除、容量耗尽、过期回收与 HTTP 交接。`REQUIRE_LMCACHE=1` 使缺依赖直接失败，防止 skip-only 的假通过。
+
+实测（2026-10-26，RTX 4070 Ti SUPER 16GiB，`code` 环境 PyTorch 2.12.1+cu130、LMCache 0.5.6，模型 `4b-channel-fp8`）：
+
+| 测试 | 结果 |
+|---|---|
+| CPU 回归 | 30 passed |
+| store-smoke | passed，backend=lmcache_l1，真实 L1 分配 |
+| roundtrip eager（prompt 64/256/257/512，输出32） | 4/4 passed：state_bytes_equal、tokens_equal 全真，prefill_dispatches=0、decode_dispatches=31 |
+| roundtrip CUDA Graph | 4/4 passed，同上；TPOT 约 11.6ms（eager 同机约 60.7ms，仅为路径参考，不代表交接加速） |
+| 双进程交接（P 进程退出后 D 进程独立恢复） | passed：prompt 257 快照 41.1MiB，P 提交 405ms、D 恢复 218ms，输出与不中断 reference 的 32 token 完全相同 |
+
+口径与限制：交接耗时包含同步、序列化与 HTTP 副本，只用于诊断原型，**不作为生产 PD 加速结论**。256/257 长度覆盖完整 KV 页与尾页，防止对齐边界多分配 block。两端必须同权重、同配置、同量化格式与同推理软件版本，快照不支持跨格式转换；模型身份哈希读取全部 checkpoint 权重，位于计时外。逐次 JSON 保留在本地 `logs/lmcache_pd/`。
