@@ -37,17 +37,11 @@ with ordinary decode. See the [experiment summary](docs/experiments-summary.md).
 
 ### 3. Advanced Inference
 - [ ] DFlash2（独立实验分支，尚未实现）
-- [ ] FP8 / INT8 / INT4 quantization
+- [ ] INT8 / INT4 quantization
 - [ ] CUDA Graph optimization
 - [ ] Efficient KV Cache management
 
-### 4. Parallelism
-- [ ] Tensor Parallelism (TP)
-- [ ] Data Parallelism (DP)
-- [ ] Expert Parallelism (EP)
-- [ ] Pipeline Parallelism (PP)
-
-### 5. Distributed Serving
+### 4. Distributed Serving
 - [ ] Prefill-Decode disaggregation
 - [ ] Distributed inference
 - [ ] Advanced scheduling
