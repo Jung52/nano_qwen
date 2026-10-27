@@ -1,6 +1,7 @@
 import pickle
 import socket
 from contextlib import contextmanager
+from dataclasses import fields
 
 import torch
 import torch.distributed as dist
@@ -19,6 +20,7 @@ from nano_qwen.utils.loader import load_model
 from nano_qwen.utils.trace import trace_event
 
 from .async_output import AsyncModelOutput
+from .decode_slot import DecodeSlot
 from .execution import SamplingPlan
 from .decode_init import prepare_decode as prepare_decode_kernel
 
@@ -150,9 +152,20 @@ class ModelRunner:
         )
         self.allocate_decode_buffers()
         self.input_batch = InputBatch(config.max_num_seqs)
-        # execute_model is always immediately followed by sample_tokens.
-        # A single sampling state is enough even with two output batches
-        # outstanding; it is consumed before the next execute_model call.
+        self._active_slot_id = 0
+        self._active_slot = None
+        self.decode_slots = []
+        self.decode_compute_stream = None
+        if config.dual_slot_decode:
+            # Long-lived staging is allocated before KV sizing, so its
+            # resident bytes participate in the existing memory budget.
+            self.decode_slots = [DecodeSlot.allocate(i, config) for i in range(2)]
+            self._output_pin_bufs = [slot.tokens_cpu for slot in self.decode_slots]
+            self._output_events = [slot.d2h_done for slot in self.decode_slots]
+            self.decode_compute_stream = torch.cuda.Stream()
+        # Single pending sampling state: one batch is dispatched per step
+        # (depth-1 async), so a single slot holds the logits/temps/seqs the
+        # immediately-following sample_tokens call will consume.
         self._pending: tuple | None = None
         self._sampling_plan: SamplingPlan | None = None
         self._target_hidden = None
@@ -162,6 +175,8 @@ class ModelRunner:
         self.allocate_kv_cache()
         if not self.enforce_eager:
             self.capture_cudagraph()
+        if self.decode_compute_stream is not None:
+            self.decode_compute_stream.wait_stream(torch.cuda.current_stream())
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
 
@@ -191,7 +206,16 @@ class ModelRunner:
         # containers. Clear every runner-owned GPU reference, including the
         # lazily-created piecewise graphs, before the engine is discarded.
         self._pending = None
+        self._target_hidden = None
+        self._sampling_plan = None
         self.cuda_graphs.clear()
+        self._active_slot = None
+        for slot in self.decode_slots:
+            slot.pending = slot.output = None
+            slot.cpu.clear()
+            slot.gpu.clear()
+        self.decode_slots.clear()
+        self.decode_compute_stream = None
         for name in ("gdn_layers", "decode_gpu", "decode_cpu",
                      "_output_pin_bufs", "_output_events"):
             value = getattr(self, name, None)
@@ -333,6 +357,15 @@ class ModelRunner:
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
+        slot = getattr(self, "_active_slot", None)
+        if slot is not None and all(not seq.is_prefill for seq in seqs):
+            table = slot.blocks_cpu[:len(seqs)]
+            table.fill_(-1)
+            for i, seq in enumerate(seqs):
+                for j, block in enumerate(seq.block_table):
+                    table[i, j] = block
+            slot.blocks_gpu[:len(seqs)].copy_(table, non_blocking=True)
+            return slot.blocks_gpu[:len(seqs), :max_len]
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
@@ -458,6 +491,13 @@ class ModelRunner:
         return input_ids, positions
 
     def prepare_sample(self, seqs: list[Sequence]):
+        slot = getattr(self, "_active_slot", None)
+        if slot is not None:
+            for i, seq in enumerate(seqs):
+                slot.temperatures_cpu[i] = seq.temperature
+            slot.temperatures_gpu[:len(seqs)].copy_(
+                slot.temperatures_cpu[:len(seqs)], non_blocking=True)
+            return slot.temperatures_gpu[:len(seqs)]
         temperatures = [seq.temperature for seq in seqs]
         temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
         return temperatures
@@ -520,7 +560,10 @@ class ModelRunner:
                 raise RuntimeError("lookahead metadata requires single-GPU decode")
             if any(seq.seq_id not in self.input_batch.seq_id_to_slot for seq in seqs):
                 raise RuntimeError("lookahead decode requires an existing GPU token slot")
-        self.input_batch.remove_finished()
+        # A terminal owner may still be referenced by the other execution
+        # slot. Only the pipeline's last commit may remove that request slot.
+        if not getattr(getattr(self, "config", None), "dual_slot_decode", False):
+            self.input_batch.remove_finished()
         seqs, new_entries = self.input_batch.update(seqs)
         slots = self.input_batch.slots_for(seqs)
 
@@ -533,12 +576,18 @@ class ModelRunner:
             for seq, slot in zip(seqs, slots):
                 self.sampled_token_ids_gpu[slot] = seq.last_token
 
-        slots_t = torch.tensor(
-            slots,
-            dtype=torch.int64,
-            device="cpu",
-            pin_memory=True,
-        )
+        active_slot = getattr(self, "_active_slot", None)
+        if active_slot is not None:
+            slots_t = active_slot.batch_slots_cpu[:len(seqs)]
+            for i, slot in enumerate(slots):
+                slots_t[i] = slot
+        else:
+            slots_t = torch.tensor(
+                slots,
+                dtype=torch.int64,
+                device="cpu",
+                pin_memory=True,
+            )
         self.batch_slots_gpu[:len(seqs)].copy_(slots_t, non_blocking=True) #copy current batch slots to GPU for kernel access
 
         reset_slots = {slot for _, slot in new_entries}
@@ -574,7 +623,7 @@ class ModelRunner:
         self._pending = (logits, temperatures, seqs, is_prefill)
         return None
 
-    def sample_tokens(self) -> AsyncModelOutput | None:
+    def sample_tokens(self, allowed_seq_ids=None) -> AsyncModelOutput | None:
         if self.rank != 0:
             # Non-zero TP ranks do not run the sampler: drop the pending
             # batch's state so rank 0 stays authoritative.
@@ -593,6 +642,15 @@ class ModelRunner:
             if is_prefill:
                 rows = torch.tensor(plan.row_indices, dtype=torch.int64, device=logits.device)
                 logits = logits.index_select(0, rows)
+        if allowed_seq_ids is not None:
+            allowed = set(allowed_seq_ids)
+            keep = [j for j, i in enumerate(plan.request_indices)
+                    if seqs[i].seq_id in allowed]
+            if len(keep) != len(plan.request_indices):
+                indices = torch.tensor(keep, device=logits.device, dtype=torch.int64)
+                logits = logits.index_select(0, indices)
+                plan = SamplingPlan(tuple(plan.row_indices[j] for j in keep),
+                                    tuple(plan.request_indices[j] for j in keep))
         requests = plan.request_indices
         selected = None if requests == tuple(range(bs)) else torch.tensor(
             requests, dtype=torch.int64, device=logits.device)
@@ -606,25 +664,40 @@ class ModelRunner:
         observe_gdn_state = getattr(self.sampler, "observe_gdn_state", None)
         if observe_gdn_state is not None and requests:
             observe_gdn_state(self.gdn_layers, sample_slots)
-        token_ids = torch.full((bs,), -1, dtype=torch.int64, device=logits.device)
+        active_slot = getattr(self, "_active_slot", None)
+        token_ids = (active_slot.tokens_gpu[:bs] if active_slot is not None else
+                     torch.empty((bs,), dtype=torch.int64, device=logits.device))
+        token_ids.fill_(-1)
         if requests:
             with trace_event("sampler", "runner", args={"prefill": is_prefill, "bs": bs}):
                 sampled = self.sampler(logits, sample_temperatures,
                                        all_greedy=all(seq.temperature <= 1e-6 for seq in sampled_seqs))
             if selected is None:
-                token_ids = sampled
+                if active_slot is None:
+                    token_ids = sampled
+                else:
+                    token_ids.copy_(sampled)
             else:
                 token_ids[selected] = sampled
             self.sampled_token_ids_gpu.scatter_(0, sample_slots, sampled)
         self._target_hidden = None
 
-        buf_idx = self._output_buf_idx
-        self._output_buf_idx ^= 1 #ping-pong buffer index, switch between 0 and 1 for double buffering
-        output_buf = self._output_pin_bufs[buf_idx][:bs]
-        ready_event = self._output_events[buf_idx]
+        if active_slot is not None:
+            output_buf = active_slot.tokens_cpu[:bs]
+            ready_event = active_slot.d2h_done
+            # An exact step fence, including the all-zombie/zero-sample case.
+            active_slot.sample_done.record(torch.cuda.current_stream())
+        else:
+            buf_idx = self._output_buf_idx
+            self._output_buf_idx ^= 1 #ping-pong buffer index, switch between 0 and 1 for double buffering
+            output_buf = self._output_pin_bufs[buf_idx][:bs]
+            ready_event = self._output_events[buf_idx]
 
         if self.async_output:
-            self.output_copy_stream.wait_stream(torch.cuda.current_stream())
+            if active_slot is not None:
+                self.output_copy_stream.wait_event(active_slot.sample_done)
+            else:
+                self.output_copy_stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(self.output_copy_stream):
                 # Non-blocking enqueue; the real copy latency surfaces as
                 # d2h_wait on the consuming step.
@@ -639,6 +712,44 @@ class ModelRunner:
 
         reset_context()
         return AsyncModelOutput(token_ids, output_buf, ready_event)
+
+    def launch_slot(self, seqs, is_prefill, slot_id):
+        """Launch only forward; the CPU can now commit the older slot."""
+        slot = self.decode_slots[slot_id]
+        if slot.busy:
+            raise RuntimeError("execution slot reused before commit")
+        slot.busy = True
+        self._active_slot_id, self._active_slot = slot_id, slot
+        self.decode_cpu, self.decode_gpu = slot.cpu, slot.gpu
+        self.batch_slots_gpu = slot.batch_slots_gpu
+        self.prepare_inputs_event = slot.h2d_done
+        with torch.cuda.stream(self.decode_compute_stream):
+            self.execute_model(seqs, is_prefill)
+            slot.pending = (self._pending, self._sampling_plan,
+                            self._target_hidden, get_context())
+        self._pending = self._sampling_plan = self._target_hidden = None
+        reset_context()
+
+    def sample_slot(self, slot_id, live_seq_ids):
+        slot = self.decode_slots[slot_id]
+        if not slot.busy or slot.pending is None:
+            raise RuntimeError("sample_slot requires an unsampled launch")
+        self._active_slot_id, self._active_slot = slot_id, slot
+        self.batch_slots_gpu = slot.batch_slots_gpu
+        self._pending, self._sampling_plan, self._target_hidden, context = slot.pending
+        set_context(**{field.name: getattr(context, field.name) for field in fields(context)})
+        with torch.cuda.stream(self.decode_compute_stream):
+            slot.output = self.sample_tokens(live_seq_ids)
+        slot.pending = None
+        return slot.output
+
+    def release_slot(self, slot_id):
+        slot = self.decode_slots[slot_id]
+        if (not slot.busy or slot.output is None
+                or slot.output._result is None or slot.pending is not None):
+            raise RuntimeError("slot release must follow D2H consumption and commit")
+        slot.output = None
+        slot.busy = False
 
     def pd_model_identity(self):
         from nano_qwen.cache.state import model_identity
