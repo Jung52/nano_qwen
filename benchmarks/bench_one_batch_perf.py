@@ -91,6 +91,9 @@ def run_worker(a):
     if os.environ.get("CUDA_LAUNCH_BLOCKING", "0") != "0":
         raise RuntimeError("Unset CUDA_LAUNCH_BLOCKING before wall-time measurement")
     mode = a.worker
+    if len(a.batch_sizes) != 1:
+        raise RuntimeError("A perf worker measures exactly one batch size")
+    a.batch_size = a.batch_sizes[0]
     out = Path(a.worker_output) if a.worker_output else Path(a.output_dir) / f"bs{a.batch_size}_{mode}"
     out.mkdir(parents=True, exist_ok=True)
     block_size = Config.__dataclass_fields__["kvcache_block_size"].default
