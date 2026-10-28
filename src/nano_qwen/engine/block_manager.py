@@ -103,16 +103,6 @@ class BlockManager:
     def can_append(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
 
-    def reserve_tokens(self, seq: Sequence, num_tokens: int) -> bool:
-        """Reserve the planned GPU frontier, including uncommitted inputs."""
-        needed = (num_tokens + self.block_size - 1) // self.block_size
-        missing = max(0, needed - len(seq.block_table))
-        if missing > len(self.free_block_ids):
-            return False
-        for _ in range(missing):
-            seq.block_table.append(self._allocate_block())
-        return True
-
     def may_append(self, seq: Sequence):
         if len(seq) % self.block_size == 1:
             seq.block_table.append(self._allocate_block())

@@ -15,7 +15,6 @@ from nano_qwen.sampling_params import SamplingParams
 from nano_qwen.utils.trace import trace_event
 
 from .model_runner import ModelRunner, find_free_port
-from .pipeline import DualSlotPipeline
 from ..scheduler import Scheduler
 
 
@@ -73,10 +72,6 @@ class LLMEngine:
         # flight, CPU runs ahead of GPU by N-1 steps (core.py:622-736).
         self.max_concurrent_batches = 2
         self.batch_queue: deque[tuple[list[Sequence], bool, int, object]] = deque()
-        # Opt-in dual Graph-bank execution slots. Scheduling-only port: the
-        # single-graph lookahead above stays the default async path.
-        self._dual_pipeline = (DualSlotPipeline(self.scheduler, self.model_runner, self.config)
-                               if self.config.dual_slot_decode else None)
         self.coalesce_stats = {
             "coalesce_attempts": 0,
             "coalesce_successes": 0,
@@ -115,10 +110,6 @@ class LLMEngine:
         # AsyncModelOutput retains both device and pinned host tensors until
         # consumed. Drop all engine-owned queues/references before collecting.
         self.batch_queue.clear()
-        pipeline = getattr(self, "_dual_pipeline", None)
-        if pipeline is not None:
-            pipeline.clear()
-            self._dual_pipeline = None
         self.ps.clear()
         self.events.clear()
         scheduler = getattr(self, "scheduler", None)
@@ -142,9 +133,6 @@ class LLMEngine:
 
     def step(self):
         """Use lookahead only when the two-buffer output queue can support it."""
-        pipeline = getattr(self, "_dual_pipeline", None)
-        if pipeline is not None:
-            return pipeline.step()
         active = getattr(self.scheduler, "async_decode", None)
         enabled = (getattr(self.config, "async_scheduling", False)
                    and self.max_concurrent_batches == 2

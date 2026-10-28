@@ -5,12 +5,11 @@ Run from nano_qwen (PyTorch + CUDA + model dependencies required):
   CUDA_VISIBLE_DEVICES=0 python benchmarks/bench_one_batch_trace.py \
       --model /models/Qwen3.5-4B --output-dir logs/one_batch_trace
 
-no_async/async use async_scheduling=False/True on the MRV2 source tree.
-two_slot uses dual_slot_decode=True on feat/moondream-dual-slot, or an
-explicit --two-slot-root. Local git refs are read with git archive; your
-checkout is never switched. No fetch, fake GPU delay, replay repetition,
-or per-step synchronization is added. Only the diagnostic KV capacity and
-annotations are changed; engine.step drives every scheduling decision.
+no_async/async use async_scheduling=False/True on the current source tree
+(--same-source semantics; no git-ref fallback). No fetch, fake GPU delay,
+replay repetition, or per-step synchronization is added. Only the diagnostic
+KV capacity and annotations are changed; engine.step drives every scheduling
+decision.
 
 Each directory contains trace.json (<= --max-trace-mb), summary.json,
 metadata.json, check_outputs.json, consistency.json and run.log. Checks run
@@ -39,12 +38,11 @@ import re
 import statistics
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import traceback
 
-MODES = ("no_async", "async", "two_slot")
+MODES = ("no_async", "async")
 MARKER = re.compile(r"^nq/([a-z_]+)/b(\d+)(?:/slot([01]))?$")
 MIB = 1024 * 1024
 
@@ -93,39 +91,10 @@ def find_repo(explicit=None):
     raise RuntimeError("Run inside nano_qwen, or supply --repo-root /path/to/nano_qwen")
 
 
-def archive_ref(root, ref, stack):
-    """Read a LOCAL ref into a temporary source tree without changing HEAD."""
-    sha = None
-    for candidate in (ref, f"origin/{ref}"):
-        try:
-            sha = git(root, "rev-parse", "--verify", f"{candidate}^{{commit}}")
-            break
-        except subprocess.CalledProcessError:
-            pass
-    if sha is None:
-        raise RuntimeError(f"Local ref {ref!r} (or origin/{ref}) is unavailable; supply the appropriate --*-root checkout")
-    destination = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="nq-trace-source-")))
-    with tempfile.TemporaryFile() as stream:
-        subprocess.run(["git", "-C", str(root), "archive", "--format=tar", sha], stdout=stream, check=True)
-        stream.seek(0)
-        with tarfile.open(fileobj=stream) as archive:
-            members = archive.getmembers()
-            for member in members:
-                target = (destination / member.name).resolve()
-                if (not target.is_relative_to(destination) or not (member.isfile() or member.isdir())):
-                    raise RuntimeError(f"Unsafe archive member: {member.name}")
-            archive.extractall(destination, members=members, filter="data")
-    return destination, sha
-
-
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", required=True)
     p.add_argument("--repo-root")
-    p.add_argument("--mrv2-root", help="Optional MRV2 checkout containing async_scheduling")
-    p.add_argument("--two-slot-root", help="Optional checkout containing dual_slot_decode")
-    p.add_argument("--mrv2-ref", default="main", help="Local fallback ref when current tree lacks MRV2 async")
-    p.add_argument("--two-slot-ref", default="feat/moondream-dual-slot", help="Local fallback ref for two_slot")
     p.add_argument("--batch-size", type=int, default=64, help="Real decode batch, not queue depth; try 128 if desired")
     p.add_argument("--input-len", type=int, default=512)
     p.add_argument("--trace-steps", type=int, default=6, help="Requested complete decode batches in saved trace")
@@ -140,8 +109,6 @@ def parse_args(argv=None):
     p.add_argument("--check-seeds", nargs="+", type=int, default=[42, 43])
     p.add_argument("--check-repeats", type=int, default=2, help="Repeated workloads in one engine, >=2")
     p.add_argument("--checks-only", action="store_true", help="Run correctness suite without collecting a trace")
-    p.add_argument("--same-source", action="store_true",
-                   help="Fair comparison: run every mode from the current checkout only; never fall back to git refs")
     p.add_argument("--timeout", type=int, default=1800)
     p.add_argument("--worker", choices=MODES, help=argparse.SUPPRESS)
     p.add_argument("--source-root", help=argparse.SUPPRESS)
@@ -198,47 +165,18 @@ def workload_kv_pool(ModelRunner, torch, batch_size, max_model_len):
 
 def audit_graphs(engine, mode, batch_size):
     r, config = engine.model_runner, engine.config
-    dual = getattr(engine, "_dual_pipeline", None)
-    banks = getattr(r.cuda_graphs, "decode_graph_banks", None)
-    banks = banks or [(r.cuda_graphs.decode_graphs, r.cuda_graphs.decode_graph_vars, None)]
-    expected = 2 if mode == "two_slot" else 1
-    if len(banks) != expected or any(batch_size not in bank[0] for bank in banks):
-        raise RuntimeError(f"Expected {expected} graph bank(s) with exact BS={batch_size}")
-    graphs = [bank[0][batch_size] for bank in banks]
-    if len({id(g) for g in graphs}) != expected:
-        raise RuntimeError("Graph objects alias across slots")
-    if mode == "two_slot":
-        if not config.dual_slot_decode or dual is None or len(r.decode_slots) != 2:
-            raise RuntimeError("Dual-slot path is not active")
-        for name in ("input_ids", "positions", "slot_mapping", "context_lens", "block_tables", "outputs"):
-            ptrs = [int(bank[1][name].data_ptr()) for bank in banks]
-            if len(set(ptrs)) != 2:
-                raise RuntimeError(f"Two graph banks share {name}")
-        for mapping in ("cpu", "gpu"):
-            for name in getattr(r.decode_slots[0], mapping):
-                if getattr(r.decode_slots[0], mapping)[name].data_ptr() == getattr(r.decode_slots[1], mapping)[name].data_ptr():
-                    raise RuntimeError(f"Execution slots share {mapping}.{name}")
-        for name in ("tokens_cpu", "tokens_gpu", "blocks_cpu", "blocks_gpu", "batch_slots_gpu", "batch_slots_cpu"):
-            if getattr(r.decode_slots[0], name).data_ptr() == getattr(r.decode_slots[1], name).data_ptr():
-                raise RuntimeError(f"Execution slots share {name}")
-        for name in ("h2d_done", "sample_done", "d2h_done"):
-            if getattr(r.decode_slots[0], name) is getattr(r.decode_slots[1], name):
-                raise RuntimeError(f"Execution slots share event {name}")
-        if any(not callable(getattr(r, name, None)) for name in ("launch_slot", "sample_slot", "release_slot")):
-            raise RuntimeError("Missing production slot lifecycle API")
-    else:
-        if dual is not None or getattr(config, "dual_slot_decode", False):
-            raise RuntimeError("MRV2 mode unexpectedly uses dual slots")
-        if bool(getattr(config, "async_scheduling", False)) != (mode == "async"):
-            raise RuntimeError("Actual async_scheduling differs from requested mode")
-    return graphs, {"graph_banks": expected, "active_graphs_at_batch": expected,
-                    "captured_batch_sizes": sorted(banks[0][0]),
+    graphs_by_bs = r.cuda_graphs.decode_graphs
+    if batch_size not in graphs_by_bs:
+        raise RuntimeError(f"Expected a decode graph with exact BS={batch_size}")
+    graphs = [graphs_by_bs[batch_size]]
+    if bool(getattr(config, "async_scheduling", False)) != (mode == "async"):
+        raise RuntimeError("Actual async_scheduling differs from requested mode")
+    return graphs, {"graph_banks": 1, "active_graphs_at_batch": 1,
+                    "captured_batch_sizes": sorted(graphs_by_bs),
                     "async_scheduling": bool(getattr(config, "async_scheduling", False)),
-                    "dual_slot_decode": bool(getattr(config, "dual_slot_decode", False)),
                     "queue_depth": engine.max_concurrent_batches, "async_output": r.async_output,
-                    "decode_compute_stream": str(getattr(r, "decode_compute_stream", None)),
-                    "static_buffer_ptrs": [{k: int(v.data_ptr()) for k, v in bank[1].items()
-                                             if hasattr(v, "data_ptr")} for bank in banks]}
+                    "static_buffer_ptrs": {k: int(v.data_ptr()) for k, v in r.cuda_graphs.decode_graph_vars.items()
+                                           if hasattr(v, "data_ptr")}}
 
 
 class Labels:
@@ -246,18 +184,15 @@ class Labels:
     def __init__(self, engine, torch, graphs):
         self.engine, self.torch, self.graphs = engine, torch, graphs
         self.runner = engine.model_runner
-        self.dual = getattr(engine, "_dual_pipeline", None)
         self.undo = ExitStack()
         self.next_id = 0
         self.active = None
         self.executed = deque()
         self.last_waited = None
-        self.committing = False
-        self.commit_scope = None
         self.slots = {}
         self.batches = []
 
-    def mark(self, stage, bid, slot):
+    def mark(self, stage, bid, slot=None):
         suffix = f"/slot{slot}" if slot is not None else ""
         return self.torch.profiler.record_function(f"nq/{stage}/b{bid:05d}{suffix}")
 
@@ -281,30 +216,27 @@ class Labels:
         def execute(seqs, is_prefill):
             if is_prefill:
                 raise RuntimeError("Prefill entered the decode-only diagnostic window")
-            bid, slot = self.next_id, int(getattr(r, "_active_slot_id", 0)) if self.dual else 0
+            bid = self.next_id
             self.next_id += 1
-            self.slots[bid] = slot
-            self.batches.append({"batch_id": bid, "slot": slot, "batch_size": len(seqs)})
-            with self.activate(bid), self.mark("execute", bid, slot):
+            self.batches.append({"batch_id": bid, "batch_size": len(seqs)})
+            with self.activate(bid), self.mark("execute", bid):
                 result = original_execute(seqs, is_prefill)
             self.executed.append(bid)
             return result
         self.patch(r, "execute_model", execute)
 
-        owner, name = (self.dual, "_plan_decode") if self.dual else (self.engine.scheduler, "schedule")
-        original_plan = getattr(owner, name)
+        original_plan = self.engine.scheduler.schedule
         def plan(*args, **kwargs):
-            # Slot is assigned by the production pipeline after planning.
-            with self.mark("schedule", self.next_id, None):
+            with self.mark("schedule", self.next_id):
                 return original_plan(*args, **kwargs)
-        self.patch(owner, name, plan)
+        self.patch(self.engine.scheduler, "schedule", plan)
 
-        for slot, graph in enumerate(self.graphs):
+        for graph in self.graphs:
             original_replay = graph.replay
-            def replay(*args, _original=original_replay, _slot=slot, **kwargs):
+            def replay(*args, _original=original_replay, **kwargs):
                 if self.active is None:
                     raise RuntimeError("Graph replay outside a tracked decode execution")
-                with self.mark("launch", self.active, _slot):
+                with self.mark("launch", self.active):
                     return _original(*args, **kwargs)
             self.patch(graph, "replay", replay)
 
@@ -312,14 +244,14 @@ class Labels:
         def logits(*args, **kwargs):
             if self.active is None:
                 raise RuntimeError("LM head outside tracked execute/sample")
-            with self.mark("lm_head", self.active, self.slots[self.active]):
+            with self.mark("lm_head", self.active):
                 return original_logits(*args, **kwargs)
         self.patch(r.model, "compute_logits", logits)
 
         original_sample = r.sample_tokens
         def sample(*args, **kwargs):
             bid = self.executed.popleft()
-            with self.activate(bid), self.mark("sample_call", bid, self.slots[bid]):
+            with self.activate(bid), self.mark("sample_call", bid):
                 output = original_sample(*args, **kwargs)
             if output is None:
                 raise RuntimeError("Rank-0 sample_tokens returned no output")
@@ -333,38 +265,20 @@ class Labels:
             bid = getattr(output, "_nq_trace_batch_id", None)
             if bid is None:  # Already queued before profiler activation.
                 return original_get(output, *args, **kwargs)
-            with self.mark("result_wait", bid, self.slots[bid]):
+            with self.mark("result_wait", bid):
                 value = original_get(output, *args, **kwargs)
             self.last_waited = bid
-            # In the production dual implementation get_output is the FIRST
-            # operation of _commit_oldest. Mark only its subsequent CPU work.
-            if self.committing:
-                self.commit_scope = self.mark("commit", bid, self.slots[bid])
-                self.commit_scope.__enter__()
             return value
         self.patch(AsyncModelOutput, "get_output", get_output)
 
-        if self.dual:
-            original_commit = self.dual._commit_oldest
-            def commit(*args, **kwargs):
-                self.committing = True
-                try:
-                    return original_commit(*args, **kwargs)
-                finally:
-                    self.committing = False
-                    if self.commit_scope is not None:
-                        self.commit_scope.__exit__(*sys.exc_info())
-                        self.commit_scope = None
-            self.patch(self.dual, "_commit_oldest", commit)
-        else:
-            original_commit = self.engine.scheduler.postprocess
-            def commit(*args, **kwargs):
-                bid = self.last_waited
-                if bid is None:
-                    return original_commit(*args, **kwargs)
-                with self.mark("commit", bid, self.slots[bid]):
-                    return original_commit(*args, **kwargs)
-            self.patch(self.engine.scheduler, "postprocess", commit)
+        original_commit = self.engine.scheduler.postprocess
+        def commit(*args, **kwargs):
+            if self.last_waited is None:
+                return original_commit(*args, **kwargs)
+            with self.mark("commit", self.last_waited):
+                self.last_waited = None
+                return original_commit(*args, **kwargs)
+        self.patch(self.engine.scheduler, "postprocess", commit)
         return self
 
     def __exit__(self, *exc):
@@ -450,8 +364,7 @@ def analyze(data):
         graph = [min(e["ts"] for e in k["launch"]), max(end(e) for e in k["launch"])]
         head = [min(e["ts"] for e in k["lm_head"]), max(end(e) for e in k["lm_head"])]
         sample = [min(e["ts"] for e in k["sample_call"]), max(end(e) for e in k["sample_call"])]
-        slot = int(MARKER.fullmatch(s["launch"]["name"])[3])
-        frame = dict(batch_id=bid, slot=slot,
+        frame = dict(batch_id=bid,
                      plan=[s["schedule"]["ts"], launch["ts"]], launch=[launch["ts"], end(launch)],
                      graph=graph, lm_head=head, forward=merge([graph, head]), sample=sample,
                      commit=[s["commit"]["ts"], end(s["commit"])],
@@ -467,7 +380,6 @@ def analyze(data):
 def summarize_frames(frames):
     adjacent = [(a, b) for a, b in zip(frames, frames[1:]) if b["batch_id"] == a["batch_id"] + 1]
     result = {"complete_batches": len(frames), "adjacent_pairs": len(adjacent),
-              "slot_sequence": [f["slot"] for f in frames],
               "graph_kernel_counts": [f["graph_kernel_count"] for f in frames]}
     for name in ("plan", "launch"):
         result[name + "_next_overlaps_forward"] = sum(overlap(b[name], a["forward"]) > 0 for a, b in adjacent)
@@ -490,24 +402,21 @@ def summarize_frames(frames):
 def derived_events(frames, pid, mode):
     result = [{"ph": "M", "name": "process_name", "pid": pid, "tid": 0,
                "args": {"name": f"{mode}: plan includes prepare; launch is CPU; forward/sample are GPU"}}]
-    tracks = {1: "CPU: plan / launch / commit", 2: "GPU: forward / sample", 3: "GPU: cuda_graph_slot0"}
-    if mode == "two_slot":
-        tracks[4] = "GPU: cuda_graph_slot1"
+    tracks = {1: "CPU: plan / launch / commit", 2: "GPU: forward / sample", 3: "GPU: cuda_graph"}
     for tid, label in tracks.items():
         result.append({"ph": "M", "name": "thread_name", "pid": pid, "tid": tid, "args": {"name": label}})
     for i, frame in enumerate(frames):
         def add(name, tid, span):
             result.append({"ph": "X", "cat": "nq_derived", "pid": pid, "tid": tid,
                            "name": name, "ts": span[0], "dur": span[1] - span[0],
-                           "args": {"batch_id": frame["batch_id"], "slot": frame["slot"],
+                           "args": {"batch_id": frame["batch_id"],
                                     "source": "native CUDA correlation / CPU markers", "may_contain_kernel_gaps": True}})
         for name in ("plan", "launch", "commit"):
             add(f"{name} {i}", 1, frame[name])
         for interval in frame["forward"]:
             add(f"forward {i}", 2, interval)
         add(f"sample {i}", 2, frame["sample"])
-        label = f"cuda_graph_slot{frame['slot']}" if mode == "two_slot" else "cuda_graph"
-        add(label, 3 + frame["slot"], frame["graph"])
+        add("cuda_graph", 3, frame["graph"])
     return result
 
 
@@ -786,7 +695,6 @@ def forced_eos_policy(runner, seqs, eos, vocab_size, torch):
 def lifecycle_state(engine):
     scheduler, runner = engine.scheduler, engine.model_runner
     manager = scheduler.block_manager
-    dual = getattr(engine, "_dual_pipeline", None)
     state = dict(engine_finished=engine.is_finished(), waiting=len(scheduler.waiting),
                  running=len(scheduler.running), in_flight=len(scheduler.in_flight),
                  batch_queue=len(engine.batch_queue), input_slots=len(runner.input_batch.seq_id_to_slot),
@@ -796,13 +704,8 @@ def lifecycle_state(engine):
                  async_cohort_open=getattr(scheduler, "async_decode", None) is not None,
                  pending_sampling=getattr(runner, "_pending", None) is not None,
                  pending_sampling_plan=getattr(runner, "_sampling_plan", None) is not None,
-                 retained_target_hidden=getattr(runner, "_target_hidden", None) is not None,
-                 slot_busy=sum(s.busy for s in getattr(runner, "decode_slots", [])),
-                 slot_pending=sum(s.pending is not None for s in getattr(runner, "decode_slots", [])),
-                 slot_outputs=sum(s.output is not None for s in getattr(runner, "decode_slots", [])),
-                 dual_pending=len(dual.pending) if dual else 0, dual_requests=len(dual.requests) if dual else 0)
-    zero = ("waiting", "running", "in_flight", "batch_queue", "input_slots", "used_kv_blocks",
-            "slot_busy", "slot_pending", "slot_outputs", "dual_pending", "dual_requests")
+                 retained_target_hidden=getattr(runner, "_target_hidden", None) is not None)
+    zero = ("waiting", "running", "in_flight", "batch_queue", "input_slots", "used_kv_blocks")
     state["passed"] = bool(state["engine_finished"] and not state["async_cohort_open"]
                            and not state["pending_sampling"] and not state["pending_sampling_plan"]
                            and not state["retained_target_hidden"] and all(state[k] == 0 for k in zero)
@@ -910,9 +813,8 @@ def run_worker(a):
     mode = a.worker
     out = Path(a.worker_output) if a.worker_output else Path(a.output_dir) / mode
     out.mkdir(parents=True, exist_ok=True)
-    needed_field = {"two_slot": "dual_slot_decode", "async": "async_scheduling"}.get(mode)
-    if needed_field and needed_field not in Config.__dataclass_fields__:
-        raise RuntimeError(f"This source does not implement {needed_field}; refusing a silent fallback")
+    if "async_scheduling" not in Config.__dataclass_fields__:
+        raise RuntimeError("This source does not implement async_scheduling; refusing a silent fallback")
     capture_ticks = a.trace_steps + 4
     output_len = a.settle_steps + capture_ticks + 9
     block_size = Config.__dataclass_fields__["kvcache_block_size"].default
@@ -930,10 +832,7 @@ def run_worker(a):
                   max_num_batched_tokens=a.batch_size * max_input, max_model_len=max_model_len,
                   enable_prefix_cache=False, enforce_eager=False, use_prefill_cudagraph=False,
                   gpu_memory_utilization=a.gpu_memory_utilization)
-    if "async_scheduling" in Config.__dataclass_fields__:
-        kwargs["async_scheduling"] = mode == "async"
-    if "dual_slot_decode" in Config.__dataclass_fields__:
-        kwargs["dual_slot_decode"] = mode == "two_slot"
+    kwargs["async_scheduling"] = mode == "async"
     engine = None
     try:
         torch.manual_seed(a.seed)
@@ -941,14 +840,13 @@ def run_worker(a):
         with torch.inference_mode(), workload_kv_pool(ModelRunner, torch, a.batch_size, max_model_len):
             engine = LLMEngine(a.model, **kwargs)
         engine.max_concurrent_batches = 1 if mode == "no_async" else 2
-        engine.model_runner.async_output = True  # Keep D2H policy identical in all three modes.
+        engine.model_runner.async_output = True  # Keep D2H policy identical in both modes.
         graphs, audit = audit_graphs(engine, mode, a.batch_size)
         metadata.update(actual=audit, kv_blocks=engine.config.num_kvcache_blocks,
                         quantization_methods=dict(Counter(
                             type(getattr(m, "quant_method", None)).__name__
                             for m in engine.model_runner.model.modules()
-                            if getattr(m, "quant_method", None) is not None)),
-                        same_source=bool(a.same_source))
+                            if getattr(m, "quant_method", None) is not None)))
         sampler_audit = SamplerPathAudit(engine, torch)
         save(out / "metadata.json", metadata)
 
@@ -982,9 +880,6 @@ def run_worker(a):
             runner = engine.model_runner
             if runner.input_batch.seq_id_to_slot or engine.scheduler.block_manager.used_block_ids:
                 raise RuntimeError("Persistent request slots or KV pages leaked")
-            dual = getattr(engine, "_dual_pipeline", None)
-            if dual is not None and (dual.pending or dual.requests or any(s.busy for s in runner.decode_slots)):
-                raise RuntimeError("Execution slots did not drain")
 
         warmup_ms = []
         trace_outputs = None
@@ -1034,8 +929,6 @@ def run_worker(a):
                                   "Original native kernels/operators are preserved; edge context may be partial."])
             if summary["sample_before_next_graph"] != summary["adjacent_pairs"]:
                 raise RuntimeError("GPU token dependency order failed: sample(n) must precede graph(n+1)")
-            if mode == "two_slot" and any(a["slot"] == b["slot"] for a,b in zip(selected, selected[1:])):
-                raise RuntimeError("The actual dual graph slots did not alternate")
             summary["pipeline_observed"] = bool(summary["launch_next_overlaps_forward"])
             summary["expected_overlap_observed"] = (not summary["pipeline_observed"] if mode == "no_async" else summary["pipeline_observed"])
             (out / "trace.json").write_bytes(encoded)
@@ -1069,123 +962,82 @@ def parent(a):
         destination = out / mode
         if destination.exists() and any(destination.iterdir()):
             raise RuntimeError(f"Output directory is not empty: {destination}; use a new --output-dir")
-    with ExitStack() as stack:
-        cache = {}
-        def resolve(which):
-            if which in cache:
-                return cache[which]
-            field = "async_scheduling" if which == "mrv2" else "dual_slot_decode"
-            explicit = a.mrv2_root if which == "mrv2" else a.two_slot_root
-            if a.same_source and explicit:
-                raise RuntimeError("--same-source forbids per-mode source roots")
-            root = Path(explicit).resolve() if explicit else repo
-            if field in config_fields(root):
-                info = source_info(root)
-            elif explicit or a.same_source:
-                raise RuntimeError(f"--same-source: the current checkout lacks {field}; "
-                                   "ref fallback is disabled for a fair comparison")
-            else:
-                ref = a.mrv2_ref if which == "mrv2" else a.two_slot_ref
-                root, sha = archive_ref(repo, ref, stack)
-                if field not in config_fields(root):
-                    raise RuntimeError(f"{ref} does not implement {field}")
-                info = source_info(root, ref)
-                info.update(commit=sha, dirty=False, archive_from=str(repo))
-            cache[which] = (root, info)
-            return root, info
-        if a.same_source:
-            roots = {str(resolve(which)[0]) for which in ("mrv2", "two_slot")}
-            if len(roots) != 1:
-                raise RuntimeError(f"--same-source resolved multiple roots: {sorted(roots)}")
-        jobs = [(mode, *resolve("two_slot" if mode == "two_slot" else "mrv2")) for mode in modes]
-        failures, completed, references = [], {}, {}
+    if "async_scheduling" not in config_fields(repo):
+        raise RuntimeError("The current checkout does not implement async_scheduling")
+    info = source_info(repo)
+    root = repo
 
-        def launch(mode, root, info, destination, checks_only):
-            destination.mkdir(parents=True, exist_ok=True)
-            command = [sys.executable, str(Path(__file__).resolve()), "--model", a.model,
-                       "--worker", mode, "--source-root", str(root), "--source-json", json.dumps(info),
-                       "--worker-output", str(destination),
-                       "--batch-size", str(a.batch_size), "--input-len", str(a.input_len),
-                       "--trace-steps", str(a.trace_steps), "--max-trace-mb", str(a.max_trace_mb),
-                       "--settle-steps", str(a.settle_steps), "--warmup-rounds", str(a.warmup_rounds),
-                       "--gpu-memory-utilization", str(a.gpu_memory_utilization), "--seed", str(a.seed),
-                       "--check-steps", str(a.check_steps), "--check-repeats", str(a.check_repeats),
-                       "--check-seeds", *map(str,a.check_seeds), "--output-dir", str(out)]
-            if checks_only:
-                command.append("--checks-only")
-            if a.same_source:
-                command.append("--same-source")
-            label = f"{destination.relative_to(out)}"
-            print(f"[{label}] source={info['commit'] or root}; log={destination/'run.log'}", flush=True)
-            env = dict(os.environ, PYTHONPATH=str(root / "src"), PYTHONDONTWRITEBYTECODE="1")
-            failed = False
-            with (destination / "run.log").open("w", encoding="utf-8") as log:
-                try:
-                    result = subprocess.run(command, env=env, cwd=root, stdout=log, stderr=subprocess.STDOUT, timeout=a.timeout)
-                    failed = result.returncode != 0
-                except subprocess.TimeoutExpired:
-                    log.write("\nWorker timeout\n")
-                    failed = True
-            path = destination / "check_outputs.json"
-            if failed or not path.is_file():
-                failures.append(label)
-                print(f"[{label}] FAILED; inspect run.log / failure.json", flush=True)
-                return None
-            suite = json.loads(path.read_text(encoding="utf-8"))
-            summary = json.loads((destination / "summary.json").read_text(encoding="utf-8"))
-            if summary.get("trace_collected"):
-                print(f"[{label}] {summary['complete_batches']} batches, {summary['trace_mib']:.2f} MiB, "
-                      f"launch overlap {summary['launch_next_overlaps_forward']}/{summary['adjacent_pairs']}", flush=True)
-            print(f"[{label}] output workloads={len(suite['runs'])}; local checks={suite['passed']}", flush=True)
-            return suite
+    def launch(mode, destination, checks_only):
+        destination.mkdir(parents=True, exist_ok=True)
+        command = [sys.executable, str(Path(__file__).resolve()), "--model", a.model,
+                   "--worker", mode, "--source-root", str(root), "--source-json", json.dumps(info),
+                   "--worker-output", str(destination),
+                   "--batch-size", str(a.batch_size), "--input-len", str(a.input_len),
+                   "--trace-steps", str(a.trace_steps), "--max-trace-mb", str(a.max_trace_mb),
+                   "--settle-steps", str(a.settle_steps), "--warmup-rounds", str(a.warmup_rounds),
+                   "--gpu-memory-utilization", str(a.gpu_memory_utilization), "--seed", str(a.seed),
+                   "--check-steps", str(a.check_steps), "--check-repeats", str(a.check_repeats),
+                   "--check-seeds", *map(str, a.check_seeds), "--output-dir", str(out)]
+        if checks_only:
+            command.append("--checks-only")
+        label = f"{destination.relative_to(out)}"
+        print(f"[{label}] source={info['commit'] or root}; log={destination/'run.log'}", flush=True)
+        env = dict(os.environ, PYTHONPATH=str(root / "src"), PYTHONDONTWRITEBYTECODE="1")
+        failed = False
+        with (destination / "run.log").open("w", encoding="utf-8") as log:
+            try:
+                result = subprocess.run(command, env=env, cwd=root, stdout=log, stderr=subprocess.STDOUT, timeout=a.timeout)
+                failed = result.returncode != 0
+            except subprocess.TimeoutExpired:
+                log.write("\nWorker timeout\n")
+                failed = True
+        path = destination / "check_outputs.json"
+        if failed or not path.is_file():
+            failures.append(label)
+            print(f"[{label}] FAILED; inspect run.log / failure.json", flush=True)
+            return None
+        suite = json.loads(path.read_text(encoding="utf-8"))
+        summary = json.loads((destination / "summary.json").read_text(encoding="utf-8"))
+        if summary.get("trace_collected"):
+            print(f"[{label}] {summary['complete_batches']} batches, {summary['trace_mib']:.2f} MiB, "
+                  f"launch overlap {summary['launch_next_overlaps_forward']}/{summary['adjacent_pairs']}", flush=True)
+        print(f"[{label}] output workloads={len(suite['runs'])}; local checks={suite['passed']}", flush=True)
+        return suite
 
-        # The requested three modes remain the only top-level output folders.
-        # Each distinct source gets its own serial control, because e.g. fused
-        # norm implementations differ between the public branches.
-        for mode, root, info in jobs:
-            suite = launch(mode, root, info, out/mode, a.checks_only)
-            if suite is not None:
-                completed[mode] = suite
-                if mode == "no_async":
-                    references[str(root)] = (suite, out/mode/"check_outputs.json")
-        for mode, root, info in jobs:
+    # Both modes share one source and one serial reference.
+    failures, completed = [], {}
+    reference_suite = None
+    reference_path = None
+    for mode in modes:
+        suite = launch(mode, out / mode, a.checks_only)
+        if suite is None:
+            continue
+        completed[mode] = suite
+        if mode == "no_async":
+            reference_suite, reference_path = suite, out / "no_async" / "check_outputs.json"
+    if "no_async" not in completed and "async" in completed:
+        reference_suite = launch("no_async", out / "no_async" / "serial_reference", True)
+        if reference_suite is not None:
+            reference_path = out / "no_async" / "serial_reference" / "check_outputs.json"
+    if reference_suite is not None:
+        for mode in modes:
             if mode not in completed:
                 continue
-            if str(root) not in references:
-                folder = out/mode/"serial_reference"
-                reference = launch("no_async", root, info, folder, True)
-                if reference is None:
-                    continue
-                references[str(root)] = (reference, folder/"check_outputs.json")
-            reference, reference_path = references[str(root)]
-            report = consistency_report(mode, completed[mode], reference, reference_path, completed)
+            report = consistency_report(mode, completed[mode], reference_suite, reference_path, completed)
             report.update(source=info, compared_modes=list(completed), requested_modes=list(modes),
                           all_requested_modes_completed=len(completed) == len(modes))
             report["passed"] &= report["all_requested_modes_completed"]
-            # Compare serial controls across sources too. If serial controls
-            # already diverge, the cross-source difference predates overlap.
-            report["serial_source_comparisons"] = {
-                key: compare_suites(other, reference) for key,(other,_) in references.items() if key != str(root)}
-            save(out/mode/"consistency.json", report)
-            summary_path = out/mode/"summary.json"
+            save(out / mode / "consistency.json", report)
+            summary_path = out / mode / "summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             summary.update(consistency_passed=report["passed"], scheduling_checks_passed=report["scheduling_checks_passed"])
             save(summary_path, summary)
-            print(f"[{mode}] same-source serial={report['same_source_tokens']['passed']}; "
+            print(f"[{mode}] serial reference={report['same_source_tokens']['passed']}; "
                   f"cross-mode tokens={report['all_compared_tokens_equal']}; repeats={report['repeated_outputs']['passed']}", flush=True)
             if not report["passed"]:
-                failures.append(mode+"_token_consistency")
-        # Refresh source-control comparisons after all optional controls exist.
-        for mode, root, _ in jobs:
-            path = out/mode/"consistency.json"
-            if path.is_file():
-                report = json.loads(path.read_text(encoding="utf-8"))
-                reference = references[str(root)][0]
-                report["serial_source_comparisons"] = {
-                    key:compare_suites(other, reference) for key,(other,_) in references.items() if key != str(root)}
-                save(path, report)
-        if failures:
-            raise RuntimeError("Failed checks: " + ", ".join(failures))
+                failures.append(mode + "_token_consistency")
+    if failures:
+        raise RuntimeError("Failed checks: " + ", ".join(failures))
 
 
 def main():

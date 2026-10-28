@@ -23,7 +23,6 @@ class CudaGraphManager:
         self.decode_graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self.decode_graph_pool = None
         self.decode_graph_vars: dict[str, torch.Tensor] | None = None
-        self.decode_graph_banks: list[tuple] = []
 
         self.prefill_graph_sizes: list[int] = []
         self.prefill_graphs: dict[int, dict[int, dict]] = {}
@@ -58,16 +57,9 @@ class CudaGraphManager:
             self.capture_prefill()
 
     def _capture_decode(self) -> None:
-        self.decode_graph_banks.clear()
-        count = 2 if getattr(self.config, "dual_slot_decode", False) else 1
-        for _ in range(count):
-            # Each slot has its own graph pool, inputs and hidden output.
-            # Model weights, KV and persistent GDN pools remain shared.
-            self._capture_decode_bank()
-            self.decode_graph_banks.append((self.decode_graphs,
-                                           self.decode_graph_vars,
-                                           self.decode_graph_pool))
-        self.decode_graphs, self.decode_graph_vars, self.decode_graph_pool = self.decode_graph_banks[0]
+        # One graph pool shared by all batch sizes; inputs and hidden output
+        # live in the single decode_graph_vars staging buffers.
+        self._capture_decode_bank()
 
     def _capture_decode_bank(self) -> None:
         config = self.config
@@ -238,9 +230,6 @@ class CudaGraphManager:
     def run_decode(self, input_ids: torch.Tensor, positions: torch.Tensor):
         bs = input_ids.size(0)
         graphs, graph_vars = self.decode_graphs, self.decode_graph_vars
-        if self.decode_graph_banks:
-            slot_id = getattr(self.runner, "_active_slot_id", 0)
-            graphs, graph_vars, _ = self.decode_graph_banks[slot_id]
         self.record_dispatch("decode", bs, bs in graphs, bs)
         if bs not in graphs:
             return self.runner.project_target_hidden(self.model(input_ids, positions))
@@ -276,7 +265,6 @@ class CudaGraphManager:
         self.decode_graphs.clear()
         self.decode_graph_vars = None
         self.decode_graph_pool = None
-        self.decode_graph_banks.clear()
 
     def _allocate_piecewise_buffers(
         self,

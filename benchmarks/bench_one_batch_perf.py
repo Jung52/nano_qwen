@@ -110,8 +110,6 @@ def run_worker(a):
                   gpu_memory_utilization=a.gpu_memory_utilization)
     if "async_scheduling" in Config.__dataclass_fields__:
         kwargs["async_scheduling"] = mode == "async"
-    if "dual_slot_decode" in Config.__dataclass_fields__:
-        kwargs["dual_slot_decode"] = mode == "two_slot"
     engine = None
     try:
         torch.manual_seed(a.seed)
@@ -160,10 +158,6 @@ def run_worker(a):
                 raise RuntimeError("Unexpected completion count")
             if engine.model_runner.input_batch.seq_id_to_slot or engine.scheduler.block_manager.used_block_ids:
                 raise RuntimeError("Persistent request slots or KV pages leaked")
-            dual = getattr(engine, "_dual_pipeline", None)
-            if dual is not None and (dual.pending or dual.requests
-                                     or any(s.busy for s in engine.model_runner.decode_slots)):
-                raise RuntimeError("Execution slots did not drain")
             digest = hashlib.sha256(
                 json.dumps([s.completion_token_ids for s in seqs]).encode()).hexdigest()
             return dict(wall_ms=wall_ms, tokens_per_s=a.batch_size * a.output_len / (wall_ms / 1000),
@@ -193,10 +187,9 @@ def run_worker(a):
 
 def parent(a):
     repo = find_repo(a.repo_root)
-    for field in ("async_scheduling", "dual_slot_decode"):
-        if field not in config_fields(repo):
-            raise RuntimeError(f"The current checkout lacks {field}; this benchmark compares "
-                               "the three unified modes and never falls back to other refs")
+    if "async_scheduling" not in config_fields(repo):
+        raise RuntimeError("The current checkout lacks async_scheduling; this benchmark compares "
+                           "the unified modes and never falls back to other refs")
     info = source_info(repo)
     if info.get("dirty"):
         print(f"WARNING: uncommitted changes at {repo} are included in every mode", flush=True)

@@ -18,10 +18,6 @@ class Config:
     # Opt-in one-batch lookahead for steady decode. Prefill/admission still
     # use the original scheduler. Keep False for the reference baseline.
     async_scheduling: bool = False
-    # Opt-in dual Graph-bank execution slots. Mutually exclusive with the
-    # single-graph lookahead above; ported scheduling only, operators stay
-    # identical across all three modes.
-    dual_slot_decode: bool = False
     # GDN recurrent state is not part of the prefix-cache block payload.
     # Reject hybrid prefix reuse until matching state snapshots are cached.
     enable_prefix_cache: bool = False
@@ -38,10 +34,6 @@ class Config:
     def __post_init__(self):
         if self.async_scheduling and self.enable_prefix_cache:
             raise ValueError("async decode currently requires enable_prefix_cache=False")
-        if self.dual_slot_decode and self.enable_prefix_cache:
-            raise ValueError("dual_slot_decode does not support prefix-cache reuse")
-        if self.async_scheduling and self.dual_slot_decode:
-            raise ValueError("async_scheduling and dual_slot_decode are mutually exclusive scheduling modes")
         if self.tensor_parallel_size != 1:
             raise ValueError(
                 "Only tensor_parallel_size=1 is supported until multi-GPU "
