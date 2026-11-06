@@ -1,8 +1,9 @@
 import atexit
 import gc
 from collections import deque
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from time import perf_counter
+from typing import Iterator
 
 import torch
 import torch.multiprocessing as mp
@@ -10,12 +11,22 @@ from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
 from nano_qwen.config import Config
-from nano_qwen.engine.sequence import Sequence
+from nano_qwen.engine.sequence import Sequence, SequenceStatus
 from nano_qwen.sampling_params import SamplingParams
 from nano_qwen.utils.trace import trace_event
 
 from .model_runner import ModelRunner, find_free_port
 from ..scheduler import Scheduler
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    """Newly committed token IDs, including EOS when it terminates a request."""
+
+    request_id: int
+    token_ids: list[int]
+    finished: bool
+    finish_reason: str | None = None
 
 
 class LLMEngine:
@@ -321,6 +332,92 @@ class LLMEngine:
 
     def is_finished(self) -> bool:
         return self.scheduler.is_finished() and not self.batch_queue
+
+    def generate_stream(
+        self,
+        prompt: str | list[int],
+        sampling_params: SamplingParams,
+    ) -> Iterator[StreamChunk]:
+        """Stream one request on an idle engine without changing scheduling.
+
+        Read the authoritative owner only after step() commits a result.
+        Async execution views may already be one token ahead and must never
+        be exposed to the caller. The iterator exclusively owns the engine;
+        exhaust or close it before adding another request. Closing early
+        cancels at a yield boundary and retires queued work before slot reuse.
+        """
+        if not self.is_finished():
+            raise RuntimeError("generate_stream requires an idle engine")
+        if not isinstance(sampling_params.max_tokens, int) or sampling_params.max_tokens <= 0:
+            raise ValueError("max_tokens must be a positive integer")
+        tokens = self.tokenizer.encode(prompt) if isinstance(prompt, str) else list(prompt)
+        if not tokens:
+            raise ValueError("prompt must contain at least one token")
+        if len(tokens) + sampling_params.max_tokens > self.config.max_model_len:
+            raise ValueError(
+                f"Prompt ({len(tokens)}) + max_tokens ({sampling_params.max_tokens}) "
+                f"exceeds max_model_len ({self.config.max_model_len}); "
+                "reduce the output budget or reset/shorten the conversation"
+            )
+
+        seq = Sequence(tokens, sampling_params)
+        self.scheduler.add(seq)
+        emitted = 0
+        safe_to_retire = True
+        try:
+            while not seq.is_finished:
+                # Do not hold a thread-local inference-mode context across a
+                # yield: caller-side work should retain its original grad mode.
+                safe_to_retire = False
+                with torch.inference_mode():
+                    self.step()
+                safe_to_retire = True
+                committed = seq.num_completion_tokens
+                if committed == emitted:
+                    continue  # An intermediate prefill chunk has no output.
+                delta = seq.token_ids[seq.num_prompt_tokens + emitted:
+                                      seq.num_prompt_tokens + committed]
+                emitted = committed
+                reason = None
+                if seq.is_finished:
+                    reason = (
+                        "eos" if not seq.ignore_eos and seq.last_token == self.config.eos
+                        else "length"
+                    )
+                yield StreamChunk(seq.seq_id, delta, seq.is_finished, reason)
+        finally:
+            # An execution failure/interrupt can occur between reservation
+            # and enqueue. The caller must exit the engine in that case;
+            # attempting normal retirement could mask the original error.
+            if safe_to_retire:
+                self._retire_stream_request(seq)
+
+    def _retire_stream_request(self, seq: Sequence) -> None:
+        """Cancel/finish an exclusive stream, draining before releasing state."""
+        if getattr(self, "_exited", False):
+            return
+        # Finished owners discard lookahead results in AsyncDecodeCohort.
+        # Marking an interrupted owner finished also prevents extra commits.
+        seq.status = SequenceStatus.FINISHED
+        cohort = self.scheduler.async_decode
+        if cohort is not None:
+            cohort.draining = True
+        while self.batch_queue:
+            with torch.inference_mode():
+                self.step()
+        if self.scheduler.async_decode is not None:
+            self.scheduler.end_async_decode()
+
+        for queue in (self.scheduler.waiting, self.scheduler.running):
+            for owner in list(queue):
+                if owner.seq_id == seq.seq_id:
+                    queue.remove(owner)
+        # Normal completion and async retirement already release their owner.
+        # An early close immediately after prefill still owns its block/slot.
+        if seq.block_table:
+            self.scheduler.block_manager.deallocate(seq)
+            self.model_runner.call("remove_request", seq.seq_id)
+        self.scheduler.in_flight.discard(seq.seq_id)
 
     def generate(
         self,

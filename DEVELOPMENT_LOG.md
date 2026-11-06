@@ -350,3 +350,17 @@ P 端把 KV/GDN 逐张量直接拷入 LMCache 0.5.6 L1 的共享 CPU tensor 池�
 ### 稳定性补丁（同日）
 
 外部复查发现并修复四个问题：其一，`lmcache_shm` 在 `reserve_write/reserve_read` 抛异常（而非返回错误码）时泄漏 pidfd——复现为两条路径各注入 5 次异常、fd 各增加 5 个；现统一为 lease 注册前异常即关闭 fd，并以注入式回归锁住（fd 计数不变）。其二，pidfd 兼容从 `/tmp` sitecustomize shim 内化为 `lmcache_shm` 的模块级 syscall 直调 fallback（构造时探测一次、缺失快速失败），复现条件随仓库固定，服务/测试不再依赖外部 PYTHONPATH。其三，文档同步：README 将 PD 从“待探索”改为已落地并给出下一步（压力测试、请求队列、decode 合批；`require_idle()` 的空闲边界先保持，顺序多请求跑稳后再设计恢复期调度），SHM 文档移除“旧 HTTP 对照保留”的失效描述，本节“16 倍状态量”更正为“输入长度增加 16 倍、计入固定 GDN 状态后总快照体积约增加 1.72 倍”。其四，补回通用状态验证回归：权重哈希身份、目标上下文越界（失败保留快照可重试）、idle/async 守卫、脏 KV 尾页清零，连同 fd 泄漏测试合计回归 29 项全过（不再需要外部 shim）。
+
+## 13. 2026-11-06：终端流式交互入口与每轮 trace 诊断
+
+落地 `nano_qwen_interactive` 交互包并补齐两处环境适配。引擎侧新增 `generate_stream()`/`StreamChunk`（单请求流式产出已提交 token，含 EOS；提前 close 取消请求并先排空前瞻再释放 block/slot），调度、runner、算子与 CUDA Graph 捕获路径未动。`chat.py`/`__main__.py` 提供多轮交互（`/reset`、`/exit`）、Transformers `TextStreamer` 缓冲流式解码、greedy 温度映射与上下文预算校验；`__init__.py` 把 console script 接到同一入口。
+
+适配修复一：transformers 5.13 的 `apply_chat_template(tokenize=True)` 返回 `BatchEncoding`（非 `list[int]`，且不是 dict 实例），直接 `list()` 会得到键名导致 `last_token` 变 str、prefill 崩溃；`_prompt_ids` 按 `hasattr(keys)` 与批次行两层兼容，旧版与测试替身不受影响。
+
+适配修复二：`benchmarks/profile_forward_launch.py` 只事后设 `max_concurrent_batches=2` 而未在构造时传 `async_scheduling=True`，引擎静默走串行路径，首轮 B32 trace 误报 async 退化为 AFTER_FORWARD；补传参数并加防静默回退断言（与 `bench_one_batch_trace.py` 语义一致）。修复后 B32 复测 launch 全程被前一步 forward 覆盖（overlap API 起点早于 forward 结束 14.2ms）。
+
+新增 `chat_trace.py`：`--profile-steps N` 在每轮前 N 个 token 上采样 torch.profiler（Kineto 在 Graph 捕获前初始化，第 N 个 token 后停止，流式不受影响），导出 gz Chrome trace 并用纯 Python 按 CUPTI correlation 归因分析——只把拥有 ≥50 kernel 的 `cudaGraphLaunch` 当 decode replay（channel-fp8 存在 decode graph 外每步 6 个 `_per_channel_mm` 单 kernel 微 graph），GPU idle 只统计首个 replay 之后的 decode 阶段。逐步窗口用消费侧 `nqc/step/N` record_function scope 划界：串行/异步两种模式下每步的全部 enqueue 都落在发出其 graph launch 的那个 scope 内，避免了 launch 区间回退把下一步 staging kernel 算进本步、在串行模式制造假 overlap 的问题。产物含 summary.json 与双 lane timeline.svg（绿=GPU forward、橙=cudaGraphLaunch、红缝=idle）。B1 A/B：`--no-async-scheduling` overlap 0/6、idle 14.8%（profiler 下）；默认 7/7、5.4%。
+
+性能结论（无 profiler，B1 channel-fp8）：async 77.9 vs no_async 76.7 tok/s，收益约 1.5%——B1 每步 CPU 链（D2H 等待+commit+暂存+launch）亚毫秒，被 async 藏进 ~12.8ms 的 forward 之下后只剩 ~1.7% 空隙；串行暴露的同链路也仅 ~0.2-0.5ms。batch 增大 CPU 链变长收益才拉开（1028 的 B64 基准：async 21.19 vs no_async 23.71 ms/步）。CUPTI 对 kernel/API 的 CPU 开销会数倍放大串行模式暴露的 CPU 时间，trace 数字只作调度诊断。正确性：当前代码上 `bench_one_batch_trace --mode async` B64 复测 overlap 5/5 且 64 请求输出与同源串行参考逐 token 一致（18 workloads、profiled 与否一致）。
+
+测试：chat 控制流/CLI 23 项+5 子测试；真实 tiny hybrid CUDA（串行/异步 completion 与 GDN 状态逐位比较）3 项；async decode pipeline 回归 32 项。
