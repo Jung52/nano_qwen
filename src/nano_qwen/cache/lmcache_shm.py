@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 
-from .lmcache_l1 import validate_key
+from .shm_protocol import validate_key
 from .shm_protocol import CONTROL_LIMIT, validate_layout
 
 

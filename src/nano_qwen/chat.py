@@ -36,9 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Print per-turn token counts, latency and Graph hits to stderr")
     parser.add_argument("--profile-steps", type=int, default=0,
                         help="Profile the first N tokens of every turn with torch.profiler; "
-                             "the exported trace is analyzed for async launch overlap")
+                             "export labelled traces for offline analysis")
     parser.add_argument("--profile-dir", default="logs/chat_trace",
-                        help="Directory for per-turn traces and summaries (--profile-steps)")
+                        help="Directory for per-turn raw traces (--profile-steps)")
     return parser
 
 
@@ -111,47 +111,34 @@ def _stream_turn(engine, messages, args, torch, streamer_type, sampling_type,
     started = perf_counter()
     first = last = None
     reason = None
-    profiler = None
-    trace_line = None
+    session = None
     profiled_tokens = 0
     if args.profile_steps > 0:
-        # Lazy import: a normal chat never loads Kineto/profiler machinery.
-        from .chat_trace import finish_profiler, start_profiler
-        profiler = start_profiler(torch)
+        from .utils.profiling import ProfileSession
+        session = ProfileSession(torch, engine, args.profile_dir, turn_no).start()
     try:
         with closing(engine.generate_stream(ids, params)) as chunks:
-            step_no = 0
-            while True:
-                try:
-                    if profiler is not None:
-                        # Scope exactly one engine step (resume -> yield); the
-                        # analyzer maps each decode graph launch to the step
-                        # scope that issued it, in both scheduling modes.
-                        with torch.profiler.record_function(f"nqc/step/{step_no}"):
-                            chunk = next(chunks)
-                    else:
-                        chunk = next(chunks)
-                except StopIteration:
-                    break
-                step_no += 1
+            for chunk in chunks:
                 if chunk.token_ids:
                     last = perf_counter()
                     if first is None:
                         first = last
                     output.extend(chunk.token_ids)
                     streamer.put(torch.tensor(chunk.token_ids, dtype=torch.int64, device="cpu"))
-                    if profiler is not None:
+                    if session is not None and session.active:
                         profiled_tokens += len(chunk.token_ids)
                         if profiled_tokens >= args.profile_steps:
-                            trace_line = finish_profiler(profiler, args, turn_no)
-                            profiler = None
+                            session.stop()
                 if chunk.finished:
                     reason = chunk.finish_reason
     finally:
-        streamer.end()
-        if profiler is not None:  # Turn ended inside the profiled window.
-            trace_line = finish_profiler(profiler, args, turn_no)
-            profiler = None
+        try:
+            streamer.end()
+        finally:
+            if session is not None:
+                trace_line = session.finish()
+                if trace_line:
+                    print(trace_line, file=sys.stderr, flush=True)
 
     ended = perf_counter()
     if args.stats and output:
@@ -166,8 +153,6 @@ def _stream_turn(engine, messages, args, torch, streamer_type, sampling_type,
             f"decode graph/eager={graph}/{eager} | stop={reason}]",
             file=sys.stderr, flush=True,
         )
-    if trace_line:
-        print(trace_line, file=sys.stderr, flush=True)
     return engine.tokenizer.decode(
         output, skip_special_tokens=True, clean_up_tokenization_spaces=False,
     )
@@ -191,8 +176,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.profile_steps > 0:
             # Initialize Kineto before the engine captures decode CUDA Graphs.
-            from .chat_trace import init_kineto
-            init_kineto(torch)
+            from .utils.profiling import init_kineto
+            try:
+                init_kineto(torch)
+            except Exception as exc:
+                print(f"[trace] capture disabled: {exc!r}", file=sys.stderr)
+                args.profile_steps = 0
         print(f"Loading {args.model} ...", file=sys.stderr, flush=True)
         with torch.inference_mode():
             engine = engine_type(

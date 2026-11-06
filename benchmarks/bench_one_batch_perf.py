@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unprofiled wall-time benchmark for the three unified scheduling modes.
+"""Unprofiled wall-time benchmark for the two unified scheduling modes.
 
 Reuses the real engine paths from bench_one_batch_trace (same source root,
 same KV capacity policy, same graph audit) but never wraps the engine in
@@ -15,7 +15,7 @@ Model load, compilation, graph capture and all output verification stay
 outside the timed window. The main metric is the wall time of the fixed
 request set from enqueue to full drain. Tokens/s uses completed tokens.
 Measured rounds use identical prompts across modes (seed+round), so greedy
-outputs must match exactly across the three modes.
+outputs must match exactly across the two modes.
 
 Modes rotate their run order across batch sizes to cancel drift.
 """

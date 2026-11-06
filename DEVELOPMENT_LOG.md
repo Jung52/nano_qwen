@@ -364,3 +364,11 @@ P 端把 KV/GDN 逐张量直接拷入 LMCache 0.5.6 L1 的共享 CPU tensor 池�
 性能结论（无 profiler，B1 channel-fp8）：async 77.9 vs no_async 76.7 tok/s，收益约 1.5%——B1 每步 CPU 链（D2H 等待+commit+暂存+launch）亚毫秒，被 async 藏进 ~12.8ms 的 forward 之下后只剩 ~1.7% 空隙；串行暴露的同链路也仅 ~0.2-0.5ms。batch 增大 CPU 链变长收益才拉开（1028 的 B64 基准：async 21.19 vs no_async 23.71 ms/步）。CUPTI 对 kernel/API 的 CPU 开销会数倍放大串行模式暴露的 CPU 时间，trace 数字只作调度诊断。正确性：当前代码上 `bench_one_batch_trace --mode async` B64 复测 overlap 5/5 且 64 请求输出与同源串行参考逐 token 一致（18 workloads、profiled 与否一致）。
 
 测试：chat 控制流/CLI 23 项+5 子测试；真实 tiny hybrid CUDA（串行/异步 completion 与 GDN 状态逐位比较）3 项；async decode pipeline 回归 32 项。
+
+## 14. 2026-11-06：诊断与 benchmark 入口收敛（待实卡验收）
+
+聊天保留采集开关，dispatch 标记与安全导出移到 `utils/profiling.py`；分析、区间统计及离线绘图统一到 `benchmarks/trace_tools.py`，由 `bench_one_batch_trace.py --analyze` 调用。删除两个重复 pipeline profiler 和旧 `chat_trace.py`。不改 engine、scheduler、模型、算子、Graph 捕获或 GDN/KV 生命周期。
+
+修正旧诊断口径：消费 scope 在流水填充时可包含两个 dispatch，不能作为一个 GPU forward 窗口；launch 在 GPU 开始前完成属于 PREQUEUED，不是实际重叠。新分析只使用显式 dispatch 标记与 CUPTI correlation，物理 kernel 区间交集与 forward span 分开记录。缺标记、缺相关性或相关 ID 归属冲突时不猜测；device_idle 纳入 memcpy/memset。此前第13节的 overlap 比例保留为旧分析器输出，需重采集/重分析后才能用于判定；不修改原有无 profiler 性能数据。
+
+通用模式新增 `async_scheduling`，构造时显式传入并检查，版本标记 `explicit-async-v2`。历史 queue-only 结果不与新协议合并。固定 batch 旧计时入口保留其默认关闭 lookahead 的口径，但暴露显式开关并记录实际配置。移除未引用的空壳包与 logger，将唯一剩余的 transfer_id 验证函数并入 SHM control protocol；既有状态校验和数值回归保留。

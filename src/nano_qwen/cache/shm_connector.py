@@ -11,7 +11,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
-from .lmcache_l1 import validate_key
+from .shm_protocol import validate_key
 from .shm_protocol import CONTROL_LIMIT, ITEM_SIZES, validate_layout
 
 

@@ -6,6 +6,9 @@
 
 | 文件 | 用途 |
 |---|---|
+| `bench_one_batch_perf.py` | 两种调度模式的无 profiler 正式计时与 token 对照 |
+| `bench_one_batch_trace.py`、`trace_tools.py` | 统一的 dispatch 归因、launch/forward/commit 分析、短窗口 trace 与离线绘图 |
+| `runtime_modes.py` | 显式声明 queue depth、async output 和 async scheduling，拒绝静默回退 |
 | `bench_engine_qwen35.py`、`engine_bench_utils.py` | 通用engine吞吐、请求延迟、调度与输出链路诊断 |
 | `bench_one_batch.py` | 固定batch的正式计时与独立profile，按prefill/decode聚合GPU事件并导出Perfetto trace |
 | `bench_piecewise_prefill_paths.py` | piecewise prefill路径对比 |
@@ -17,6 +20,16 @@
 | `bench_bf16_vs_fp8.sh`、`bench_stress.sh`、`stress_bench.py` | 远端压力测试入口及包装脚本 |
 
 模型相关命令需在已有CUDA、PyTorch、Triton和模型依赖的环境运行；各入口的 `--help` 给出参数。原始日志和trace写入Git忽略的 `logs/`。
+
+`profile_forward_launch.py`、`profile_nano_qwen_pipeline.py` 与生产包里的 `chat_trace.py`
+已合并到上述 trace 入口，不再维护三套 batch 归因与 overlap 算法。
+聊天只采集 raw trace，离线分析用 `python benchmarks/bench_one_batch_trace.py --analyze TRACE`。
+分析按实际 dispatch ID 和 CUPTI correlation，不按消费 scope 或 kernel 数量推断。
+
+通用 A/B/C、P0/P1/P2/P3 模式采用 `explicit-async-v2` 协议：BASELINE/P0 显式关闭
+lookahead，其余模式在构造 engine 时显式开启，并检查实际配置。历史 queue-only 数据
+保留原版本身份，不与本协议结果拼接。`bench_one_batch.py` 为保留旧计时口径默认关闭
+lookahead；需要时显式追加 `--async-scheduling`（要求 queue=2、异步 D2H）。
 
 最新两种FP8的阶段分解与batch–TPOT–吞吐曲线见 [优化结果总结](../docs/experiments-summary.md)；原始数据与图表为本机产物 `benchmarks/reports/fp8_phase_profile/`。`bench_one_batch.py --timing-rounds 2 --profile-rounds 0`只做两次正式计时；`--timing-rounds 0 --profile-rounds 2 --profile-decode-steps 8`单独做短窗口诊断。加`--workload-memory`可固定KV容量、限制allocator显存预算，并仅捕获精确prefill bucket。
 

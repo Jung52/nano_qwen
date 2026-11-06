@@ -3,7 +3,7 @@
 Measures four engine modes and attributes each gain to one feature::
 
     P0  eager, queue=1, sync D2H                  (conservative baseline)
-    P1  eager, queue=2, async D2H                 -> P1-P0: MRV2 queue + async D2H
+    P1  eager, queue=2, async D2H, lookahead      -> P1-P0: lookahead + async D2H
     P2  decode CUDA Graph, eager prefill, queue=2 -> P2-P1: decode CUDA Graph
     P3  piecewise prefill + decode CUDA Graph     -> P3-P2: piecewise prefill graph
 

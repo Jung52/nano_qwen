@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Three real nano_qwen scheduling paths, short CPU/CUDA decode traces.
+"""Two real nano_qwen scheduling paths, short CPU/CUDA decode traces.
 
 Run from nano_qwen (PyTorch + CUDA + model dependencies required):
   CUDA_VISIBLE_DEVICES=0 python benchmarks/bench_one_batch_trace.py \
@@ -24,10 +24,8 @@ from __future__ import annotations
 
 import argparse
 import ast
-from bisect import bisect_right
-from collections import Counter, defaultdict, deque
-from contextlib import contextmanager, ExitStack
-import functools
+from collections import Counter, defaultdict
+from contextlib import contextmanager
 import hashlib
 import json
 import math
@@ -43,8 +41,7 @@ import time
 import traceback
 
 MODES = ("no_async", "async")
-MARKER = re.compile(r"^nq/([a-z_]+)/b(\d+)(?:/slot([01]))?$")
-MIB = 1024 * 1024
+from trace_tools import (MIB, analyze, summarize_frames, bounded_trace, report_trace)
 
 
 def save(path, value):
@@ -66,10 +63,15 @@ def source_info(root, ref=None):
     except (OSError, subprocess.CalledProcessError):
         info.update(commit=None, dirty=None)
     for name in ("config/config.py", "engine/llm_engine.py", "engine/model_runner.py",
-                 "engine/cuda_graph.py", "engine/pipeline.py", "scheduler/async_decode.py"):
+                 "engine/cuda_graph.py", "scheduler/async_decode.py", "utils/profiling.py"):
         path = root / "src/nano_qwen" / name
         if path.is_file():
             info["files_sha256"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    info["tool_files_sha256"] = {
+        name: hashlib.sha256((root / "benchmarks" / name).read_bytes()).hexdigest()
+        for name in ("bench_one_batch_trace.py", "trace_tools.py", "runtime_modes.py")
+        if (root / "benchmarks" / name).is_file()
+    }
     return info
 
 
@@ -93,7 +95,9 @@ def find_repo(explicit=None):
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model", required=True)
+    p.add_argument("--model")
+    p.add_argument("--analyze", type=Path, help="Analyze an exported trace without CUDA/model imports")
+    p.add_argument("--analysis-dir", type=Path, help="Offline analysis output directory; default: beside trace")
     p.add_argument("--repo-root")
     p.add_argument("--batch-size", type=int, default=64, help="Real decode batch, not queue depth; try 128 if desired")
     p.add_argument("--input-len", type=int, default=512)
@@ -115,6 +119,10 @@ def parse_args(argv=None):
     p.add_argument("--source-json", help=argparse.SUPPRESS)
     p.add_argument("--worker-output", help=argparse.SUPPRESS)
     a = p.parse_args(argv)
+    if a.analyze:
+        return a
+    if not a.model:
+        p.error("--model is required unless --analyze is used")
     if a.batch_size not in [1, 2, 4, 8] + list(range(16, 513, 16)):
         p.error("Use an exact decode graph bucket: 1/2/4/8, or a multiple of 16 up to 512")
     if a.trace_steps < 4 or a.max_trace_mb <= 0:
@@ -177,292 +185,6 @@ def audit_graphs(engine, mode, batch_size):
                     "queue_depth": engine.max_concurrent_batches, "async_output": r.async_output,
                     "static_buffer_ptrs": {k: int(v.data_ptr()) for k, v in r.cuda_graphs.decode_graph_vars.items()
                                            if hasattr(v, "data_ptr")}}
-
-
-class Labels:
-    """Annotations only. Preserve every original call, argument, return and wait."""
-    def __init__(self, engine, torch, graphs):
-        self.engine, self.torch, self.graphs = engine, torch, graphs
-        self.runner = engine.model_runner
-        self.undo = ExitStack()
-        self.next_id = 0
-        self.active = None
-        self.executed = deque()
-        self.last_waited = None
-        self.slots = {}
-        self.batches = []
-
-    def mark(self, stage, bid, slot=None):
-        suffix = f"/slot{slot}" if slot is not None else ""
-        return self.torch.profiler.record_function(f"nq/{stage}/b{bid:05d}{suffix}")
-
-    def patch(self, obj, attr, value):
-        own = attr in vars(obj)
-        old = getattr(obj, attr)
-        setattr(obj, attr, value)
-        self.undo.callback(setattr if own else delattr, obj, attr, *([old] if own else []))
-
-    @contextmanager
-    def activate(self, bid):
-        old, self.active = self.active, bid
-        try:
-            yield
-        finally:
-            self.active = old
-
-    def __enter__(self):
-        r = self.runner
-        original_execute = r.execute_model
-        def execute(seqs, is_prefill):
-            if is_prefill:
-                raise RuntimeError("Prefill entered the decode-only diagnostic window")
-            bid = self.next_id
-            self.next_id += 1
-            self.batches.append({"batch_id": bid, "batch_size": len(seqs)})
-            with self.activate(bid), self.mark("execute", bid):
-                result = original_execute(seqs, is_prefill)
-            self.executed.append(bid)
-            return result
-        self.patch(r, "execute_model", execute)
-
-        original_plan = self.engine.scheduler.schedule
-        def plan(*args, **kwargs):
-            with self.mark("schedule", self.next_id):
-                return original_plan(*args, **kwargs)
-        self.patch(self.engine.scheduler, "schedule", plan)
-
-        for graph in self.graphs:
-            original_replay = graph.replay
-            def replay(*args, _original=original_replay, **kwargs):
-                if self.active is None:
-                    raise RuntimeError("Graph replay outside a tracked decode execution")
-                with self.mark("launch", self.active):
-                    return _original(*args, **kwargs)
-            self.patch(graph, "replay", replay)
-
-        original_logits = r.model.compute_logits
-        def logits(*args, **kwargs):
-            if self.active is None:
-                raise RuntimeError("LM head outside tracked execute/sample")
-            with self.mark("lm_head", self.active):
-                return original_logits(*args, **kwargs)
-        self.patch(r.model, "compute_logits", logits)
-
-        original_sample = r.sample_tokens
-        def sample(*args, **kwargs):
-            bid = self.executed.popleft()
-            with self.activate(bid), self.mark("sample_call", bid):
-                output = original_sample(*args, **kwargs)
-            if output is None:
-                raise RuntimeError("Rank-0 sample_tokens returned no output")
-            output._nq_trace_batch_id = bid
-            return output
-        self.patch(r, "sample_tokens", sample)
-
-        from nano_qwen.engine.async_output import AsyncModelOutput
-        original_get = AsyncModelOutput.get_output
-        def get_output(output, *args, **kwargs):
-            bid = getattr(output, "_nq_trace_batch_id", None)
-            if bid is None:  # Already queued before profiler activation.
-                return original_get(output, *args, **kwargs)
-            with self.mark("result_wait", bid):
-                value = original_get(output, *args, **kwargs)
-            self.last_waited = bid
-            return value
-        self.patch(AsyncModelOutput, "get_output", get_output)
-
-        original_commit = self.engine.scheduler.postprocess
-        def commit(*args, **kwargs):
-            if self.last_waited is None:
-                return original_commit(*args, **kwargs)
-            with self.mark("commit", self.last_waited):
-                self.last_waited = None
-                return original_commit(*args, **kwargs)
-        self.patch(self.engine.scheduler, "postprocess", commit)
-        return self
-
-    def __exit__(self, *exc):
-        self.undo.close()
-
-
-def end(event):
-    return event["ts"] + event.get("dur", 0)
-
-
-def merge(intervals):
-    result = []
-    for lo, hi in sorted(intervals):
-        if result and lo <= result[-1][1]:
-            result[-1][1] = max(result[-1][1], hi)
-        else:
-            result.append([lo, hi])
-    return result
-
-
-def overlap(interval, windows):
-    return sum(max(0, min(interval[1], hi) - max(interval[0], lo)) for lo, hi in merge(windows))
-
-
-def median_ms(values):
-    return statistics.median(values) / 1000 if values else None
-
-
-def analyze(data):
-    """Use native correlation IDs, never CPU-scope duration as GPU duration."""
-    events = data["traceEvents"]
-    scopes = defaultdict(dict)
-    all_markers = []
-    for e in events:
-        m = MARKER.fullmatch(e.get("name", ""))
-        if e.get("cat") == "user_annotation" and e.get("ph") == "X" and m:
-            stage, bid, slot = m[1], int(m[2]), int(m[3] or 0)
-            scopes[bid].setdefault(stage, e)
-            all_markers.append((e, stage, bid, slot))
-    # Sample scopes may contain an LM head in the dual path. More specific
-    # scopes take priority so GPU sampling never includes the LM head.
-    attributed = {}
-    launch_api = {}
-    indexed = {}
-    for stage in ("launch", "lm_head", "sample_call"):
-        marked = sorted((e["ts"], end(e), bid, slot) for e, s, bid, slot in all_markers if s == stage)
-        indexed[stage] = ([x[0] for x in marked], marked)
-    for e in events:
-        if e.get("cat") not in ("cuda_runtime", "cuda_driver") or e.get("ph") != "X":
-            continue
-        corr = e.get("args", {}).get("correlation")
-        if corr is None:
-            continue
-        for stage in ("launch", "lm_head", "sample_call"):
-            starts, marked = indexed[stage]
-            i = bisect_right(starts, e["ts"]) - 1
-            if i >= 0 and e["ts"] <= marked[i][1] and end(e) <= marked[i][1] + 1:
-                _, _, bid, slot = marked[i]
-                if stage == "launch" and e.get("name") != "cudaGraphLaunch":
-                    continue
-                attributed[corr] = (stage, bid, slot)
-                if e.get("name") == "cudaGraphLaunch":
-                    launch_api[bid] = e
-                break
-    kernels = defaultdict(lambda: defaultdict(list))
-    for e in events:
-        if e.get("cat") != "kernel" or e.get("ph") != "X":
-            continue
-        tag = attributed.get(e.get("args", {}).get("correlation"))
-        if tag:
-            stage, bid, slot = tag
-            kernels[bid][stage].append(e)
-    frames = []
-    for bid in sorted(scopes):
-        s, k = scopes[bid], kernels[bid]
-        if bid not in launch_api or not all(name in s for name in ("schedule", "execute", "sample_call", "commit")):
-            continue
-        if not k["launch"] or not k["sample_call"] or not k["lm_head"]:
-            continue
-        launch = launch_api[bid]
-        if s["schedule"]["ts"] > launch["ts"]:
-            raise RuntimeError("Invalid plan/launch ordering")
-        graph = [min(e["ts"] for e in k["launch"]), max(end(e) for e in k["launch"])]
-        head = [min(e["ts"] for e in k["lm_head"]), max(end(e) for e in k["lm_head"])]
-        sample = [min(e["ts"] for e in k["sample_call"]), max(end(e) for e in k["sample_call"])]
-        frame = dict(batch_id=bid,
-                     plan=[s["schedule"]["ts"], launch["ts"]], launch=[launch["ts"], end(launch)],
-                     graph=graph, lm_head=head, forward=merge([graph, head]), sample=sample,
-                     commit=[s["commit"]["ts"], end(s["commit"])],
-                     graph_kernel_count=len(k["launch"]),
-                     graph_correlations=sorted({e["args"]["correlation"] for e in k["launch"]}),
-                     forward_kernel_intervals=merge([(e["ts"], end(e)) for stage in ("launch", "lm_head") for e in k[stage]]))
-        if "result_wait" in s:
-            frame["result_wait"] = [s["result_wait"]["ts"], end(s["result_wait"])]
-        frames.append(frame)
-    return frames
-
-
-def summarize_frames(frames):
-    adjacent = [(a, b) for a, b in zip(frames, frames[1:]) if b["batch_id"] == a["batch_id"] + 1]
-    result = {"complete_batches": len(frames), "adjacent_pairs": len(adjacent),
-              "graph_kernel_counts": [f["graph_kernel_count"] for f in frames]}
-    for name in ("plan", "launch"):
-        result[name + "_next_overlaps_forward"] = sum(overlap(b[name], a["forward"]) > 0 for a, b in adjacent)
-    result["commit_overlaps_next_forward"] = sum(overlap(a["commit"], b["forward"]) > 0 for a, b in adjacent)
-    result["commit_overlaps_next_physical_kernel"] = sum(
-        overlap(a["commit"], b["forward_kernel_intervals"]) > 0 for a, b in adjacent)
-    result["sample_before_next_graph"] = sum(a["sample"][1] <= b["graph"][0] for a, b in adjacent)
-    result["graph_ms_median"] = median_ms([f["graph"][1] - f["graph"][0] for f in frames])
-    result["forward_active_span_ms_median"] = median_ms([sum(hi-lo for lo,hi in f["forward"]) for f in frames])
-    result["plan_ms_median"] = median_ms([f["plan"][1] - f["plan"][0] for f in frames])
-    result["launch_api_ms_median"] = median_ms([f["launch"][1] - f["launch"][0] for f in frames])
-    result["sample_ms_median"] = median_ms([f["sample"][1] - f["sample"][0] for f in frames])
-    result["result_wait_ms_median"] = median_ms([f["result_wait"][1] - f["result_wait"][0] for f in frames if "result_wait" in f])
-    result["gpu_step_interval_ms_median"] = median_ms([b["graph"][0] - a["graph"][0] for a, b in adjacent])
-    result["sample_to_next_graph_ms_median"] = median_ms([b["graph"][0] - a["sample"][1] for a, b in adjacent])
-    result["diagnostic_only"] = True
-    return result
-
-
-def derived_events(frames, pid, mode):
-    result = [{"ph": "M", "name": "process_name", "pid": pid, "tid": 0,
-               "args": {"name": f"{mode}: plan includes prepare; launch is CPU; forward/sample are GPU"}}]
-    tracks = {1: "CPU: plan / launch / commit", 2: "GPU: forward / sample", 3: "GPU: cuda_graph"}
-    for tid, label in tracks.items():
-        result.append({"ph": "M", "name": "thread_name", "pid": pid, "tid": tid, "args": {"name": label}})
-    for i, frame in enumerate(frames):
-        def add(name, tid, span):
-            result.append({"ph": "X", "cat": "nq_derived", "pid": pid, "tid": tid,
-                           "name": name, "ts": span[0], "dur": span[1] - span[0],
-                           "args": {"batch_id": frame["batch_id"],
-                                    "source": "native CUDA correlation / CPU markers", "may_contain_kernel_gaps": True}})
-        for name in ("plan", "launch", "commit"):
-            add(f"{name} {i}", 1, frame[name])
-        for interval in frame["forward"]:
-            add(f"forward {i}", 2, interval)
-        add(f"sample {i}", 2, frame["sample"])
-        add("cuda_graph", 3, frame["graph"])
-    return result
-
-
-def bounded_trace(data, frames, mode, max_steps=6, max_bytes=20*MIB):
-    """Keep a continuous time window and complete correlation groups."""
-    # Start after the first profiled execution, allowing pipeline startup at
-    # the profiler boundary to stay outside the saved comparison window.
-    candidates = frames[1:1+max_steps]
-    if len(candidates) < 4:
-        raise RuntimeError(f"Only {len(candidates)} complete steady batches; need at least 4. Check CUPTI/markers")
-    original = data["traceEvents"]
-    numeric_pids = [e["pid"] for e in original if isinstance(e.get("pid"), int)]
-    pid = max(numeric_pids, default=0) + 100
-    for count in range(len(candidates), 3, -1):
-        selected = candidates[:count]
-        lo = min(f["plan"][0] for f in selected)
-        hi = max(max(f["commit"][1], f["sample"][1], f["graph"][1], f["lm_head"][1]) for f in selected)
-        # Keep original X events that intersect the window, with unmodified
-        # timestamps/durations. A few edge context events may extend past it.
-        kept = [e for e in original if e.get("ph") not in ("M", "s", "f", "t")
-                and "ts" in e and e["ts"] <= hi and end(e) >= lo]
-        flows = defaultdict(list)
-        for e in original:
-            if e.get("ph") in ("s", "f", "t"):
-                flows[(e.get("cat"), e.get("name"), str(e.get("id")), str(e.get("id2")))].append(e)
-        for group in flows.values():
-            if all(lo <= e["ts"] <= hi for e in group) and any(e["ph"] == "s" for e in group) and any(e["ph"] == "f" for e in group):
-                kept.extend(group)
-        active_pids = {e.get("pid") for e in kept}
-        kept = [e for e in original if e.get("ph") == "M" and e.get("pid") in active_pids] + kept
-        # A selected graph must retain EVERY native kernel from the recording.
-        corr = {c for f in selected for c in f["graph_correlations"]}
-        expected = Counter(e["args"]["correlation"] for e in original if e.get("cat") == "kernel" and e.get("args", {}).get("correlation") in corr)
-        actual = Counter(e["args"]["correlation"] for e in kept if e.get("cat") == "kernel" and e.get("args", {}).get("correlation") in corr)
-        if expected != actual:
-            raise RuntimeError("Window dropped kernels from a selected graph")
-        kept.extend(derived_events(selected, pid, mode))
-        output = {k: v for k, v in data.items() if k != "traceEvents"}
-        output.update(traceEvents=kept, nq_window={"mode": mode, "complete_batch_ids": [f["batch_id"] for f in selected],
-                      "start_us": lo, "end_us": hi, "edge_context_may_be_partial": True,
-                      "policy": "continuous window; all selected graph kernels; unchanged timestamps and durations",
-                      "requested_complete_batches": max_steps, "max_uncompressed_bytes": int(max_bytes)})
-        encoded = json.dumps(output, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if len(encoded) <= max_bytes:
-            return encoded, selected, output["nq_window"]
-    raise RuntimeError("Even four complete batches exceed --max-trace-mb; increase the size cap. No kernels were sampled")
 
 
 def output_records(prompts, seqs):
@@ -810,6 +532,9 @@ def run_worker(a):
         raise RuntimeError("CUPTI profiler support required for trace collection")
     if os.environ.get("CUDA_LAUNCH_BLOCKING", "0") != "0":
         raise RuntimeError("Unset CUDA_LAUNCH_BLOCKING before overlap profiling")
+    from nano_qwen.utils.profiling import Labels, init_kineto
+    if not a.checks_only:
+        init_kineto(torch)
     mode = a.worker
     out = Path(a.worker_output) if a.worker_output else Path(a.output_dir) / mode
     out.mkdir(parents=True, exist_ok=True)
@@ -929,15 +654,14 @@ def run_worker(a):
                                   "Original native kernels/operators are preserved; edge context may be partial."])
             if summary["sample_before_next_graph"] != summary["adjacent_pairs"]:
                 raise RuntimeError("GPU token dependency order failed: sample(n) must precede graph(n+1)")
-            summary["pipeline_observed"] = bool(summary["launch_next_overlaps_forward"])
-            summary["expected_overlap_observed"] = (not summary["pipeline_observed"] if mode == "no_async" else summary["pipeline_observed"])
+            summary["pipeline_observed"] = bool(summary["launch_next_overlaps_physical_kernel"])
+            summary["launch_timing_counts"] = dict(Counter(p["verdict"] for p in summary["pairs"]))
             (out / "trace.json").write_bytes(encoded)
             save(out / "summary.json", summary)
             print(f"{mode}: {len(selected)} complete batches; {len(encoded)/MIB:.2f} MiB; "
-                  f"launch overlap {summary['launch_next_overlaps_forward']}/{summary['adjacent_pairs']}; "
+                  f"launch/kernel overlap {summary['launch_next_overlaps_physical_kernel']}/{summary['adjacent_pairs']}; "
                   f"GPU step {summary['gpu_step_interval_ms_median']:.2f} ms", flush=True)
-            if not summary["expected_overlap_observed"]:
-                print("WARNING: actual overlap differs from this mode's intention; inspect the recorded waits.", flush=True)
+            print(f"launch timing: {summary['launch_timing_counts']} (observation, not a correctness gate)", flush=True)
             summary["trace_collected"] = True
         sampler_audit.stats["verify_argmax_equality"] = True
         suite = run_correctness_suite(engine, a, torch, Sequence, SamplingParams, out, trace_outputs, output_len)
@@ -1000,7 +724,7 @@ def parent(a):
         summary = json.loads((destination / "summary.json").read_text(encoding="utf-8"))
         if summary.get("trace_collected"):
             print(f"[{label}] {summary['complete_batches']} batches, {summary['trace_mib']:.2f} MiB, "
-                  f"launch overlap {summary['launch_next_overlaps_forward']}/{summary['adjacent_pairs']}", flush=True)
+                  f"launch/kernel overlap {summary['launch_next_overlaps_physical_kernel']}/{summary['adjacent_pairs']}", flush=True)
         print(f"[{label}] output workloads={len(suite['runs'])}; local checks={suite['passed']}", flush=True)
         return suite
 
@@ -1042,6 +766,10 @@ def parent(a):
 
 def main():
     a = parse_args()
+    if a.analyze:
+        summary, path = report_trace(a.analyze, a.analysis_dir)
+        print(json.dumps({"summary": str(path), **summary}, indent=2))
+        return 0 if summary["status"] == "ok" else 2
     try:
         if a.worker:
             run_worker(a)
@@ -1056,4 +784,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

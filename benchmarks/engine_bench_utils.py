@@ -56,6 +56,7 @@ def git_commit() -> str:
 def env_info() -> dict[str, Any]:
     info: dict[str, Any] = {
         "git_commit": git_commit(),
+        "benchmark_protocol": PROTOCOL,
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none",
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
@@ -99,33 +100,7 @@ def repo_log_path(name: str, subdir: str = "validate") -> str:
 # Engine modes
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
-class ModeConfig:
-    name: str
-    enforce_eager: bool
-    queue_depth: int
-    async_output: bool
-    prefill_cudagraph: bool
-
-
-# Correctness matrix (validate_engine_qwen35.py)
-MODES: list[ModeConfig] = [
-    ModeConfig("BASELINE", enforce_eager=True, queue_depth=1, async_output=False, prefill_cudagraph=False),
-    ModeConfig("A", enforce_eager=True, queue_depth=2, async_output=True, prefill_cudagraph=False),
-    ModeConfig("B", enforce_eager=False, queue_depth=2, async_output=True, prefill_cudagraph=False),
-    ModeConfig("C", enforce_eager=False, queue_depth=2, async_output=True, prefill_cudagraph=True),
-]
-
-# Performance matrix (bench_engine_qwen35.py)
-PERF_MODES: list[ModeConfig] = [
-    ModeConfig("P0", enforce_eager=True, queue_depth=1, async_output=False, prefill_cudagraph=False),
-    ModeConfig("P1", enforce_eager=True, queue_depth=2, async_output=True, prefill_cudagraph=False),
-    ModeConfig("P2", enforce_eager=False, queue_depth=2, async_output=True, prefill_cudagraph=False),
-    ModeConfig("P3", enforce_eager=False, queue_depth=2, async_output=True, prefill_cudagraph=True),
-]
-
-MODE_NAMES = {m.name: m for m in MODES}
-PERF_MODE_NAMES = {m.name: m for m in PERF_MODES}
+from runtime_modes import ModeConfig, MODES, PERF_MODES, MODE_NAMES, PERF_MODE_NAMES, PROTOCOL
 
 
 class ArgmaxSampler(nn.Module):
@@ -313,8 +288,8 @@ def make_engine(
     """Build an engine for ``mode`` and apply the runtime toggles.
 
     ``enforce_eager`` must be set at construction time (it decides whether
-    CUDA graphs are captured); queue depth / async output / prefill graphs
-    are runtime attributes applied afterwards.
+    CUDA graphs are captured); async_scheduling is also explicit at construction; queue depth,
+    async output and prefill graphs are checked/applied afterwards.
 
     ``reset_cuda_stats`` releases the caching allocator and zeroes the
     process-wide CUDA memory counters first. ``LLMEngine.exit`` now performs
@@ -330,15 +305,14 @@ def make_engine(
     engine = LLMEngine(
         model,
         enforce_eager=mode.enforce_eager,
+        async_scheduling=mode.async_scheduling,
         use_prefill_cudagraph=mode.prefill_cudagraph,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_model_len,
         gpu_memory_utilization=gpu_memory_utilization,
     )
-    engine.max_concurrent_batches = mode.queue_depth
-    engine.model_runner.async_output = mode.async_output
-    engine.model_runner.use_prefill_cudagraph = mode.prefill_cudagraph
+    mode.apply(engine)
     if sampler is not None:
         engine.model_runner.sampler = sampler
     return engine

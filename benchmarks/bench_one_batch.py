@@ -57,6 +57,8 @@ def parse_args(argv=None):
     p.add_argument("--enforce-eager", action="store_true", help="Disable prefill and decode CUDA Graphs")
     p.add_argument("--disable-prefill-cudagraph", action="store_true")
     p.add_argument("--queue-depth", type=int, choices=(1, 2), default=2)
+    p.add_argument("--async-scheduling", action=argparse.BooleanOptionalAction,
+                   default=False, help="Explicit decode lookahead; default keeps the historical timing protocol")
     p.add_argument("--sync-output", action="store_true", help="Use the runner's blocking D2H baseline")
     p.add_argument("--trace-stage", choices=("all", "decode"), default="all")
     p.add_argument("--record-shapes", action="store_true")
@@ -65,6 +67,8 @@ def parse_args(argv=None):
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output-dir", default="logs/traces")
     args = p.parse_args(argv)
+    if args.async_scheduling and (args.queue_depth != 2 or args.sync_output):
+        p.error("--async-scheduling requires --queue-depth 2 and asynchronous output")
     for name in ("batch_size", "input_len", "decode_steps", "warmup_rounds", "max_model_len"):
         if getattr(args, name) < 1:
             p.error(f"--{name.replace('_', '-')} must be >=1")
@@ -299,6 +303,7 @@ def main():
     # Avoid retaining autograd state in model initialization and graph capture.
     with torch.inference_mode(), policy:
         engine = LLMEngine(args.model, tensor_parallel_size=1, max_num_seqs=args.batch_size,
+                           async_scheduling=args.async_scheduling,
                            max_num_batched_tokens=args.batch_size * args.input_len,
                            max_model_len=args.max_model_len, enforce_eager=args.enforce_eager,
                            use_prefill_cudagraph=not (args.disable_prefill_cudagraph or args.workload_memory),
@@ -308,6 +313,8 @@ def main():
             engine.max_concurrent_batches = args.queue_depth
             runner = engine.model_runner
             runner.async_output = not args.sync_output
+            if engine.config.async_scheduling != args.async_scheduling:
+                raise RuntimeError("Actual async_scheduling differs from requested benchmark policy")
             runner.use_prefill_cudagraph = not args.disable_prefill_cudagraph
             if args.workload_memory and not args.enforce_eager and runner.use_prefill_cudagraph:
                 runner.cuda_graphs.capture_prefill([args.batch_size * args.input_len])
@@ -320,6 +327,8 @@ def main():
             if not args.enforce_eager and args.batch_size not in runner.graphs:
                 raise RuntimeError(f"No exact CUDA Graph for BS={args.batch_size}")
             summary["engine"] = dict(kv_blocks=engine.config.num_kvcache_blocks,
+                                     async_scheduling=engine.config.async_scheduling,
+                                     queue_depth=engine.max_concurrent_batches, async_output=runner.async_output,
                                      prefill_graph_sizes=runner.prefill_graph_sizes, decode_graph_sizes=runner.graph_bs,
                                      inference_mode_initialization=True,
                                      quantization_methods=dict(Counter(type(m.quant_method).__name__

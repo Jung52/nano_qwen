@@ -28,3 +28,9 @@ def validate_layout(layout, maximum):
         total += size
         result.append(dict(name=name, shape=list(shape), dtype=dtype, nbytes=size))
     return result, total
+
+
+def validate_key(key: str) -> str:
+    if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", key):
+        raise ValueError("transfer_id must contain 1-128 ASCII letters/digits/_.-")
+    return key
