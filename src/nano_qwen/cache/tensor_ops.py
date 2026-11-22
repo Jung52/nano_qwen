@@ -75,8 +75,8 @@ def prefill_to_cache(engine, prompt, params, connector, key, sequence_type):
 
 def resume_from_cache(engine, connector, key, sequence_type, params_type, running_status,
                       delete_after_restore=True):
-    from .engine_ops import require_idle
-    require_idle(engine)
+    from .engine_ops import require_resume_capacity, require_resume_ready
+    require_resume_ready(engine)
     metrics, started = {}, perf_counter_ns()
     _timed(metrics, "health_ms", connector.health)
     runner = engine.model_runner
@@ -84,6 +84,10 @@ def resume_from_cache(engine, connector, key, sequence_type, params_type, runnin
     lease = _timed(metrics, "acquire_ms", lambda: connector.acquire(key))
     seq, allocated, restored = None, False, False
     try:
+        m = lease.metadata
+        _timed(metrics, "resume_guard_ms", lambda: require_resume_capacity(
+            engine, m["cached_tokens"], m["max_tokens"],
+            len(m["tokens"]) - m["prompt_len"]))
         snapshot = Snapshot(lease.metadata, lease.tensors)  # Tensor views; no data reconstruction.
         _timed(metrics, "validate_ms", lambda: runner.call("validate_request_state", snapshot, identity))
         m = lease.metadata

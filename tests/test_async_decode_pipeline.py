@@ -212,7 +212,8 @@ class AsyncDecodeTests(unittest.TestCase):
                       rng.choice([True, False])) for _ in range(rng.randint(1, 6))]
             results = []
             for enabled in (False, True):
-                e = engine(enabled, blocks=64, budget=rng.choice([32, 256, 1024]))
+                # GDN prefill chunks align to 64; budgets must fit one aligned chunk.
+                e = engine(enabled, blocks=64, budget=rng.choice([64, 256, 1024]))
                 e.model_runner.token_fn = lambda s, p: 1 if p % 17 == 0 else 7 + p % 11
                 seqs = [add(e, length=n, output=k, ignore_eos=ignore) for n, k, ignore in specs]
                 outputs = finish(e)

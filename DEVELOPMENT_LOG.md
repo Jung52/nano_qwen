@@ -372,3 +372,108 @@ P 端把 KV/GDN 逐张量直接拷入 LMCache 0.5.6 L1 的共享 CPU tensor 池�
 修正旧诊断口径：消费 scope 在流水填充时可包含两个 dispatch，不能作为一个 GPU forward 窗口；launch 在 GPU 开始前完成属于 PREQUEUED，不是实际重叠。新分析只使用显式 dispatch 标记与 CUPTI correlation，物理 kernel 区间交集与 forward span 分开记录。缺标记、缺相关性或相关 ID 归属冲突时不猜测；device_idle 纳入 memcpy/memset。此前第13节的 overlap 比例保留为旧分析器输出，需重采集/重分析后才能用于判定；不修改原有无 profiler 性能数据。
 
 通用模式新增 `async_scheduling`，构造时显式传入并检查，版本标记 `explicit-async-v2`。历史 queue-only 结果不与新协议合并。固定 batch 旧计时入口保留其默认关闭 lookahead 的口径，但暴露显式开关并记录实际配置。移除未引用的空壳包与 logger，将唯一剩余的 transfer_id 验证函数并入 SHM control protocol；既有状态校验和数值回归保留。
+
+## 15. 2026-11-22：双卡 PD 分离到 decode 合批扩展（runbook → D≤2 → D≤4/8）
+
+依据外部 runbook（`/root/autodl-tmp/nano_qwen_5090_dual_pd_runbook.md`）在双 RTX 5090 上
+验证并扩展 Qwen3.5-9B per-channel FP8 的 PD 分离。环境：仓库 `2962aaf`，GPU_PY
+torch 2.13.0+cu130 / triton 3.7.1，CPU_PY lmcache 0.5.6，LMCache SHM 服务 8766 端口
+1GiB arena。全部产物与复跑命令在 `logs/pd5090-qwen35-9b/<RUN_ID>/`。
+
+### 15.1 PD 分离验收与常驻双卡驱动
+
+runbook 四节全部通过：权重复用 `fp8/`（per-channel，200 投影量化，双卡 model_id
+一致）；CPU 回归 29 项；store-smoke 与双卡 roundtrip（state_bytes_equal、
+tokens_equal、0 prefill/31 decode、ACK）；跨卡验收（P 退出后 D 独立恢复，输出与
+reference 逐 token 一致）。
+
+新增 `benchmarks/bench_pd_dual_card.py`（P/D/solo 三类 worker + 驱动进程，
+stdin/stdout JSON 行协议，LMCache SHM 为唯一 payload 路径）与
+`benchmarks/pd_dual_card_summary.py`、`tests/test_pd_dual_card.py`。首轮对照
+（64/257/1024→128，100 请求 P50）：PD 串行 0.68 req/s / E2E 1437ms；旧 B1 流水线
+0.74 req/s / E2E 2645ms（请求排队等 D）；双副本 1.38；单卡 B2 1.45。交接单次
+~20-22ms 且几乎不随输入长度增长（34.7→59.9MiB 快照，d2h 6.8→7.3ms）。1000 请求
+稳定性运行 1010 次交接零失配、零 ACK 失败、资源全部回收。
+
+期间修复驱动问题：派单竞态（D 在 P commit 前 acquire）、worker 空闲分支
+`stdin_queue.get(timeout)` 弹出并丢弃命令（select+readline 缓冲竞态的同类问题，
+全部 worker 改为专用 stdin 读取线程）、profiler 未 `__enter__` 与 trace 导出顺序、
+`dict(pass=...)` 关键字名语法、报告 NaN/inf 写盘失败等。
+
+### 15.2 D≤2：decode 步间恢复与容量门禁
+
+引擎侧把 D 侧恢复入口的 `require_idle()` 拆为 `require_resume_ready()`（无在途
+batch、无 waiting、运行请求处于 decode 边界）与 `require_resume_capacity()`（空闲
+GDN slot + 恢复请求的初始 KV 页分配 + 所有活跃请求剩余生成所需页 + 安全边际，
+杜绝恢复后中途 preempt）。D worker 按步推进、步间恢复 READY 传输，B1→B2→B1
+由调度器自然产生。CPU 回归 33 项（+4 门禁测试；测试暴露并修复初始块分配未计入
+预算的真实 bug）。
+
+正确性矩阵（4 场景 × 2 replay + solo 对照）全绿：B1→B2→B1 步型、256→257 跨页、
+1024 分块、错开退出；KV/GDN 恢复按逻辑页与 slot 逐位 SHA256 双向校验（修复了
+校验设计：P 恢复前快照 vs D 恢复后立即采集，而非完成时——引擎在 postprocess 前
+就 remove_request 释放 slot）；两次混合 replay 输出逐位一致。D≤2 性能：1.39 req/s
+/ E2E 1389ms（旧 B1 流水线 +88% 吞吐、E2E −47%）。
+
+### 15.3 混合批 token 判定体系
+
+混合批 fp8 噪声与 B1 reference 的可测分歧分四级量化记录（全部带双侧 top-2/margin
+证据，由 ArgmaxSampler 诊断采集，P 侧 reference 同带诊断）：
+
+| 判定 | 条件 | 实例 |
+|---|---|---|
+| near_tie | 仓库 `competing_tokens_are_tied`（同竞争对、双侧 margin ≤ 门限） | 大量 |
+| bounded_flip | 同对 + 一侧 near-tie + 交叉 logit 位移 ≤ 4× 门限（实测聚簇 1-3 个 bf16 ULP = 0.125/0.25/0.375） | 257 请求 0.375 |
+| tie_flip | 任一侧 margin == 0 的精确平局（批噪声合法改变平局归属） | b4-stagger 三方平局 |
+| mixed_prefill_divergence | 副本混合预填充分块与 B1 参考结构性分歧（logit 差可达 4.0），分类记录不硬失败 | 见 15.5 根因 |
+
+single c=2 的 1024-token 跳过项在本轮后全部纳入验证（P 侧 prefill 恒 B1 与参考同
+路径），不再有跳过。
+
+### 15.4 D≤4/D≤8 与 decode 图补全
+
+D 上限可配置（`--decode-max-seqs`）。D≤4 正确性含 b4-stagger（B1→B2→B3→B4、
+e 复用 a 的 slot 0），发现 **B3 无专属 CUDA Graph 走 eager 回退**（图尺寸
+[1,2,4,8,16…]，无 padding 借用）。B4-B8 固定批微基准
+（`benchmarks/bench_decode_batch.py`，同 5090、同 257 上下文、固定位置）确认：
+B3/B5/B6/B7 eager 每步 ~65ms = graph 批次的 6 倍，B8 graph 仅 10.9ms/726 tok/s。
+**D8 掉速根因是缺图回退，不是 GPU 计算或交接**（PD trace 中 acquire/H2D/ACK 与
+D4 一致 ~2/7/1ms；旧 D8 的 D 忙时 75% 烧在 eager 步）。
+
+修复：decode 图捕获扩至 [1..16]+32 档（`cuda_graph.py`，图池共享、显存开销
+~0.1GB；8 图初始化 30.5s）。补图后 B5/6/7 = 10.6/10.7/10.7ms（470/557/646 tok/s）。
+b7-stagger 场景（8 请求渐进加入、错开退出、slot 轮转）全绿，B1-B7 全部命中各自
+Graph。D8 全图端到端验收（400ms 节拍）四项全优于 D4：D 排队 P95 1213→316ms、
+完成吞吐 2.07→2.46/s、E2E P95 6001→1743ms、后续间隔 P95 55.9→11.7ms。同版本
+对照确认 D4 的 B3 补图后与 D8 在 400ms 打平（到达率未超 D4 容量时两者等价）。
+
+### 15.5 GDN 分块 64 对齐（引擎修复）
+
+`mixed_prefill_divergence` 专项复现（`benchmarks/analyze_mixed_prefill.py`，
+五路径 + BF16 对照）定位根因：**非 64 对齐的预填充分块边界**（511 = 7×64+63）
+改变 GDN chunked 递推状态更新——BF16 下同样分叉（首处 15），64 对齐切点（448）
+逐位一致，eager/graph 输出一致，真实混跑与独立执行同分块输出一致（无跨请求
+污染），分歧经 recurrent 状态进入（conv 恒为 0）。
+
+调度器修复：非末块累计结束位置向下对齐到 64、末块保留真实长度；预算凑不够一个
+对齐块时延后调度（decode 持续推进），引擎空闲且预算 <64 时明确报错，异步 cohort
+活跃时不误报。新增 `tests/test_prefill_chunk_alignment.py` 4 项。回归：全部分析
+路径（fp8/BF16、独立/混跑/eager）与 [512,512] 参考逐 token 一致；副本混跑
+divergence 19→0；对齐开销 TTFT P95 +3%（406→418ms）、req/s 无损失。异步测试的
+随机预算域与 decode 调度测试的 127→64 期望按新契约更新。
+
+### 15.6 逐档加压与容量结论
+
+同一混跑序列（80% 257→128 + 20% 2048→32），到达节拍 500→200ms 逐档（计划
+2.5→5 req/s）。所有档位提交≈完成、无持续积压（排空 1.3-1.7s），D8 全图稳定扛到
+200ms 档（4.13 req/s / E2E 1811ms / 节奏 12.2ms 恒稳），batch 直方图随档位自然
+升级至 B5-B8。同到达率下双副本：吞吐略高（4.21 vs 4.13）且零排队，但短请求
+后续间隔随负载恶化（10.6→71.6ms，长 prefill 同卡竞争）——D8 用有界排队
+（~300-480ms）换稳定节奏。D≤16 端到端与 D8 持平或略差（真实 batch 从未超过
+B6，系统不是合批上限受限），**合批上限 8 是本负载的饱和点**；固定批 B12/B16
+仍有收益（1044/1329 tok/s），留作更高负载档的储备。
+
+回归：驱动单测 8 项；LMCache CPU 回归 33 项 + 分块对齐 4 项；全量
+`PYTHONPATH=src pytest -q tests` 215 passed。已知边界：副本混合预填充的结构性
+分歧根因已修复（15.5）；B9-B15 图已捕获但未做端到端场景校验；200ms 以下档位
+未测（D8 容量接近耗尽，压测入口与复跑命令见 `run-commands.sh`）。

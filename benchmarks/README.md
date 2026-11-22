@@ -15,6 +15,8 @@
 | `bench_gdn_flashqla.py` | GDN kernel对比 |
 | `validate_engine_qwen35.py` | engine运行路径与正确性校验 |
 | `validate_fp8_model.py` | 完整模型smoke、共同轨迹质量与可配置性能工作负载 |
+| `bench_pd_dual_card.py` | 常驻双卡 PD 分离驱动（串行/流水线、单卡/双副本对照、1000 请求资源回收） |
+| `pd_dual_card_summary.py` | 双卡驱动产出的性能汇总（JSON/CSV/Markdown 对比表） |
 | `bench_fp8_pressure.py` | 远端保留的FP8压力与profile基准 |
 | `bench_quant_max_batch.py` | 远端保留的BF16/FP8最大batch搜索与对比 |
 | `bench_bf16_vs_fp8.sh`、`bench_stress.sh`、`stress_bench.py` | 远端压力测试入口及包装脚本 |

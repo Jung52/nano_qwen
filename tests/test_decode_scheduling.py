@@ -30,7 +30,9 @@ def test_ready_decode_gets_first_row_and_prefill_uses_remaining_budget():
         s.add(Sequence([2]*1024))
     rows,prefill = s.schedule()
     assert rows[0] is a and a.num_scheduled_tokens == 1
-    assert prefill and rows[1].num_scheduled_tokens == 127
+    # Decode takes 1 token; the remaining 127 is aligned down to 64
+    # (non-final GDN prefill chunks land on 64-token boundaries).
+    assert prefill and rows[1].num_scheduled_tokens == 64
 
 
 def test_continuous_arrivals_through_real_engine_queue_bound_decode_wait():

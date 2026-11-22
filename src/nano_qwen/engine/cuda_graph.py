@@ -89,7 +89,7 @@ class CudaGraphManager:
         )
 
         self.decode_graph_sizes = [bs for bs in
-                                   [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+                                   list(range(1, 17)) + list(range(32, max_bs + 1, 32))
                                    if bs <= max_bs]
         self.decode_graphs = {}
         self.decode_graph_pool = None

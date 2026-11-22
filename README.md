@@ -60,12 +60,25 @@ prefill、没有等待请求的稳定 decode 阶段；新请求到达或 KV bloc
 - [x] 回归覆盖：真实 L1 分配/租约、跨进程交接、输出一致、fd/泄漏回收与通用状态校验。
       用法见 [docs/lmcache-pd-shm.md](docs/lmcache-pd-shm.md)，开发记录见 DEVELOPMENT_LOG.md 第 11–12 节。
 
+### 已落地：decode 合批（D 上限可配置 1/2/4/8）
+
+- [x] D 侧恢复入口改为 `require_resume_ready()`（无在途 batch、decode 边界）+
+      `require_resume_capacity()`（空闲 GDN slot + 全部活跃请求与恢复请求的 KV 页预算）。
+- [x] D worker 按步推进、步间恢复 READY 传输；B1→B2→B3→B4→…→B1 步型与 slot 复用
+      经正确性矩阵验证（含逐位恢复校验与 replay 确定性）。
+- [x] decode CUDA Graph 捕获扩至 [1..16]+32 档（此前 B3/B5-B7 缺图走 eager，
+      单步 65ms 为 graph 批次的 6 倍，是 D8 掉速根因）。
+- [x] GDN 分块预填充非末块 64 对齐（非 64 对齐切点导致递推状态分歧，BF16 下同样
+      复现；对齐后各路径与参考逐 token 一致，副本混跑 divergence 归零）。
+- [x] 双 5090 逐档加压：D8 稳定扛到 200ms 到达节拍（4.1 req/s，节奏 12ms 恒稳）；
+      合批上限 8 为当前负载饱和点。开发记录见 DEVELOPMENT_LOG.md 第 15 节。
+
 ### 下一步（PD 方向）
 
-- [ ] 连续请求压力测试：混合长度交接 100–1000 次，输出一致，L1/KV block/slot 全部回收。
-- [ ] 请求队列：有界排队、容量背压、取消与失败重试（当前 `require_idle()` 要求引擎空闲，
-      先把顺序多请求跑稳，再设计恢复期间的调度边界）。
-- [ ] 在安全边界接入已有 continuous batching 的 decode 合批。
+- [ ] 更高负载档（>5 req/s）：先补单卡 decode 吞吐（B8 步 11ms 已接近单卡极限）；
+      B12/B16 固定批仍有收益（1044/1329 tok/s），留作储备。
+- [ ] 双副本侧长 prefill 竞争导致短请求节奏恶化（10.6→71.6ms），考虑 prefill
+      抢占或独立 prefill 通道。
 - [ ] 继续分析异步调度的 CPU/GPU 空隙与适用负载，完善正确性和性能验证。
 
 ### 后续探索

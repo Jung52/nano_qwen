@@ -134,7 +134,21 @@ class Scheduler:
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
             if not seq.block_table:
                 self.block_manager.allocate(seq, num_cached_blocks)
-            seq.num_scheduled_tokens = min(num_tokens, remaining)
+            chunk = min(num_tokens, remaining)
+            if chunk < num_tokens:
+                # GDN chunked prefill is only exact at 64-aligned boundaries.
+                # Align non-final chunks down to a multiple of 64; the final
+                # chunk keeps its real length. When the remaining budget fits
+                # no aligned chunk, defer the prompt (decode still progresses).
+                chunk = (chunk // 64) * 64
+                if chunk == 0:
+                    if (not scheduled_seqs and not self.running
+                            and not self.in_flight and self.async_decode is None):
+                        raise RuntimeError(
+                            "token budget too small for one aligned prefill chunk "
+                            f"(need 64, have {remaining})")
+                    break
+            seq.num_scheduled_tokens = chunk
             seq.is_prefill = True
             num_batched_tokens += seq.num_scheduled_tokens
             self.waiting.popleft()

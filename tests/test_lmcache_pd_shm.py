@@ -432,3 +432,83 @@ def test_tail_bytes_are_zeroed(endpoint):
     assert not torch.count_nonzero(reader.tensors["kv"][:, :, -1, 1:])
     client.release(reader, delete=True)
     assert store.status()["used_bytes"] == 0
+
+
+def test_resume_allowed_between_decode_steps_with_free_capacity(endpoint):
+    """D may restore a second transfer while the first request decodes."""
+    store, client = endpoint
+    p, d = ready_engine(), ready_engine()
+    params = SamplingParams(temperature=1e-8, max_tokens=8, ignore_eos=True)
+    p.prefill_to_lmcache([3] * 17, params, client, "mid-a")
+    first = d.resume_from_lmcache(client, "mid-a")
+    d.step()  # one decode step; first request still running
+    assert not first.is_finished and d.scheduler.running
+    p.prefill_to_lmcache([3] * 17, params, client, "mid-b")
+    second = d.resume_from_lmcache(client, "mid-b")  # between steps: must succeed
+    assert second.pd_handoff["acknowledged"]
+    outputs = finish(d)
+    # Both requests complete; D never prefilled.
+    assert d.model_runner.prefill_calls == 0
+    assert sorted(len(v) for _, v in outputs) == [8, 8]
+    assert not d.scheduler.block_manager.used_block_ids
+    assert not d.model_runner.input_batch.seq_id_to_slot
+    assert store.status()["used_bytes"] == 0
+
+
+def test_resume_rejects_in_flight_batch(endpoint):
+    store, client = endpoint
+    p, d = ready_engine(), ready_engine()
+    params = SamplingParams(temperature=1e-8, max_tokens=8, ignore_eos=True)
+    p.prefill_to_lmcache([3] * 17, params, client, "inflight")
+    d.scheduler.in_flight.add(999)  # a batch is mid-dispatch
+    with pytest.raises(ValueError, match="no in-flight"):
+        d.resume_from_lmcache(client, "inflight")
+    d.scheduler.in_flight.clear()
+    d.resume_from_lmcache(client, "inflight")  # retry succeeds after the batch settles
+    finish(d)
+    assert store.status()["used_bytes"] == 0
+
+
+def test_resume_requires_running_requests_at_decode_boundaries(endpoint):
+    store, client = endpoint
+    p, d = ready_engine(), ready_engine()
+    params = SamplingParams(temperature=1e-8, max_tokens=8, ignore_eos=True)
+    p.prefill_to_lmcache([3] * 17, params, client, "boundary")
+    mid = Sequence([3], SamplingParams(max_tokens=4))
+    mid.is_prefill = True  # a partial prompt would be mid-prefill
+    d.scheduler.running.append(mid)
+    with pytest.raises(ValueError, match="decode boundaries"):
+        d.resume_from_lmcache(client, "boundary")
+    d.scheduler.running.clear()
+    d.resume_from_lmcache(client, "boundary")
+    finish(d)
+    assert store.status()["used_bytes"] == 0
+
+
+def test_resume_capacity_guard_slot_and_blocks():
+    e = engine(blocks=16)
+    # Free-slot check fires before the block budget.
+    for i in range(len(e.model_runner.input_batch.seqs)):
+        e.model_runner.input_batch.seqs[i] = Sequence([1], SamplingParams(max_tokens=2))
+    with pytest.raises(ValueError, match="free GDN state slot"):
+        engine_ops.require_resume_capacity(e, cached_tokens=17, max_tokens=8,
+                                           completion_tokens=1)
+    # All blocks consumed by the initial allocation -> no room for the rest.
+    e2 = engine(blocks=16)
+    with pytest.raises(MemoryError, match="insufficient destination KV blocks"):
+        engine_ops.require_resume_capacity(e2, cached_tokens=16 * 256, max_tokens=128,
+                                           completion_tokens=1)
+    # A running request's remaining generation counts against the budget too.
+    e3 = engine(blocks=16)
+    running = Sequence([3] * (16 * 256 - 100), SamplingParams(max_tokens=256,
+                                                             ignore_eos=True))
+    running.num_cached_tokens = len(running)
+    running.block_table = list(range(16))
+    for block in e3.scheduler.block_manager.blocks:
+        block.ref_count = 0
+    e3.scheduler.block_manager.free_block_ids.clear()
+    e3.scheduler.block_manager.used_block_ids = set(range(16))
+    e3.scheduler.running.append(running)
+    with pytest.raises(MemoryError, match="insufficient destination KV blocks"):
+        engine_ops.require_resume_capacity(e3, cached_tokens=17, max_tokens=8,
+                                           completion_tokens=1)
