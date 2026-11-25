@@ -1,5 +1,7 @@
 import os
 from dataclasses import dataclass, field
+
+import torch
 from transformers import AutoConfig
 
 from nano_qwen.quantization import QuantizationConfig, get_quantization_config
@@ -45,6 +47,14 @@ class Config:
             self.quantization = metadata["quant_method"]
         if hf_quant is not None and self.quantization is None:
             self.quantization = "fp8"
+        self.full_config = AutoConfig.from_pretrained(self.model)
+        self.hf_config = getattr(self.full_config, "text_config", self.full_config)
+        model_type = getattr(self.hf_config, "model_type", "qwen3_5_text")
+        if model_type not in ("qwen3_5_text", "qwen3_5_moe_text"):
+            raise ValueError(f"Unsupported text model type: {model_type!r}")
+        if model_type == "qwen3_5_moe_text":
+            self._configure_moe()
+
         self.quant_config = get_quantization_config(self.quantization, hf_quant)
         if self.quant_config is not None:
             if self.tensor_parallel_size != 1:
@@ -55,8 +65,6 @@ class Config:
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8
 
-        self.full_config = AutoConfig.from_pretrained(self.model)
-        self.hf_config = getattr(self.full_config, "text_config", self.full_config)
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
 
         layer_types = getattr(self.hf_config, "layer_types", None)
@@ -68,4 +76,17 @@ class Config:
                 "Hybrid prefix cache requires matching GDN conv/recurrent "
                 "state snapshots; KV-only prefix reuse is unsupported"
             )
+
+    def _configure_moe(self):
+        config = self.hf_config
+        if self.quantization is not None or config.dtype != torch.bfloat16:
+            raise ValueError("Qwen3.5 MoE requires an unquantized BF16 checkpoint")
+        if config.hidden_act != "silu":
+            raise ValueError(f"Qwen3.5 MoE expects silu, got {config.hidden_act!r}")
+        if not 1 <= config.num_experts_per_tok <= config.num_experts:
+            raise ValueError("Qwen3.5 MoE requires 1 <= num_experts_per_tok <= num_experts")
+        if config.moe_intermediate_size <= 0 or config.shared_expert_intermediate_size < 0:
+            raise ValueError("MoE expert width must be positive and shared expert width nonnegative")
+        # Dispatch uses data-dependent tensor sizes and cannot be captured by CUDA Graphs.
+        self.enforce_eager = True
 

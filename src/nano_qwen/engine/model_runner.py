@@ -80,9 +80,11 @@ class ModelRunner:
         port: int | None = None,
         use_prefill_cudagraph: bool = True,
     ):
+        hf_config = config.hf_config
+        if getattr(hf_config, "model_type", None) == "qwen3_5_moe_text":
+            raise NotImplementedError("BF16 MoE checkpoint loading is not implemented")
         self._closed = False
         self.config = config
-        hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager
         self.world_size = config.tensor_parallel_size

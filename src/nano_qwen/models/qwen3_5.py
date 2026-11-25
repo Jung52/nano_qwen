@@ -1,17 +1,17 @@
-"""Text-only Qwen3.5 Dense model for nano_qwen.
+"""Qwen3.5 text models for nano_qwen.
 
-This module implements the hybrid Qwen3.5 decoder used by the dense text
-checkpoints: Gated DeltaNet linear-attention blocks interleaved with gated
-GQA blocks. This module implements the dense text backbone.
+Dense and MoE models use the same hybrid decoder with Gated DeltaNet and
+gated GQA blocks.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
-from transformers import Qwen3_5TextConfig
 
 from nano_qwen.layers.activation import SiluAndMul
 from nano_qwen.layers.attention import Attention
@@ -23,13 +23,19 @@ from nano_qwen.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from nano_qwen.layers.moe import Qwen3_5MoEMLP
 from nano_qwen.layers.rotary_embedding import InterleavedMRoPE
 from nano_qwen.quantization import QuantizationConfig
 from nano_qwen.quantization.fp8 import project_shared_fp8_input
 from nano_qwen.utils.context import get_context
 
+if TYPE_CHECKING:
+    from transformers import Qwen3_5MoeTextConfig, Qwen3_5TextConfig
 
-def _rope_config(config: Qwen3_5TextConfig) -> tuple[float, float, list[int]]:
+    TextConfig = Qwen3_5TextConfig | Qwen3_5MoeTextConfig
+
+
+def _rope_config(config: TextConfig) -> tuple[float, float, list[int]]:
     """Read both current and early Qwen3.5 RoPE config layouts."""
     rope = getattr(config, "rope_parameters", None)
     if not isinstance(rope, dict):
@@ -55,7 +61,7 @@ class Qwen3_5Attention(nn.Module):
     """
 
     def __init__(
-        self, config: Qwen3_5TextConfig, layer_idx: int,
+        self, config: TextConfig, layer_idx: int,
         quant_config: QuantizationConfig | None = None, prefix: str = "",
     ) -> None:
         super().__init__()
@@ -214,7 +220,7 @@ class Qwen3_5MLP(nn.Module):
 class Qwen3_5DecoderLayer(nn.Module):
 
     def __init__(
-        self, config: Qwen3_5TextConfig, layer_idx: int,
+        self, config: TextConfig, layer_idx: int,
         quant_config: QuantizationConfig | None = None, prefix: str = "",
     ) -> None:
         super().__init__()
@@ -240,7 +246,10 @@ class Qwen3_5DecoderLayer(nn.Module):
         else:
             raise ValueError(f"Unsupported Qwen3.5 layer type: {block_type!r}")
 
-        self.mlp = Qwen3_5MLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
+        if getattr(config, "model_type", None) == "qwen3_5_moe_text":
+            self.mlp = Qwen3_5MoEMLP(config)
+        else:
+            self.mlp = Qwen3_5MLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
         self.input_layernorm = GemmaRMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
@@ -377,7 +386,7 @@ class Qwen3_5DecoderLayer(nn.Module):
 class Qwen3_5Model(nn.Module):
 
     def __init__(
-        self, config: Qwen3_5TextConfig,
+        self, config: TextConfig,
         quant_config: QuantizationConfig | None = None, prefix: str = "model",
     ) -> None:
         super().__init__()
@@ -437,7 +446,7 @@ class Qwen3_5ForCausalLM(nn.Module):
     }
 
     def __init__(
-        self, config: Qwen3_5TextConfig,
+        self, config: TextConfig,
         quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()

@@ -20,3 +20,4 @@ block_fp8/
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
+/Qwen3.5-2B-MoE-A1.3B/
