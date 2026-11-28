@@ -197,13 +197,14 @@ def main(argv: list[str] | None = None) -> int:
             and engine.model_runner.async_output
         ):
             raise RuntimeError("The engine did not enable the requested async decode pipeline")
+        eager = engine.model_runner.enforce_eager
         graphs = engine.model_runner.cuda_graphs.decode_graphs
-        if not args.eager and set(graphs) != {1}:
+        if not eager and set(graphs) != {1}:
             raise RuntimeError("Expected the current main's single B1 decode CUDA Graph")
         print(
-            f"Ready: B1 | decode={'eager' if args.eager else 'single CUDA Graph'} | "
+            f"Ready: B1 | decode={'eager' if eager else 'single CUDA Graph'} | "
             f"async={'on' if args.async_scheduling else 'off'} | "
-            f"prefill={'piecewise Graph' if args.prefill_cudagraph and not args.eager else 'eager'}",
+            f"prefill={'piecewise Graph' if args.prefill_cudagraph and not eager else 'eager'}",
             file=sys.stderr, flush=True,
         )
         initial = [] if args.system_prompt is None else [

@@ -17,7 +17,7 @@ from nano_qwen.layers.activation import SiluAndMul
 from nano_qwen.layers.attention import Attention
 from nano_qwen.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
 from nano_qwen.layers.gated_delta_net import GatedDeltaNet
-from nano_qwen.layers.layernorm import GemmaRMSNorm
+from nano_qwen.layers.layernorm import GemmaRMSNorm, Qwen3_5MoERMSNorm
 from nano_qwen.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -33,6 +33,15 @@ if TYPE_CHECKING:
     from transformers import Qwen3_5MoeTextConfig, Qwen3_5TextConfig
 
     TextConfig = Qwen3_5TextConfig | Qwen3_5MoeTextConfig
+
+
+def _rms_norm(config: TextConfig, width: int) -> GemmaRMSNorm:
+    norm = (
+        Qwen3_5MoERMSNorm
+        if getattr(config, "model_type", None) == "qwen3_5_moe_text"
+        else GemmaRMSNorm
+    )
+    return norm(width, eps=config.rms_norm_eps)
 
 
 def _rope_config(config: TextConfig) -> tuple[float, float, list[int]]:
@@ -112,8 +121,8 @@ class Qwen3_5Attention(nn.Module):
             bias=attention_bias,
             quant_config=quant_config, prefix=f"{prefix}.o_proj",
         )
-        self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.q_norm = _rms_norm(config, self.head_dim)
+        self.k_norm = _rms_norm(config, self.head_dim)
 
         rope_theta, partial_rotary_factor, mrope_section = _rope_config(config)
         self.rotary_emb = InterleavedMRoPE(
@@ -250,14 +259,8 @@ class Qwen3_5DecoderLayer(nn.Module):
             self.mlp = Qwen3_5MoEMLP(config)
         else:
             self.mlp = Qwen3_5MLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
-        self.input_layernorm = GemmaRMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
-        )
-        self.post_attention_layernorm = GemmaRMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
-        )
+        self.input_layernorm = _rms_norm(config, config.hidden_size)
+        self.post_attention_layernorm = _rms_norm(config, config.hidden_size)
 
     def _run_linear_attention(
         self,
@@ -401,7 +404,7 @@ class Qwen3_5Model(nn.Module):
             )
             for layer_idx in range(config.num_hidden_layers)
         )
-        self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = _rms_norm(config, config.hidden_size)
         self.has_linear_attention = any(
             layer.block_type == "linear_attention" for layer in self.layers
         )

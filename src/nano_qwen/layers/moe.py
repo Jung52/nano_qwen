@@ -1,4 +1,4 @@
-"""Eager mixture-of-experts feed-forward layer for Qwen3.5 text models."""
+"""Mixture-of-experts feed-forward layer for Qwen3.5 text models."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import torch.nn.functional as F
 from torch import nn
 
 from nano_qwen.layers.linear import MergedColumnParallelLinear, RowParallelLinear
+from nano_qwen.layers.moe_grouped import grouped_experts
+from nano_qwen.utils.context import get_context
 
 if TYPE_CHECKING:
     from transformers import Qwen3_5MoeTextConfig
@@ -22,6 +24,20 @@ class Qwen3_5RoutedExperts(nn.Module):
         self.down_proj = nn.Parameter(torch.empty(num_experts, hidden_size, intermediate_size))
 
     def forward(
+        self,
+        hidden_states: torch.Tensor,
+        expert_ids: torch.Tensor,
+        expert_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        if (not get_context().is_prefill and hidden_states.is_cuda
+                and hidden_states.dtype == torch.bfloat16 and hidden_states.numel()):
+            return grouped_experts(
+                hidden_states.contiguous(), expert_ids, expert_weights,
+                self.gate_up_proj, self.down_proj,
+            )
+        return self.forward_eager(hidden_states, expert_ids, expert_weights)
+
+    def forward_eager(
         self,
         hidden_states: torch.Tensor,
         expert_ids: torch.Tensor,

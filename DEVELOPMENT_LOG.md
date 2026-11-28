@@ -1,6 +1,6 @@
 # nano_qwen 开发日志
 
-记录截至 **2026-11-25，覆盖 main 通用推理路径与 `moe` 分支初版**。这是开发过程的复盘：为什么加入一个模块、实现后遇到了什么、哪些实验改变了原来的判断，以及目前还没有解决什么。README 保留项目介绍和入口，本文件保留过程。
+记录截至 **2026-11-28，覆盖 main 通用推理路径与 `moe` 分支的 MoE 分阶段适配**。这是开发过程的复盘：为什么加入一个模块、实现后遇到了什么、哪些实验改变了原来的判断，以及目前还没有解决什么。README 保留项目介绍和入口，本文件保留过程。
 
 ## 记录范围与读数口径
 
@@ -373,35 +373,38 @@ P 端把 KV/GDN 逐张量直接拷入 LMCache 0.5.6 L1 的共享 CPU tensor 池�
 
 通用模式新增 `async_scheduling`，构造时显式传入并检查，版本标记 `explicit-async-v2`。历史 queue-only 结果不与新协议合并。固定 batch 旧计时入口保留其默认关闭 lookahead 的口径，但暴露显式开关并记录实际配置。移除未引用的空壳包与 logger，将唯一剩余的 transfer_id 验证函数并入 SHM control protocol；既有状态校验和数值回归保留。
 
-## 15. 2026-11-25：Qwen3.5 MoE 参考输出与 BF16 eager MLP
+## 15. 2026-11-25：Qwen3.5 MoE 参考输出与基础 MLP 适配
 
-从 `main` 的 `2962aaf` 建立 `moe` 分支。先用同一份 checkpoint 生成 Transformers 参考输出，再单独对齐 MoE MLP。这样可以在接入整模 loader 前定位路由、专家计算与合并的数值差异。
+| 项目 | 内容 |
+| --- | --- |
+| 目标 | 建立固定的 Transformers 参考结果，并让 nano_qwen 的 decoder 能执行这份模型的 MoE MLP。 |
+| 已完成 | 固定 checkpoint revision，核对 32 个 routed experts、top-12、shared expert 和 HF 权重布局。新增 MoE MLP，接入 decoder 的二维 hidden-state 接口，沿用原有 GDN 与 full attention 选择逻辑。 |
+| 当前结果 | Transformers 参考 logits 已保存。第 0 层 MLP 的路由、权重及输出在 T=1/7/64 上与参考逐元素一致。 |
+| 风险与阻塞 | Routed experts 仍由 Python 循环分发，依赖动态索引，不适合 CUDA Graph；整模 checkpoint loader 尚未接通。 |
+| 下一步 | 按 HF checkpoint 键名接入 BF16 权重，用固定 token 验证整模 prefill 和 decode。 |
 
-### 15.1 固定 checkpoint 与 Transformers 参考输出
+配置和 decoder 在 [config.py](src/nano_qwen/config/config.py) 与 [qwen3_5.py](src/nano_qwen/models/qwen3_5.py)，MoE 前向在 [moe.py](src/nano_qwen/layers/moe.py)，参考输出由 [export_qwen35_moe_reference.py](benchmarks/export_qwen35_moe_reference.py) 生成。
 
-本地模型为 `bayliner1980/Qwen3.5-2B-MoE-A1.3B`，revision `0ab0f2c0b07497038ac8f5dd15d133574413da28`。校验配置、模型权重和 tokenizer 与该 revision 一致。权重文件共 2672 个 BF16 张量，文本主干有 18 层 GDN 和 6 层 full attention，embedding 与 LM head 共享权重。每层有 32 个 routed experts，单 expert 中间维度为 192，每 token 选 12 个。shared expert 的中间维度为 32。
+## 16. 2026-11-26：BF16 checkpoint 加载与整模输出对齐
 
-实际权重键带 `model.language_model.` 前缀，专家权重以 `mlp.experts.<id>.{gate_proj,up_proj,down_proj}.weight` 逐 expert 保存。GDN 的 `in_proj_qkv/z/b/a` 分开保存，tied head 只存 embedding。后续 loader 需要把每个 expert 的 gate 和 up 写入同一 `gate_up_proj[id]` 的两个切片，再把 down 写入 `down_proj[id]`。
+| 项目 | 内容 |
+| --- | --- |
+| 目标 | 让 LLM.generate() 加载真实 BF16 checkpoint，并对齐 Transformers 的 prefill 与逐步 decode。 |
+| 已完成 | Loader 按 expert ID 将分开的 gate/up/down 权重写入模型参数，检查缺失、重复、shape、dtype 和 tied embedding。按参考实现调整 MoE RMSNorm 的残差舍入；decoder 继续复用 GDN 与 full attention。CLI 改为读取 runner 实际的 eager 状态。 |
+| 当前结果 | 2672 个 checkpoint 张量与引擎参数核对一致。B1 对 Transformers 的固定 token argmax 为 18/18，两组 greedy 输出均匹配。 |
+| 风险与阻塞 | 一次性与 chunked prefill 的 GDN state 在部分长度上有可测漂移，mixed batch 与独立 B1 也未完全对齐。 |
+| 下一步 | Profile routed MLP，降低逐 expert Python 调度开销，再恢复 decode Graph 和 async lookahead。 |
 
-实测用 RTX 5070 Ti Laptop GPU、Transformers 5.17.0 和 PyTorch `2.9.0.dev20250822+cu128`。全注意力与专家使用 eager，GDN 使用 Transformers 的 PyTorch fallback。加载报告的缺失、额外与形状不匹配项均为 0，共享 embedding 经 storage 指针确认。中英文各一组，prompt 分别为 5 和 7 tokens。每组保存 prefill 尾行与喂入 8 个固定 token 后的逐步 decode logits，形状为 `[9, 248320]`，并记录 greedy 输出。回读检查 logits 全部有限，各行 argmax 与 JSON 一致。[参考输出脚本](benchmarks/export_qwen35_moe_reference.py)
+权重映射见 [loader.py](src/nano_qwen/utils/loader.py)，RMSNorm 与模型接线见 [layernorm.py](src/nano_qwen/layers/layernorm.py) 和 [qwen3_5.py](src/nano_qwen/models/qwen3_5.py)。
 
-本机产物位于 `D:/nano_qwen_pd_decode_batching/logs/qwen35-moe-reference/`，包含 `checkpoint_schema.json`、`reference.json` 和 `reference_logits.safetensors`。
+## 17. 2026-11-27：Grouped experts、CUDA Graph 与 async decode
 
-### 15.2 在 decoder 接入 BF16 eager MoE MLP
+| 项目 | 内容 |
+| --- | --- |
+| 目标 | 降低 decode 专家计算的调度开销，并验证 MoE 能否使用 decode Graph、piecewise prefill Graph 和 async lookahead。 |
+| 已完成 | 新增 Triton grouped BF16 GEMM，按 expert 成组计算 routed assignments。Grouped 路径用于 CUDA decode，prefill 保留原专家计算。decode Graph 捕获 B1/B2/B4；prefill Graph 按实际 token 数选择 shape；复用现有队列和 GPU token slot 做 async lookahead，每步重新计算 router/top-k。 |
+| 当前结果 | 第 0 层 MLP p50 从 B1 4.20 ms 降到 0.83 ms，B4 11.52 ms 降到 0.99 ms。Decode Graph 与 eager 对齐；相同分块布局下 prefill Graph 的 logits、KV 和 GDN state 逐元素一致。B1/B2/B4 的 async 输出与串行一致。WSL 回归为 215 passed、28 skipped。 |
+| 风险与阻塞 | 255-token prompt 一次性 prefill 与 64+64+64+63 分块在第 4 个 token 分歧，分别输出 74455 和 846，关闭 prefill Graph 后仍可复现。B4 有一行 argmax 不同，部分长度的 GDN state drift 超过诊断阈值。 |
+| 下一步 | 先定位长 prefill 与 GDN state 的数值差异，再继续 PD 组合验收。 |
 
-`Config` 识别 `qwen3_5_moe_text`，检查非量化 BF16、SiLU、top-k 范围和 expert width。decoder 继续按 `layer_types` 选择 GDN 或 full attention，并按 `model_type` 构造 dense 或 MoE MLP。二者沿用 `[T,H] → [T,H]` 的 `forward_output()` 接口，`T` 为此次 forward 的 token 行数。[配置](src/nano_qwen/config/config.py) · [decoder](src/nano_qwen/models/qwen3_5.py)
-
-MoE 为每行计算 32 个 router logits，执行 FP32 softmax 和 top-12 归一化，再将选中权重转回 BF16。eager 路径按 expert 收集选中行，执行 `down(SiLU(gate(x)) * up(x))`，乘路由权重后用 `index_add_` 累回原 token 行。内部参数布局为 `gate_up_proj [32,384,2048]` 和 `down_proj [32,2048,192]`。每行额外计算 shared expert，乘独立 sigmoid gate 后加到 routed 输出。专家分发使用 `nonzero`、`.tolist()` 和 Python 循环，MoE 配置自动启用 eager。[MoE 实现](src/nano_qwen/layers/moe.py)
-
-### 15.3 单层对齐与回归
-
-在 WSL 的 `triton` 环境，用同一 GPU 和真实 checkpoint 第 0 层权重进行验证。脚本手动装载该层，给 nano_qwen 和 Transformers 输入相同的 BF16 hidden states。
-
-| 验证项 | 结果 |
-|---|---|
-| 单层 MLP，`T=1/7/64` | top-k expert ID、路由权重、完整 MLP 输出逐元素一致 |
-| 同一输入仅执行 routed experts | 三个 `T` 的输出逐元素一致 |
-| `test_quantization.py`、`test_runtime_safety.py` | 40 passed |
-| `test_main_lifecycle.py` | 6 passed |
-
-整模 MoE loader 待接入。当前 `ModelRunner` 在初始化 NCCL 前对 MoE checkpoint 报出明确错误。下一步完成逐 expert 权重映射和完整性校验，再用第 15.1 节的固定 token 对齐整模 prefill 和 decode logits。MoE 的 CUDA Graph、PD 组合和端到端性能待验证。[启动检查](src/nano_qwen/engine/model_runner.py)
+实现见 [moe_grouped.py](src/nano_qwen/layers/moe_grouped.py)、[cuda_graph.py](src/nano_qwen/engine/cuda_graph.py) 和 [validate_qwen35_moe_engine.py](benchmarks/validate_qwen35_moe_engine.py)。单层 MLP 计时不代表整模吞吐。模型和原始 GPU 报告位于本机 D:/nano_qwen_pd_decode_batching/logs/qwen35-moe-step5/，模型权重由 Git 忽略。

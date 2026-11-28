@@ -58,6 +58,7 @@ class Engine:
     instances = []
     interrupt = False
     disable_copy = False
+    force_eager = False
 
     def __init__(self, model, **kwargs):
         self.instances.append(self)
@@ -66,8 +67,9 @@ class Engine:
         self.config = SimpleNamespace(max_model_len=kwargs["max_model_len"],
                                       async_scheduling=kwargs["async_scheduling"])
         self.max_concurrent_batches = 2
-        self.model_runner = SimpleNamespace(async_output=not self.disable_copy,
-                                            cuda_graphs=Graphs(kwargs["enforce_eager"]))
+        eager = kwargs["enforce_eager"] or self.force_eager
+        self.model_runner = SimpleNamespace(async_output=not self.disable_copy, enforce_eager=eager,
+                                            cuda_graphs=Graphs(eager))
         self.tokenizer = Tokenizer()
         self.requests = []
         self.closed_streams = 0
@@ -81,7 +83,7 @@ class Engine:
             for index, token in enumerate((10, 11, 12)[:params.max_tokens]):
                 if index:
                     graphs = self.model_runner.cuda_graphs
-                    if self.kwargs["enforce_eager"]:
+                    if self.model_runner.enforce_eager:
                         graphs.eager += 1
                     else:
                         graphs.graph += 1
@@ -99,7 +101,7 @@ class ChatTests(unittest.TestCase):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         Engine.instances.clear()
-        Engine.interrupt = Engine.disable_copy = False
+        Engine.interrupt = Engine.disable_copy = Engine.force_eager = False
         Streamer.calls.clear()
         self.torch = SimpleNamespace(
             cuda=SimpleNamespace(is_available=lambda: True), int64="int64",
@@ -159,6 +161,15 @@ class ChatTests(unittest.TestCase):
         self.assertTrue(e.kwargs["enforce_eager"])
         self.assertTrue(e.tokenizer.calls[0][1]["enable_thinking"])
         self.assertIn("async=off", log)
+
+    def test_runtime_eager_mode_does_not_require_eager_flag(self):
+        Engine.force_eager = True
+        code, output, log = self.run_cli(["--prompt", "hello", "--no-async-scheduling"])
+        self.assertEqual(code, 0)
+        self.assertEqual(output, "你好！\n")
+        self.assertFalse(Engine.instances[-1].kwargs["enforce_eager"])
+        self.assertIn("Ready: B1 | decode=eager | async=off | prefill=eager", log)
+        self.assertIn("decode graph/eager=0/2", log)
 
     def test_raw_one_shot_skips_chat_template(self):
         code, _, _ = self.run_cli(["--raw", "--prompt", "raw input", "--no-stats"])

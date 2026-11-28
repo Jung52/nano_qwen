@@ -80,11 +80,9 @@ class ModelRunner:
         port: int | None = None,
         use_prefill_cudagraph: bool = True,
     ):
-        hf_config = config.hf_config
-        if getattr(hf_config, "model_type", None) == "qwen3_5_moe_text":
-            raise NotImplementedError("BF16 MoE checkpoint loading is not implemented")
         self._closed = False
         self.config = config
+        hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager
         self.world_size = config.tensor_parallel_size
@@ -102,11 +100,19 @@ class ModelRunner:
             rank=rank,
         )
         torch.cuda.set_device(rank)
+        default_device = torch.get_default_device()
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.dtype)
         torch.set_default_device("cuda")
-        self.model = Qwen3_5ForCausalLM(hf_config, quant_config=config.quant_config)
-        load_model(self.model, config.model)
+        try:
+            self.model = Qwen3_5ForCausalLM(hf_config, quant_config=config.quant_config)
+            load_model(self.model, config.model)
+        except BaseException:
+            self.model = None
+            torch.set_default_device(default_device)
+            torch.set_default_dtype(default_dtype)
+            dist.destroy_process_group()
+            raise
         for module in self.model.modules():
             if isinstance(module, LinearBase):
                 module.quant_method.process_weights_after_loading(module)

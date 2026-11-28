@@ -51,6 +51,10 @@ class CudaGraphManager:
     def config(self):
         return self.runner.config
 
+    @property
+    def is_moe(self) -> bool:
+        return getattr(self.config.hf_config, "model_type", None) == "qwen3_5_moe_text"
+
     def capture(self) -> None:
         self._capture_decode()
         if self.runner.use_prefill_cudagraph:
@@ -64,7 +68,7 @@ class CudaGraphManager:
     def _capture_decode_bank(self) -> None:
         config = self.config
         hf_config = config.hf_config
-        max_bs = min(config.max_num_seqs, 512)
+        max_bs = min(config.max_num_seqs, 4 if self.is_moe else 512)
         max_num_blocks = (
             config.max_model_len + self.runner.block_size - 1
         ) // self.runner.block_size
@@ -134,9 +138,12 @@ class CudaGraphManager:
     ) -> None:
         max_prefill_tokens = self.config.max_num_batched_tokens
         if buckets is None:
+            sizes = (64, 128, 256, 512) if self.is_moe else (128, 256, 512, 768, 1024, 1536, 2048)
+            if self.is_moe:
+                max_prefill_tokens = min(max_prefill_tokens, sizes[-1])
             buckets = [
                 size
-                for size in (128, 256, 512, 768, 1024, 1536, 2048)
+                for size in sizes
                 if size <= max_prefill_tokens
             ]
             if max_prefill_tokens > 0 and max_prefill_tokens not in buckets:
@@ -179,10 +186,14 @@ class CudaGraphManager:
             raise RuntimeError("prefill graph requires Context.prefill_slices")
 
         num_tokens = input_ids.size(0)
-        graph_size = next(
-            (size for size in self.prefill_graph_sizes if size >= num_tokens),
-            None,
-        )
+        # Padding changes BF16 projection rounding and can change MoE top-k.
+        if self.is_moe:
+            graph_size = num_tokens
+        else:
+            graph_size = next(
+                (size for size in self.prefill_graph_sizes if size >= num_tokens),
+                None,
+            )
         used_graph = graph_size is not None and graph_size in self.prefill_graphs
         self.record_dispatch("prefill", len(context.prefill_slices), used_graph, num_tokens)
         if not used_graph:
@@ -214,6 +225,9 @@ class CudaGraphManager:
             )
 
             post = entry["post"]
+            if post is None:
+                hidden, residual = layer.forward_output(attention_output, layer_residual)
+                continue
             post["hidden_in"].zero_()
             post["hidden_in"][:num_tokens].copy_(attention_output)
             post["residual_in"].copy_(layer_residual)
@@ -306,11 +320,8 @@ class CudaGraphManager:
                 if kind == "pre"
                 else layer.forward_output
             )
-            if self.config.quant_config is not None:
-                # Inductor fuses BF16 normalization/casts before FP8 input
-                # quantization, changing rounding and subsequent FP8 bins.
-                # Capture the original operations so eager and graph use the
-                # same numerical path; CUDA Graph replay remains enabled.
+            if self.is_moe or self.config.quant_config is not None:
+                # Preserve the explicit BF16 rounding in MoE and before FP8 quantization.
                 self._piecewise_compiled[cache_key] = fn
             else:
                 self._piecewise_compiled[cache_key] = torch.compile(
@@ -397,6 +408,20 @@ class CudaGraphManager:
             )
         torch.cuda.synchronize()
 
+        entry = {
+            "pre": {
+                "graph": pre_graph,
+                "hidden_in": pre_hidden,
+                "residual_in": pre_residual,
+                "outputs": static_pre_outputs,
+                "residual_out": static_pre_residual,
+            },
+            "post": None,
+        }
+        # Preserve the eager expert GEMMs for prefill.
+        if self.is_moe:
+            return entry
+
         post_hidden = buffers["post_hidden"][:graph_size]
         post_residual = buffers["post_residual"][:graph_size]
         post_fn = self._piecewise_callable(layer, "post")
@@ -413,19 +438,11 @@ class CudaGraphManager:
             )
         torch.cuda.synchronize()
 
-        return {
-            "pre": {
-                "graph": pre_graph,
-                "hidden_in": pre_hidden,
-                "residual_in": pre_residual,
-                "outputs": static_pre_outputs,
-                "residual_out": static_pre_residual,
-            },
-            "post": {
-                "graph": post_graph,
-                "hidden_in": post_hidden,
-                "residual_in": post_residual,
-                "hidden_out": static_post_hidden,
-                "residual_out": static_post_residual,
-            },
+        entry["post"] = {
+            "graph": post_graph,
+            "hidden_in": post_hidden,
+            "residual_in": post_residual,
+            "hidden_out": static_post_hidden,
+            "residual_out": static_post_residual,
         }
+        return entry

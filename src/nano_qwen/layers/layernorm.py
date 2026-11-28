@@ -111,6 +111,22 @@ class GemmaRMSNorm(nn.Module):
             return self.add_rms_forward(x, residual)
 
 
+class Qwen3_5MoERMSNorm(GemmaRMSNorm):
+    """Qwen3.5 MoE rounds the residual sum before normalization and scales in FP32."""
+
+    def rms_forward(self, x: torch.Tensor) -> torch.Tensor:
+        value = x.float()
+        variance = value.square().mean(dim=-1, keepdim=True)
+        normalized = value * torch.rsqrt(variance + self.eps)
+        return (normalized * (1.0 + self.weight.float())).to(x.dtype)
+
+    def add_rms_forward(
+        self, x: torch.Tensor, residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        residual = x + residual
+        return self.rms_forward(residual), residual
+
+
 class RMSNormGated(nn.Module):
     """Gated RMSNorm used at the GDN (linear attention) output.
 

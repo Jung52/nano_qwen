@@ -87,6 +87,4 @@ class Config:
             raise ValueError("Qwen3.5 MoE requires 1 <= num_experts_per_tok <= num_experts")
         if config.moe_intermediate_size <= 0 or config.shared_expert_intermediate_size < 0:
             raise ValueError("MoE expert width must be positive and shared expert width nonnegative")
-        # Dispatch uses data-dependent tensor sizes and cannot be captured by CUDA Graphs.
-        self.enforce_eager = True
 
